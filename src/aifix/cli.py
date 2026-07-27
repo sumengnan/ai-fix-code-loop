@@ -14,8 +14,9 @@ from .nodes.baseline import baseline_node
 from .nodes.detect import detect_node
 from .nodes.fix import fix_node
 from .nodes.preflight import preflight_node
-from .nodes.report import render_report
+from .nodes.report import render_report, report_node
 from .nodes.verify import verify_node
+from .trace import RunTrace
 
 
 async def run_once(repo: Path, config: AifixConfig, run_id: str,
@@ -32,43 +33,56 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
         state["report_md"] = render_report(state)
         return state
 
-    with Worktree(repo, run_id=run_id) as wt:
-        state["worktree_path"] = str(wt.path)
-        state["branch"] = wt.branch
+    artifact_dir = Path(repo) / ".aifix" / "runs" / run_id
+    state["artifact_dir"] = str(artifact_dir)
+    trace = RunTrace(artifact_dir, run_id=run_id)
+    state["_trace"] = trace
 
-        # 全量测试很贵，整个 run 只在这里跑一次；后续每轮 verify 各跑一次
-        state.update(await baseline_node(state))
+    try:
+        with Worktree(repo, run_id=run_id) as wt, trace.run_span():
+            state["worktree_path"] = str(wt.path)
+            state["branch"] = wt.branch
 
-        budget = RunBudget(total_tokens=config.budget_tokens,
-                           total_usd=config.budget_usd,
-                           total_seconds=config.budget_wall_seconds)
-        budget.start()
+            # 全量测试很贵，整个 run 只在这里跑一次；后续每轮 verify 各跑一次
+            state.update(await baseline_node(state))
+            trace.fact("baseline_failures", len(state["baseline_ids"]))
 
-        while True:
-            if state["current"] is None:
-                if state["abort"] or not state["queue"]:
+            budget = RunBudget(total_tokens=config.budget_tokens,
+                               total_usd=config.budget_usd,
+                               total_seconds=config.budget_wall_seconds)
+            budget.start()
+
+            while True:
+                if state["current"] is None:
+                    if state["abort"] or not state["queue"]:
+                        break
+                    state["current"] = state["queue"].pop(0)
+                    state["attempt"] = 1
+                spent = budget.exhausted()
+                if spent:
+                    state["abort"] = spent
+                    trace.fact("abort", spent)
                     break
-                state["current"] = state["queue"].pop(0)
-                state["attempt"] = 1
-            spent = budget.exhausted()
-            if spent:
-                state["abort"] = spent
-                break
-            # 剩余 failure 数 = 队列里的 + 手上这个
-            state["failure_token_budget"] = budget.for_failure(
-                len(state["queue"]) + 1)
-            before = state["spent_tokens"], state["spent_usd"]
-            state.update(await detect_node(state, client=detector_client))
-            state.update(await fix_node(state, client=fixer_client))
-            budget.charge(state["spent_tokens"] - before[0],
-                          state["spent_usd"] - before[1])
-            state.update(await verify_node(state))
-            tripped = check_circuit_breaker(state)
-            if tripped:
-                state["abort"] = tripped
-                break
+                # 剩余 failure 数 = 队列里的 + 手上这个
+                state["failure_token_budget"] = budget.for_failure(
+                    len(state["queue"]) + 1)
+                before = state["spent_tokens"], state["spent_usd"]
+                with trace.failure_span(state["current"]), \
+                        trace.attempt_span(state["attempt"]):
+                    state.update(await detect_node(state, client=detector_client))
+                    state.update(await fix_node(state, client=fixer_client))
+                    budget.charge(state["spent_tokens"] - before[0],
+                                  state["spent_usd"] - before[1])
+                    state.update(await verify_node(state))
+                tripped = check_circuit_breaker(state)
+                if tripped:
+                    state["abort"] = tripped
+                    trace.fact("abort", tripped)
+                    break
 
-    state["report_md"] = render_report(state)
+        state.update(report_node(state))
+    finally:
+        trace.close()
     return state
 
 

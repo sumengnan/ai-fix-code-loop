@@ -18,6 +18,7 @@ class AifixState(TypedDict, total=False):
     adapter_name: str
     worktree_path: str
     branch: str
+    artifact_dir: str
 
     baseline_ids: list[str]
     queue: list[str]
@@ -53,7 +54,7 @@ class AifixState(TypedDict, total=False):
 def new_state(repo: Path, config: AifixConfig, run_id: str) -> AifixState:
     return AifixState(
         run_id=run_id, repo=str(repo), config=config,
-        adapter_name="", worktree_path="", branch="",
+        adapter_name="", worktree_path="", branch="", artifact_dir="",
         baseline_ids=[], queue=[], current=None, attempt=0,
         diagnosis=None, verdict=None,
         touched=[], guard_hits=[], diff_lines=0, abort_reason=None,

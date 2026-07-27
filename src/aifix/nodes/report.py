@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 _VERDICT_CN = {"better": "已修复", "same": "未改善", "worse": "引入回归"}
@@ -38,4 +39,11 @@ def render_report(state: dict[str, Any]) -> str:
 
 
 def report_node(state: dict[str, Any]) -> dict[str, Any]:
-    return {"report_md": render_report(state)}
+    """渲染报告；有产物目录就一并落盘，和 facts / events 放在一起。"""
+    md = render_report(state)
+    out = state.get("artifact_dir")
+    if out:
+        p = Path(out)
+        p.mkdir(parents=True, exist_ok=True)
+        (p / "report.md").write_text(md, encoding="utf-8")
+    return {"report_md": md}
