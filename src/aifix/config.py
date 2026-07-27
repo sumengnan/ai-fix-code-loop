@@ -58,4 +58,8 @@ class AifixConfig(BaseSettings):
     loop_detect_window: int = 3
     tool_result_max_chars: int = 8000
 
+    # 断点续跑：跑到一半崩掉能从上一个节点边界继续。默认关 ——
+    # 它会在产物目录下留一个 sqlite 文件，按需开启。
+    enable_checkpoint: bool = False
+
     allow_test_edits: bool = False

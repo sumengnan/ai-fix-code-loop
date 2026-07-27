@@ -110,6 +110,24 @@ def route_after_verify(state: AifixState) -> str:
     return "detect" if state["queue"] else "report"
 
 
+def checkpointer_for(config: AifixConfig, artifact_dir: Path):
+    """按配置建 LangGraph 的 SqliteSaver；未开启返回 None。
+
+    SqliteSaver 在独立包 langgraph-checkpoint-sqlite 里，
+    langgraph 本体只依赖抽象基座 langgraph-checkpoint。
+    """
+    if not config.enable_checkpoint:
+        return None
+    import sqlite3
+
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    d = Path(artifact_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(d / "checkpoint.sqlite"), check_same_thread=False)
+    return SqliteSaver(conn)
+
+
 def build_graph(checkpointer: Any = None):
     """装配 LangGraph。节点是 trace 的单位，也是 checkpoint 的边界。"""
     from langgraph.graph import END, StateGraph
