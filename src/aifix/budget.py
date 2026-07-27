@@ -9,6 +9,11 @@ import time
 from typing import Callable
 
 
+def fmt_usd(v: float) -> str:
+    """小额不四舍五入成 $0.00 —— `--budget 0.001` 显示成上限 $0.00 像个 bug。"""
+    return f"${v:.2f}" if abs(v) >= 0.01 else f"${v:g}"
+
+
 class RunBudget:
     FLOOR_TOKENS = 10_000        # 再紧也要给一次有意义尝试的余地
 
@@ -46,7 +51,8 @@ class RunBudget:
         if self.spent_tokens >= self._total_tokens:
             return f"token 预算耗尽：{self.spent_tokens} / {self._total_tokens}"
         if self.spent_usd >= self._total_usd:
-            return f"美元预算耗尽：${self.spent_usd:.2f} / ${self._total_usd:.2f}"
+            return (f"美元预算耗尽：{fmt_usd(self.spent_usd)}"
+                    f" / {fmt_usd(self._total_usd)}")
         # 未 start 就不计时：单测直接构造 RunBudget 不该误触发时间中止
         if self._start is not None:
             elapsed = self._clock() - self._start

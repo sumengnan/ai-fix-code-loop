@@ -56,3 +56,26 @@ def test_render_report_shows_abort():
         "results": [], "abort": "工作区不干净",
     })
     assert "工作区不干净" in md
+    assert "修复" not in md, "preflight 阶段中止时没有任何成果可报"
+
+
+def test_render_report_keeps_delivered_work_when_aborted_midrun():
+    """中止不该吞掉已交付的成果。
+
+    真实运行中预算耗尽时，已经修好并提交到交付分支的那个用例
+    在报告里完全消失了 —— 用户被告知「钱花完了」，却不知道
+    分支上已经躺着一个可合并的修复。
+    """
+    md = render_report({
+        "run_id": "r1", "branch": "aifix/r1", "adapter_name": "pytest",
+        "baseline_ids": ["a", "b"], "spent_usd": 0.06, "spent_tokens": 19678,
+        "abort": "美元预算耗尽：$0.06 / $0.001",
+        "results": [
+            {"test_id": "a", "verdict": "better", "attempts": 1,
+             "abort_reason": None},
+        ],
+    })
+    assert "美元预算耗尽" in md
+    assert "1 / 2" in md, "已修好的那个必须出现在报告里"
+    assert "`a`" in md
+    assert "git merge aifix/r1" in md, "分支上有成果就要给出合并命令"

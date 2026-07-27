@@ -62,3 +62,12 @@ def test_spent_accessors():
     b.charge(tokens=800, usd=0.03)
     assert b.spent_tokens == 2_000
     assert abs(b.spent_usd - 0.08) < 1e-9
+
+
+def test_tiny_budget_is_not_rounded_to_zero_in_message():
+    """--budget 0.001 时上限不该显示成 $0.00 —— 那读起来像 bug。"""
+    b = RunBudget(total_tokens=100_000, total_usd=0.001, total_seconds=600)
+    b.charge(tokens=10, usd=0.0612)
+    msg = b.exhausted()
+    assert "0.001" in msg, msg
+    assert "/ $0.00 " not in msg and not msg.endswith("/ $0.00")
