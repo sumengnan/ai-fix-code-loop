@@ -55,7 +55,9 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
     raw = state.get("diagnosis")
     diagnosis = Diagnosis.model_validate(raw) if raw else None
 
-    remaining = max(cfg.budget_tokens - state["spent_tokens"], 10_000)
+    # 优先用本轮分配到的额度；未分配（如单测直接调用）时退回全局剩余
+    remaining = state.get("failure_token_budget") or max(
+        cfg.budget_tokens - state["spent_tokens"], 10_000)
     touched: set[str] = set()
     guard_hits: list[str] = []
     abort_reason: str | None = None
