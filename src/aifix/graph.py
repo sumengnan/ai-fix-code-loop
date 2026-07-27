@@ -46,6 +46,8 @@ class AifixState(TypedDict, total=False):
     # baseline 解析出的 Failure 对象，按 test_id 索引。
     # 下划线前缀表示它不参与路由判断，只作为 detect / verify 的数据源。
     _failures: dict[str, Any]
+    # 当前 run 的 RunTrace。同样不参与路由，只是各节点写观测数据的出口。
+    _trace: Any
 
 
 def new_state(repo: Path, config: AifixConfig, run_id: str) -> AifixState:
@@ -60,6 +62,20 @@ def new_state(repo: Path, config: AifixConfig, run_id: str) -> AifixState:
         spent_usd=0.0, spent_tokens=0,
         results=[], abort=None,
     )
+
+
+class _NullTrace:
+    """trace 缺席时的空实现 —— 单测直接调节点时不必构造 trace。"""
+
+    def fact(self, *a: Any, **k: Any) -> None: ...
+
+    def record_events(self, *a: Any, **k: Any) -> None: ...
+
+
+def trace_of(state: AifixState):
+    """取当前 run 的 trace；未接线时返回一个吞掉所有调用的空实现。"""
+    t = state.get("_trace")
+    return t if t is not None else _NullTrace()
 
 
 def check_circuit_breaker(state: AifixState) -> str | None:

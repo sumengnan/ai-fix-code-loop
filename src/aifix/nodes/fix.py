@@ -12,7 +12,7 @@ from harness.types import Message, Role
 from ..agents.detector import Diagnosis
 from ..agents.fixer import SYSTEM_PROMPT, build_initial_messages, build_registry
 from ..agents.runner import consume
-from ..graph import AifixState
+from ..graph import AifixState, trace_of
 from .baseline import adapter_for
 
 _EMPTY_FEEDBACK = (
@@ -65,6 +65,7 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
     cost = 0.0
     lines = 0
 
+    trace = trace_of(state)
     sandbox = LocalSandbox(workspace=state["worktree_path"])
     await sandbox.start()
     try:
@@ -88,6 +89,9 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
             outcome = await consume(loop.run(messages=list(messages)))
             tokens += outcome.tokens
             cost += outcome.cost_usd
+            # 每一轮都记：守卫重试时，模型「一字未改」的那一轮恰恰
+            # 是最该复盘的，只记最后一轮等于把它丢了。
+            trace.record_events(outcome.events)
             lines = await _diff_lines(sandbox)
 
             if lines == 0:
@@ -115,6 +119,11 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
             ]
     finally:
         await sandbox.close()
+
+    trace.fact("diff_lines", lines)
+    trace.fact("touched", sorted(touched))
+    for hit in guard_hits:
+        trace.fact("guard_hit", hit)
 
     return {
         "spent_tokens": state["spent_tokens"] + tokens,

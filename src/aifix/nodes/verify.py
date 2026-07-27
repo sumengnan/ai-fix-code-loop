@@ -5,7 +5,7 @@ from typing import Any
 
 from ..adapters.base import FailureSet, Verdict
 from ..delivery import Worktree
-from ..graph import AifixState
+from ..graph import AifixState, trace_of
 from ..verify import compare
 from .baseline import adapter_for, run_full_suite, run_scoped
 
@@ -59,6 +59,15 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
     effective = FailureSet({k: v for k, v in current.failures.items()
                             if k not in flaky})
     verdict = compare(baseline, effective, target)
+
+    trace = trace_of(state)
+    trace.fact("verdict", verdict.value)
+    if flaky:
+        trace.fact("flaky_filtered", sorted(flaky))
+    if confirmed:
+        trace.fact("confirmed_regressions", sorted(confirmed))
+    if verdict is not Verdict.BETTER:
+        trace.fact("rollback", True)
 
     results = list(state["results"])
     common = {"flaky_filtered": sorted(flaky),

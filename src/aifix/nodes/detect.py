@@ -11,7 +11,7 @@ from harness.tools.base import ToolRegistry
 
 from ..agents.detector import SYSTEM_PROMPT, build_prompt, parse_diagnosis
 from ..agents.runner import consume
-from ..graph import AifixState
+from ..graph import AifixState, trace_of
 from .baseline import adapter_for
 
 
@@ -35,6 +35,17 @@ async def detect_node(state: AifixState, client: Any = None) -> dict[str, Any]:
         outcome = await consume(loop.run(build_prompt(failure, candidates)))
 
     diagnosis = parse_diagnosis(outcome.text) if outcome.ok else None
+    trace = trace_of(state)
+    trace.record_events(outcome.events)
+    if diagnosis is not None:
+        # 模型点名的文件是否在 locate_source 的候选里 —— 评测直接取这条，
+        # 不必为「定位准确率」单独埋点。
+        hit = any(c.path == diagnosis.suspect_file for c in candidates)
+        trace.fact("locate_hit", hit)
+        trace.fact("suspect_file", diagnosis.suspect_file)
+    else:
+        trace.fact("locate_hit", False)
+        trace.fact("diagnosis_parse_failed", True)
     return {
         "diagnosis": diagnosis.model_dump() if diagnosis else None,
         "spent_tokens": state["spent_tokens"] + outcome.tokens,
