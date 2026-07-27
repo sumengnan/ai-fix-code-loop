@@ -25,10 +25,13 @@ class ApplyPatchTool(Tool):
         diff: str = Field(description="标准 unified diff，须含 --- / +++ 文件头")
 
     def __init__(self, sandbox: Sandbox, test_dirs: list[str],
-                 timeout: float = 60.0) -> None:
+                 timeout: float = 60.0, touched: set[str] | None = None) -> None:
         self._sandbox = sandbox
         self._test_dirs = [d.strip("/") for d in test_dirs]
         self._timeout = timeout
+        # 本次 run 中被成功应用的补丁触及的路径。交付时只提交这些文件，
+        # 避免 git add -A 把测试产物、缓存等未跟踪垃圾扫进分支。
+        self._touched = touched
 
     def _targets(self, diff: str) -> list[str]:
         seen: list[str] = []
@@ -54,8 +57,9 @@ class ApplyPatchTool(Tool):
             resolve_in_workspace(self._sandbox.workspace, p)
 
     async def run(self, params: "ApplyPatchTool.Params") -> str:
+        targets = self._targets(params.diff)
         try:
-            self._guard(self._targets(params.diff))
+            self._guard(targets)
         except SandboxError as e:
             raise ToolError(str(e))
 
@@ -75,6 +79,9 @@ class ApplyPatchTool(Tool):
             if applied.exit_code != 0:
                 raise ToolError(
                     f"补丁应用失败：{applied.stderr.strip() or applied.stdout.strip()}")
+            # 只有真正写进去了才记账
+            if self._touched is not None:
+                self._touched.update(targets)
             stat = await self._sandbox.exec(
                 ["git", "diff", "--stat"], self._timeout)
             return "补丁已应用。当前改动：\n" + (stat.stdout.strip() or "（无）")
