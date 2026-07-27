@@ -178,7 +178,7 @@ if diff_line_count(changed.stdout) > config.max_diff_lines:
 
 ### 能力面是枚举出来的，不是排除出来的
 
-**不给 `run_shell`**。框架有现成的（带危险命令分类 + 人工审批），但本项目不注册。理由：修 bug 所需能力已被 4 个专用工具覆盖；给 shell 等于给无限权限面，然后指望黑名单去挡——而黑名单永远挡不全（挡住 `rm -rf`，挡不住 `python -c "shutil.rmtree(...)"`）。
+**不给 `run_shell`**。框架有现成的（带危险命令分类 + 人工审批），但本项目不注册。理由：修 bug 所需能力已被下列 5 个工具完整覆盖；给 shell 等于给无限权限面，然后指望黑名单去挡——而黑名单永远挡不全（挡住 `rm -rf`，挡不住 `python -c "shutil.rmtree(...)"`）。
 
 通用做法是"先给 bash 求广度，需管控时再提升为专用工具"。这里反向走：**任务窄、风险高（真实 repo），所以从一开始就白名单**。
 
@@ -188,7 +188,7 @@ if diff_line_count(changed.stdout) > config.max_diff_lines:
 
 | 层 | 机制 | 挡住什么 |
 |---|---|---|
-| 能力 | 只注册 4 个工具，无 shell / 网络 / 包管理 | 枚举之外的一切 |
+| 能力 | 只注册 5 个工具，无 shell / 网络 / 包管理 | 枚举之外的一切 |
 | 路径 | `resolve_in_workspace()` realpath 归一 | `../`、绝对路径、符号链接逃逸 |
 | 进程 | 所有 `exec` 的 cwd 固定为 worktree | 越出目录的相对操作 |
 | git | 独立 worktree + 独立分支 | 主工作区完全不可见 |
@@ -520,14 +520,19 @@ ai-fix-code-loop/
 ```toml
 dependencies = [
     "ai-harness-framework @ git+https://github.com/sumengnan/ai-harness-framework",
-    "langgraph>=0.2",
+    "langgraph>=1.2",
+    "langgraph-checkpoint-sqlite>=3.1",     # SqliteSaver 在独立包里，langgraph 本体不含
 ]
 
 [tool.uv.sources]
 ai-harness-framework = { path = "../ai-harness-framework", editable = true }
 ```
 
-框架只装核心（4 个依赖），不装 `[all]`——不需要 memory / browser / mcp / docker。`langgraph` 会带进 `langchain-core`（消息类型），属其实现细节，不使用其模型层。
+框架只装核心（4 个依赖），不装 `[all]`——不需要 memory / browser / mcp / docker。
+
+`langgraph` 本体只依赖 `langgraph-checkpoint`（抽象基座），**sqlite 后端是独立包**——§4 的断点续跑必须显式加上 `langgraph-checkpoint-sqlite`，否则 `SqliteSaver` 导不进来。
+
+`langgraph` 会带进 `langchain-core`（消息类型），属其实现细节，不使用其模型层。
 
 ### 配置
 
@@ -539,6 +544,7 @@ class AifixConfig(BaseSettings):
     fixer: HarnessConfig                   # 强模型
     budget_usd: float = 2.0
     budget_tokens: int = 500_000
+    budget_wall_seconds: float = 1800.0    # 与 §10 的三要素预算对齐
     max_attempts: int = 3
     max_diff_lines: int = 300
     consecutive_failure_limit: int = 3
@@ -595,7 +601,21 @@ async def run(self, user_message: str | None = None, *,
 
 ### 第一阶段（本规格的实现范围）
 
-测试失败驱动 · pytest + Maven 双适配器 · Detector/Fixer · 4 个工具 · 三态判定 + flaky 过滤 · worktree 交付 · 三层 trace + 回放 · git history 挖掘的评测集 · 全部十三条安全闸。
+内容量超出单份实现计划的覆盖范围，拆为三个里程碑，**每个里程碑对应一份独立的实现计划**，且各自都是可用的产物：
+
+**M1 — 端到端最小闭环**
+`preflight → baseline → detect → fix → verify → report` 全链路打通；只做 `PytestAdapter`；5 个工具；三态判定；worktree 交付；框架侧两处改动（§12）。
+*验收*：在一个真实的 pytest 项目上，红色测试进去、绿色分支出来，主工作区未被触碰。
+
+**M2 — 靠谱**
+补齐十三条安全闸中属于 app 的六条（空 diff / 巨型 diff / 改测试文件 / 回归回滚 / flaky 过滤 / 连续失败熔断）；三层预算动态分配；三层嵌套 trace + `events.jsonl` + `report.md`。
+*验收*：M1 的闭环在异常输入下不崩、不越界、不烧穿预算，且每一步可从 trace 复盘。
+
+**M3 — 可度量**
+`MavenAdapter`（验证适配层抽象）；`aifix mine` 从 git history 挖任务集；`aifix eval` 并行跑 + 双档打分；`aifix replay`。
+*验收*：跑出第一张跨模型对比表（定位准确率 / 修复成功率 / 平均成本 / 越界尝试）。
+
+顺序不可调换：M2 依赖 M1 的闭环存在，M3 的评测依赖 M2 的判定与 trace 已稳定。
 
 ### 第二阶段（不在本规格内）
 
