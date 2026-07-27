@@ -27,6 +27,11 @@ class AifixState(TypedDict, total=False):
     diagnosis: dict[str, Any] | None
     verdict: str | None
 
+    touched: list[str]
+    guard_hits: list[str]
+    diff_lines: int
+    abort_reason: str | None
+
     spent_usd: float
     spent_tokens: int
 
@@ -45,6 +50,7 @@ def new_state(repo: Path, config: AifixConfig, run_id: str) -> AifixState:
         adapter_name="", worktree_path="", branch="",
         baseline_ids=[], queue=[], current=None, attempt=0,
         diagnosis=None, verdict=None,
+        touched=[], guard_hits=[], diff_lines=0, abort_reason=None,
         spent_usd=0.0, spent_tokens=0,
         results=[], abort=None,
     )

@@ -34,7 +34,7 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
 
     results = list(state["results"])
     if verdict is Verdict.BETTER:
-        wt.commit(f"fix: {target}")
+        wt.commit(f"fix: {target}", paths=state.get("touched") or [])
         results.append({"test_id": target, "verdict": verdict.value,
                         "attempts": state["attempt"], "abort_reason": None})
         return {"verdict": verdict.value, "current": None,

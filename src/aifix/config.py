@@ -45,6 +45,11 @@ class AifixConfig(BaseSettings):
     budget_wall_seconds: float = 1800.0
 
     max_attempts: int = 3
+    # 单次修复允许的改动行数上限（+/- 行合计）。超过即判为整文件重写：
+    # 模型放弃理解、直接重写，那种补丁即使测试转绿也不该合。
+    max_diff_lines: int = 300
+    # 守卫触发后额外给模型的重试次数（不计入 max_attempts）
+    fix_guard_retries: int = 2
     fixer_max_steps: int = 25
     detector_max_tokens: int = 20_000
     loop_detect_window: int = 3
