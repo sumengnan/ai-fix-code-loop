@@ -9,3 +9,4 @@ build/
 .aifix/
 .DS_Store
 .claude/
+.idea/
