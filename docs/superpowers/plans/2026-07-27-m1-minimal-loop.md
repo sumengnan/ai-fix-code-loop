@@ -2023,6 +2023,13 @@ def test_ensure_clean_raises_on_dirty_repo(buggy_repo):
         ensure_clean(buggy_repo)
 
 
+def test_ensure_clean_ignores_aifix_dir(buggy_repo):
+    """.aifix/ 是我们自己的产物目录，不能让它把第二次运行卡住。"""
+    (buggy_repo / ".aifix" / "runs" / "old").mkdir(parents=True)
+    (buggy_repo / ".aifix" / "runs" / "old" / "x.txt").write_text("x", encoding="utf-8")
+    ensure_clean(buggy_repo)          # 不抛即为通过
+
+
 def test_worktree_created_on_new_branch(buggy_repo):
     with Worktree(buggy_repo, run_id="abc123") as wt:
         assert wt.path.is_dir()
@@ -2087,13 +2094,19 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def ensure_clean(repo: Path) -> None:
-    """主工作区必须干净——否则无法区分哪些改动是 agent 造成的。"""
+    """主工作区必须干净——否则无法区分哪些改动是 agent 造成的。
+
+    `.aifix/` 例外：worktree 和运行产物就落在那里，把它算进"不干净"
+    会让第二次运行直接中止。
+    """
     res = _git(repo, "status", "--porcelain")
     if res.returncode != 0:
         raise RuntimeError(f"不是 git 仓库或 git 不可用：{repo}")
-    if res.stdout.strip():
+    dirty = [ln for ln in res.stdout.splitlines()
+             if ln.strip() and not ln[3:].lstrip('"').startswith(".aifix/")]
+    if dirty:
         raise RuntimeError(
-            f"工作区不干净，请先提交或 stash：\n{res.stdout.strip()}")
+            "工作区不干净，请先提交或 stash：\n" + "\n".join(dirty))
 
 
 class Worktree:
