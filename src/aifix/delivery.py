@@ -11,16 +11,20 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def ensure_clean(repo: Path) -> None:
-    """主工作区必须干净——否则无法区分哪些改动是 agent 造成的。
+    """已跟踪文件不得有未提交的修改。
 
-    `.aifix/` 例外：worktree 和运行产物就落在那里，把它算进"不干净"
-    会让第二次运行直接中止。
+    只看**已跟踪**文件（`--untracked-files=no`）。worktree 是从 HEAD 创建的，
+    主工作区的未跟踪文件（`__pycache__`、`.venv`、编辑器临时文件、构建产物）
+    根本进不去 agent 的工作区——为它们中止，会让任何跑过一次测试、又没把
+    `__pycache__` 写进 .gitignore 的项目直接用不了这个工具。
+
+    已跟踪文件的修改则必须拦截：baseline 从 HEAD 算出，若工作区另有改动，
+    算出来的失败集合和用户眼前看到的对不上。
     """
-    res = _git(repo, "status", "--porcelain")
+    res = _git(repo, "status", "--porcelain", "--untracked-files=no")
     if res.returncode != 0:
         raise RuntimeError(f"不是 git 仓库或 git 不可用：{repo}")
-    dirty = [ln for ln in res.stdout.splitlines()
-             if ln.strip() and not ln[3:].lstrip('"').startswith(".aifix/")]
+    dirty = [ln for ln in res.stdout.splitlines() if ln.strip()]
     if dirty:
         raise RuntimeError(
             "工作区不干净，请先提交或 stash：\n" + "\n".join(dirty))
