@@ -4,46 +4,17 @@ requires-python = ">=3.11"
 
 [[package]]
 name = "ai-harness-framework"
-version = "0.0.1"
-source = { editable = "../ai-harness-framework" }
+version = "0.0.2"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "openai" },
     { name = "opentelemetry-api" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "ai-harness-framework", extras = ["telemetry", "tokenizer", "sandbox-docker", "http", "browser", "mcp", "skills", "orchestration", "memory"], marker = "extra == 'all'" },
-    { name = "docker", extras = ["ssh"], marker = "extra == 'sandbox-docker'", specifier = ">=7.0" },
-    { name = "httpx", marker = "extra == 'http'", specifier = ">=0.27" },
-    { name = "httpx", marker = "extra == 'memory'", specifier = ">=0.27" },
-    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.12.4,<2.0" },
-    { name = "openai", specifier = ">=1.40" },
-    { name = "opentelemetry-api", specifier = ">=1.25" },
-    { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'telemetry'", specifier = ">=1.25" },
-    { name = "opentelemetry-sdk", marker = "extra == 'telemetry'", specifier = ">=1.25" },
-    { name = "pydantic", specifier = ">=2.7" },
-    { name = "pydantic-settings", specifier = ">=2.3" },
-    { name = "pyyaml", marker = "extra == 'orchestration'", specifier = ">=6.0" },
-    { name = "pyyaml", marker = "extra == 'skills'", specifier = ">=6.0" },
-    { name = "semantic-text-splitter", marker = "extra == 'memory'", specifier = ">=0.32.0" },
-    { name = "sqlite-vec", marker = "extra == 'memory'", specifier = ">=0.1.6" },
-    { name = "tiktoken", marker = "extra == 'tokenizer'", specifier = ">=0.7" },
-    { name = "trafilatura", marker = "extra == 'browser'", specifier = ">=1.9" },
-    { name = "tree-sitter-go", marker = "extra == 'memory'", specifier = ">=0.25.0" },
-    { name = "tree-sitter-java", marker = "extra == 'memory'", specifier = ">=0.23.5" },
-    { name = "tree-sitter-javascript", marker = "extra == 'memory'", specifier = ">=0.25.0" },
-    { name = "tree-sitter-python", marker = "extra == 'memory'", specifier = ">=0.25.0" },
-    { name = "tree-sitter-typescript", marker = "extra == 'memory'", specifier = ">=0.23.2" },
-]
-provides-extras = ["telemetry", "tokenizer", "sandbox-docker", "http", "browser", "mcp", "skills", "orchestration", "memory", "all"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "pytest-asyncio", specifier = ">=0.23" },
+sdist = { url = "https://files.pythonhosted.org/packages/00/4b/393d22c61e55a608cd5a849ca7497cb865b21826000eb40d8e57e14fe38e/ai_harness_framework-0.0.2.tar.gz", hash = "sha256:f44547aeb9600f94f11e06874b12cf481bcd99c6d75c9d81004ca75d5b0ea5f3", size = 291259, upload-time = "2026-07-27T09:03:47.391Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3d/ef/67645d606362f4a3fec57c4b6807cb646955ef2e79e23b8f0fbf4544e77d/ai_harness_framework-0.0.2-py3-none-any.whl", hash = "sha256:82233646450c869fe817ea33014f3fbac3ae18f89e129d0a2ba2c37e33974bb9", size = 138231, upload-time = "2026-07-27T09:03:45.683Z" },
 ]
 
 [[package]]
@@ -64,7 +35,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ai-harness-framework", editable = "../ai-harness-framework" },
+    { name = "ai-harness-framework", specifier = ">=0.0.2" },
     { name = "langgraph", specifier = ">=1.2" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3.1" },
 ]

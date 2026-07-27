@@ -4,20 +4,15 @@ version = "0.1.0"
 description = "测试失败驱动的自我改进 agentic loop"
 requires-python = ">=3.11"
 dependencies = [
-    # 注意：PyPI 上的 0.0.1 **不含** aifix 依赖的两处能力
-    # （LocalSandbox 接管既有目录、AgentLoop.run 接收初始消息）。
-    # 目前只能靠下面 tool.uv.sources 的本地覆盖联调；框架发布带这两项的
-    # 版本之后，把这里的下限提上去并删掉本地覆盖，aifix 才能独立安装。
-    "ai-harness-framework>=0.0.1",
+    # 0.0.2 起提供 aifix 依赖的两处能力：LocalSandbox 接管既有目录、
+    # AgentLoop.run 接收初始消息。不要降到 0.0.1。
+    "ai-harness-framework>=0.0.2",
     "langgraph>=1.2",
     "langgraph-checkpoint-sqlite>=3.1",
 ]
 
 [project.scripts]
 aifix = "aifix.cli:main"
-
-[tool.uv.sources]
-ai-harness-framework = { path = "../ai-harness-framework", editable = true }
 
 [dependency-groups]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
