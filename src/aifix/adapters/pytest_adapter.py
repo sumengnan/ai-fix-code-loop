@@ -21,13 +21,17 @@ class PytestAdapter:
             return True
         return (repo / "tests").is_dir()
 
+    # -B 不写 __pycache__，-p no:cacheprovider 不写 .pytest_cache：
+    # 两者都是为了不在 worktree 里留下未跟踪产物 —— Worktree.commit() 的
+    # git add -A 会把它们扫进交付分支，用户 review 时看到二进制垃圾。
+    _BASE = ["-B", "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+
     def full_test_command(self, report_path: str) -> list[str]:
-        return [sys.executable, "-m", "pytest", "-q",
-                f"--junitxml={report_path}", "-p", "no:cacheprovider"]
+        return [sys.executable, *self._BASE, f"--junitxml={report_path}"]
 
     def scoped_test_command(self, test_ids: list[str], report_path: str) -> list[str]:
-        return [sys.executable, "-m", "pytest", "-q",
-                f"--junitxml={report_path}", "-p", "no:cacheprovider", *test_ids]
+        return [sys.executable, *self._BASE,
+                f"--junitxml={report_path}", *test_ids]
 
     def report_glob(self) -> str:
         return ".aifix-report.xml"

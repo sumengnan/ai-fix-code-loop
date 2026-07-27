@@ -37,6 +37,7 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
             loop_detect_window=cfg.loop_detect_window,
             tool_result_max_chars=cfg.tool_result_max_chars,
             model_name=cfg.fixer.model,
+            price_map=cfg.price_map,
         )
         outcome = await consume(
             loop.run(messages=build_initial_messages(failure, diagnosis)))

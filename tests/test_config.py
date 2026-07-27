@@ -22,3 +22,15 @@ def test_nested_env_overrides(monkeypatch):
 def test_scalar_env_override(monkeypatch):
     monkeypatch.setenv("AIFIX_MAX_ATTEMPTS", "5")
     assert AifixConfig().max_attempts == 5
+
+
+def test_price_map_default_empty():
+    assert AifixConfig().price_map == {}
+
+
+def test_price_map_from_env(monkeypatch):
+    """没有 price_map 就算不出成本，报告会显示假的 $0.00。"""
+    monkeypatch.setenv(
+        "AIFIX_PRICE_MAP",
+        '{"deepseek-v4-pro": [[1000000, 3, 6]]}')
+    assert AifixConfig().price_map["deepseek-v4-pro"] == [[1000000, 3, 6]]

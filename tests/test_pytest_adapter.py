@@ -61,3 +61,14 @@ def test_locate_source_empty_when_no_repo_frames(buggy_repo):
     fail = Failure(test_id="t", classname="c", name="n", message="m",
                    trace='File "/usr/lib/python3.13/os.py", line 1, in x\n')
     assert PytestAdapter().locate_source(fail, buggy_repo) == []
+
+
+def test_commands_disable_bytecode_writing():
+    """python -B：不生成 __pycache__。
+
+    否则 Worktree.commit() 的 git add -A 会把 .pyc 扫进交付分支 ——
+    真实运行中确实发生了，用户 review 时看到二进制垃圾。
+    """
+    a = PytestAdapter()
+    assert "-B" in a.full_test_command("/tmp/r.xml")
+    assert "-B" in a.scoped_test_command(["t.py::x"], "/tmp/r.xml")

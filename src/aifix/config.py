@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from harness.config import HarnessConfig
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -16,6 +18,11 @@ class AifixConfig(BaseSettings):
 
     detector: HarnessConfig = Field(default_factory=HarnessConfig)
     fixer: HarnessConfig = Field(default_factory=HarnessConfig)
+
+    # 模型价格表，形如 {"deepseek-v4-pro": [[1000000, 3, 6]]}
+    # （区间上限、输入单价、输出单价）。不配就算不出成本 —— 报告里
+    # 会明确写"未配置价格表"，而不是显示一个假的 $0.00。
+    price_map: dict[str, Any] = Field(default_factory=dict)
 
     budget_usd: float = 2.0
     budget_tokens: int = 500_000

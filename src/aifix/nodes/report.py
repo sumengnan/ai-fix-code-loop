@@ -13,13 +13,18 @@ def render_report(state: dict[str, Any]) -> str:
     results = state["results"]
     fixed = sum(1 for r in results if r["verdict"] == "better")
     total = len(state["baseline_ids"])
+    tokens = state["spent_tokens"]
+    usd = state["spent_usd"]
+    # 花了 token 却算出 0 元，说明没配价格表。显示假的 $0.00 比不显示更糟。
+    cost = (f"未知（未配置 AIFIX_PRICE_MAP）（{tokens:,} tokens）"
+            if tokens > 0 and usd == 0.0 else f"${usd:.2f}（{tokens:,} tokens）")
     lines = [
         f"# aifix run {state['run_id']}",
         "",
         f"- 适配器：{state['adapter_name']}",
         f"- 分支：`{state['branch']}`",
         f"- 修复：**{fixed} / {total}**",
-        f"- 成本：${state['spent_usd']:.2f}（{state['spent_tokens']:,} tokens）",
+        f"- 成本：{cost}",
         "",
         "| 测试用例 | 结果 | 尝试次数 | 中止原因 |",
         "|---|---|---|---|",

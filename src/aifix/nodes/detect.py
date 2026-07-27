@@ -29,6 +29,7 @@ async def detect_node(state: AifixState, client: Any = None) -> dict[str, Any]:
         max_steps=1,
         budget=BudgetTracker(max_tokens=cfg.detector_max_tokens),
         model_name=cfg.detector.model,
+        price_map=cfg.price_map,
     )
     with json_output():
         outcome = await consume(loop.run(build_prompt(failure, candidates)))
