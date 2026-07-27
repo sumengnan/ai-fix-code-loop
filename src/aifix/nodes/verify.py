@@ -59,8 +59,16 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
     effective = FailureSet({k: v for k, v in current.failures.items()
                             if k not in flaky})
     verdict = compare(baseline, effective, target)
-
     trace = trace_of(state)
+
+    # 一个字节都没改却判 BETTER，说明目标用例在 baseline 里本来就是抖的。
+    # 放任不管的话：commit(paths=[]) 是空操作、worktree 随后被删、报告却写
+    # 「已修复」—— 系统宣称修好了一个它没碰过的 bug，这会直接击穿
+    # 「只有 verify 有资格说修好了」这条主张。
+    if verdict is Verdict.BETTER and not (state.get("touched") or []):
+        verdict = Verdict.SAME
+        trace.fact("baseline_flaky", target)
+
     trace.fact("verdict", verdict.value)
     if flaky:
         trace.fact("flaky_filtered", sorted(flaky))
