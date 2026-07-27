@@ -519,12 +519,12 @@ ai-fix-code-loop/
 
 ```toml
 dependencies = [
-    "ai-harness-framework @ git+https://github.com/sumengnan/ai-harness-framework",
+    "ai-harness-framework>=0.0.1",          # 已发布至 PyPI
     "langgraph>=1.2",
     "langgraph-checkpoint-sqlite>=3.1",     # SqliteSaver 在独立包里，langgraph 本体不含
 ]
 
-[tool.uv.sources]
+[tool.uv.sources]                            # 本地联调时指向工作副本；不影响发布形态
 ai-harness-framework = { path = "../ai-harness-framework", editable = true }
 ```
 
