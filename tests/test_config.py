@@ -1,3 +1,5 @@
+import pytest
+
 from aifix.config import AifixConfig
 
 
@@ -30,7 +32,23 @@ def test_price_map_default_empty():
 
 def test_price_map_from_env(monkeypatch):
     """没有 price_map 就算不出成本，报告会显示假的 $0.00。"""
-    monkeypatch.setenv(
-        "AIFIX_PRICE_MAP",
-        '{"deepseek-v4-pro": [[1000000, 3, 6]]}')
-    assert AifixConfig().price_map["deepseek-v4-pro"] == [[1000000, 3, 6]]
+    monkeypatch.setenv("AIFIX_PRICE_MAP", '{"deepseek-v4-pro": [3, 6]}')
+    assert AifixConfig().price_map["deepseek-v4-pro"] == [3.0, 6.0]
+
+
+def test_price_map_rejects_tiered_format(monkeypatch):
+    """分档表 [[上限,输入,输出]] 不是扁平价表，必须在加载时就拒绝。
+
+    真实运行中传错格式，导致跑到一半才在 cost_usd 里解包失败崩溃 ——
+    token 已经花掉了。成本计算是装饰性的，不该有崩掉整个 run 的权力。
+    """
+    import pydantic
+    monkeypatch.setenv("AIFIX_PRICE_MAP",
+                       '{"deepseek-v4-pro": [[1000000, 3, 6]]}')
+    with pytest.raises(pydantic.ValidationError, match="扁平价表"):
+        AifixConfig()
+
+
+def test_price_map_accepts_flat_format(monkeypatch):
+    monkeypatch.setenv("AIFIX_PRICE_MAP", '{"deepseek-v4-pro": [3.0, 6.0]}')
+    assert AifixConfig().price_map["deepseek-v4-pro"] == [3.0, 6.0]
