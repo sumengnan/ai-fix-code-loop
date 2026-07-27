@@ -31,6 +31,9 @@ class AifixState(TypedDict, total=False):
     guard_hits: list[str]
     diff_lines: int
     abort_reason: str | None
+    flaky_filtered: list[str]
+    confirmed_regressions: list[str]
+    consecutive_failures: int
 
     spent_usd: float
     spent_tokens: int
@@ -51,6 +54,7 @@ def new_state(repo: Path, config: AifixConfig, run_id: str) -> AifixState:
         baseline_ids=[], queue=[], current=None, attempt=0,
         diagnosis=None, verdict=None,
         touched=[], guard_hits=[], diff_lines=0, abort_reason=None,
+        flaky_filtered=[], confirmed_regressions=[], consecutive_failures=0,
         spent_usd=0.0, spent_tokens=0,
         results=[], abort=None,
     )
