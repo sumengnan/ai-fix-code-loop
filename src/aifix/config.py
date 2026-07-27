@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+from harness.config import HarnessConfig
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class AifixConfig(BaseSettings):
+    """两条模型路由 + 预算 + 阈值。
+
+    嵌套环境变量：AIFIX_DETECTOR__MODEL / AIFIX_FIXER__BASE_URL 等。
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="AIFIX_", env_nested_delimiter="__", extra="ignore")
+
+    detector: HarnessConfig = Field(default_factory=HarnessConfig)
+    fixer: HarnessConfig = Field(default_factory=HarnessConfig)
+
+    # 扁平价表：{模型名: [输入价/1k, 输出价/1k]}。注意**不是**分档表
+    # （[[上限, 输入, 输出], ...]），两者不通用。不配就算不出成本 ——
+    # 报告里会明写"未配置价格表"，而不是显示一个假的 $0.00。
+    price_map: dict[str, list[float]] = Field(default_factory=dict)
+
+    # mode="before"：抢在 pydantic 的类型强制之前跑，否则用户看到的是
+    # "Input should be a valid number" 这类晦涩报错，而不是下面这句人话。
+    @field_validator("price_map", mode="before")
+    @classmethod
+    def _price_map_must_be_flat(cls, v: dict) -> dict:
+        """加载时就拒绝错误格式。
+
+        分档表传进来时，框架的 cost_usd 会在解包处抛 ValueError ——
+        而那已经是跑到一半、token 花掉之后了。成本计算是装饰性的，
+        不该有崩掉整个 run 的权力，所以把它拦在启动阶段。
+        """
+        for model, price in v.items():
+            if len(price) != 2:
+                raise ValueError(
+                    f"price_map['{model}'] 需要扁平价表 [输入价/1k, 输出价/1k]，"
+                    f"得到 {price!r}。分档表 [[上限,输入,输出], ...] 不是这个格式。")
+        return v
+
+    budget_usd: float = 2.0
+    budget_tokens: int = 500_000
+    budget_wall_seconds: float = 1800.0
+
+    max_attempts: int = 3
+    fixer_max_steps: int = 25
+    detector_max_tokens: int = 20_000
+    loop_detect_window: int = 3
+    tool_result_max_chars: int = 8000
+
+    allow_test_edits: bool = False
