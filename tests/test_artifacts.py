@@ -88,6 +88,47 @@ async def test_facts_carry_span_coordinates(buggy_repo):
     assert verdicts[0]["attempt"] == 1
 
 
+class _Explodes:
+    """任何模型调用都算失败 —— 用来证明某条路径确实零 LLM。"""
+
+    async def stream(self, messages, tools):
+        raise AssertionError("这条路径不该调用模型")
+        yield
+
+
+async def test_dry_run_calls_no_model(buggy_repo):
+    """--dry-run 只报告有多少活，不烧一分钱。"""
+    state = await run_once(
+        buggy_repo, AifixConfig(), run_id="dry1", dry_run=True,
+        detector_client=_Explodes(), fixer_client=_Explodes())
+    assert state["baseline_ids"] == ["tests/test_calc.py::test_add"]
+    assert state["results"] == []
+    assert state["spent_tokens"] == 0
+    keys = {json.loads(x)["key"] for x in
+            (buggy_repo / ".aifix" / "runs" / "dry1" / "facts.jsonl")
+            .read_text(encoding="utf-8").splitlines()}
+    assert "dry_run" in keys
+
+
+async def test_only_test_filters_queue(buggy_repo):
+    """--test 指定一个不存在的用例时，队列应为空而非全跑。"""
+    state = await run_once(
+        buggy_repo, AifixConfig(), run_id="only1",
+        only_test="tests/test_calc.py::不存在",
+        detector_client=_Explodes(), fixer_client=_Explodes())
+    assert state["results"] == []
+
+
+async def test_only_test_keeps_matching_failure(buggy_repo):
+    state = await run_once(
+        buggy_repo, AifixConfig(), run_id="only2",
+        only_test="tests/test_calc.py::test_add",
+        detector_client=_Scripted([_text(_DIAG)]),
+        fixer_client=_fixer())
+    assert [r["test_id"] for r in state["results"]] == [
+        "tests/test_calc.py::test_add"]
+
+
 async def test_delivery_branch_has_only_source(buggy_repo):
     """交付分支不该有构建产物 —— 任务 1-3 的最终验收。"""
     await run_once(

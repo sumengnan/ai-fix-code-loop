@@ -21,7 +21,9 @@ from .trace import RunTrace
 
 async def run_once(repo: Path, config: AifixConfig, run_id: str,
                    detector_client: Any = None,
-                   fixer_client: Any = None) -> AifixState:
+                   fixer_client: Any = None,
+                   only_test: str | None = None,
+                   dry_run: bool = False) -> AifixState:
     """按状态图的语义顺序执行一次完整 run。
 
     M1 直接手工驱动节点，语义与 build_graph() 的图完全一致——把
@@ -46,6 +48,12 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
             # 全量测试很贵，整个 run 只在这里跑一次；后续每轮 verify 各跑一次
             state.update(await baseline_node(state))
             trace.fact("baseline_failures", len(state["baseline_ids"]))
+            if only_test is not None:
+                state["queue"] = [t for t in state["queue"] if t == only_test]
+            if dry_run:
+                # 不调用任何模型：接一个陌生项目时先看清工作量
+                trace.fact("dry_run", True)
+                state["queue"] = []
 
             budget = RunBudget(total_tokens=config.budget_tokens,
                                total_usd=config.budget_usd,
@@ -86,14 +94,28 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
     return state
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aifix")
     sub = parser.add_subparsers(dest="cmd", required=True)
     run = sub.add_parser("run", help="修复当前 repo 的失败测试")
     run.add_argument("repo", nargs="?", default=".")
-    args = parser.parse_args()
+    run.add_argument("--test", default=None,
+                     help="只修这一个失败用例（test_id）")
+    run.add_argument("--budget", type=float, default=None,
+                     help="本次 run 的美元预算上限")
+    run.add_argument("--dry-run", action="store_true",
+                     help="只跑 preflight + baseline，报告有多少活")
+    return parser
 
-    if args.cmd == "run":
-        state = asyncio.run(run_once(
-            Path(args.repo).resolve(), AifixConfig(), run_id=uuid.uuid4().hex[:8]))
-        print(state["report_md"])
+
+def main() -> None:
+    args = build_parser().parse_args()
+    if args.cmd != "run":
+        return
+    config = AifixConfig()
+    if args.budget is not None:
+        config = config.model_copy(update={"budget_usd": args.budget})
+    state = asyncio.run(run_once(
+        Path(args.repo).resolve(), config, run_id=uuid.uuid4().hex[:8],
+        only_test=args.test, dry_run=args.dry_run))
+    print(state["report_md"])
