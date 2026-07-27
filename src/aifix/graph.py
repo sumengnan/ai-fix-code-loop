@@ -60,6 +60,21 @@ def new_state(repo: Path, config: AifixConfig, run_id: str) -> AifixState:
     )
 
 
+def check_circuit_breaker(state: AifixState) -> str | None:
+    """连续失败达到阈值就中止整个 run，返回中止原因；未达阈值返回 None。
+
+    连着几个 failure 一个都没修好，大概率不是「这些 bug 恰好都难」，
+    而是环境坏了、prompt 崩了、或今天这个模型不行。继续跑只是匀速烧钱。
+    比预算上限更早生效，也更有信息量 —— 它把「钱花完了」变成
+    「出问题了，去看 trace」。
+    """
+    limit = state["config"].consecutive_failure_limit
+    n = state.get("consecutive_failures", 0)
+    if n >= limit:
+        return f"连续 {n} 个 failure 均未修复，疑似系统性问题，已中止"
+    return None
+
+
 def route_after_baseline(state: AifixState) -> str:
     """全绿或已中止 → 直接出报告；否则取第一个 failure 开始处理。"""
     if state.get("abort") or not state["queue"]:
@@ -69,7 +84,7 @@ def route_after_baseline(state: AifixState) -> str:
 
 def route_after_verify(state: AifixState) -> str:
     """current 仍在 → 同一个 failure 重试；已清空 → 取下一个或收尾。"""
-    if state.get("abort"):
+    if state.get("abort") or check_circuit_breaker(state):
         return "report"
     if state["current"] is not None:
         return "detect"

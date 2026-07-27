@@ -1,4 +1,7 @@
+from aifix.config import AifixConfig
 from aifix.graph import route_after_baseline, route_after_verify
+
+_CFG = AifixConfig()
 from aifix.nodes.report import render_report
 
 
@@ -15,15 +18,18 @@ def test_route_after_baseline_aborts():
 
 
 def test_route_after_verify_retries_same_failure():
-    assert route_after_verify({"current": "a", "queue": [], "abort": None}) == "detect"
+    assert route_after_verify(
+        {"current": "a", "queue": [], "abort": None, "config": _CFG}) == "detect"
 
 
 def test_route_after_verify_takes_next():
-    assert route_after_verify({"current": None, "queue": ["b"], "abort": None}) == "detect"
+    assert route_after_verify(
+        {"current": None, "queue": ["b"], "abort": None, "config": _CFG}) == "detect"
 
 
 def test_route_after_verify_reports_when_done():
-    assert route_after_verify({"current": None, "queue": [], "abort": None}) == "report"
+    assert route_after_verify(
+        {"current": None, "queue": [], "abort": None, "config": _CFG}) == "report"
 
 
 def test_render_report_lists_outcomes():

@@ -8,7 +8,7 @@ from typing import Any
 
 from .config import AifixConfig
 from .delivery import Worktree
-from .graph import AifixState, new_state
+from .graph import AifixState, check_circuit_breaker, new_state
 from .nodes.baseline import baseline_node
 from .nodes.detect import detect_node
 from .nodes.fix import fix_node
@@ -47,6 +47,10 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
             state.update(await detect_node(state, client=detector_client))
             state.update(await fix_node(state, client=fixer_client))
             state.update(await verify_node(state))
+            tripped = check_circuit_breaker(state)
+            if tripped:
+                state["abort"] = tripped
+                break
 
     state["report_md"] = render_report(state)
     return state

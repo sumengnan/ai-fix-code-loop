@@ -50,6 +50,9 @@ class AifixConfig(BaseSettings):
     max_diff_lines: int = 300
     # 守卫触发后额外给模型的重试次数（不计入 max_attempts）
     fix_guard_retries: int = 2
+    # 连着几个 failure 一个都没修好，大概率不是「这些 bug 恰好都难」，
+    # 而是环境坏了 / prompt 崩了 / 今天这个模型不行。继续跑只是匀速烧钱。
+    consecutive_failure_limit: int = 3
     fixer_max_steps: int = 25
     detector_max_tokens: int = 20_000
     loop_detect_window: int = 3
