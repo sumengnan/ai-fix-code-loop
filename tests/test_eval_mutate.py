@@ -129,6 +129,32 @@ def test_syntactically_broken_source_yields_nothing():
     assert list(mutations("def f(:\n")) == []
 
 
+def test_lineno_follows_cpython_line_counting():
+    r"""行号必须按 CPython 分词器的行计数走，不能按 str.splitlines。
+
+    `\x0c`（换页符 / Emacs 分页符，CPython 标准库里就有）不是分词器认的行
+    结束符，但 splitlines 在它上面断行。行数组一多出一行，`lines[lineno-1]`
+    整体错位：落点、Mutation.lineno、description 里的原值三者一起错，而且
+    改出来的源码照样 ast.parse 通过 —— 正是自检抓不住的那一类。
+    """
+    src = "A = 1\n\x0c\nx = 2 + 3\ny = 4 + 5\n"
+    # 按 CPython 认的行结束符切，\x0c 不断行
+    real_lines = src.split("\n")
+    muts = list(mutations(src))
+    # 三行各自的候选都要在：少一条就说明切行把候选也吃掉了
+    assert sorted(m.lineno for m in muts) == [1, 3, 3, 3, 4, 4, 4], \
+        [(m.lineno, m.description) for m in muts]
+    for m in muts:
+        changed = [i for i, (a, b) in
+                   enumerate(zip(real_lines, m.source.split("\n")), start=1)
+                   if a != b]
+        assert changed == [m.lineno], (m.description, changed, m.lineno)
+        # description 里的「原值」也必须真的取自那一行
+        old = m.description.split()[1]
+        assert old in real_lines[m.lineno - 1], \
+            (m.description, real_lines[m.lineno - 1])
+
+
 import subprocess
 
 import pytest
@@ -215,6 +241,25 @@ def _make_fragile_repo(tmp_path: Path) -> Path:
     })
 
 
+def _make_unreadable_repo(tmp_path: Path) -> Path:
+    """混进两个 read_text 读不出来的 .py —— git ls-files 照样把它们捞出来。"""
+    repo = _init_repo(tmp_path / "unreadable", {
+        "pytest.ini": _PYTEST_INI,
+        "calc.py": "def add(a, b):\n    return a + b\n",
+        "tests/test_calc.py": ("from calc import add\n\n\n"
+                               "def test_add():\n"
+                               "    assert add(2, 3) == 5\n"),
+    })
+    (repo / "latin1.py").write_bytes(
+        b"# -*- coding: latin-1 -*-\nS = 'caf\xe9'\n")   # 非 UTF-8
+    (repo / "dangling.py").symlink_to("nowhere.py")      # 断链符号链接
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.email=t@example.com",
+                    "-c", "user.name=t", "commit", "-q", "-m", "bad"],
+                   cwd=repo, check=True)
+    return repo
+
+
 def _make_misnamed_repo(tmp_path: Path) -> Path:
     """源文件 gauge.py 由 tests/test_calc.py 覆盖 —— 词干对不上。"""
     return _init_repo(tmp_path / "misnamed", {
@@ -249,6 +294,80 @@ async def test_generated_task_is_actually_red(tmp_path):
         assert fs.ids == {t.target_test}, f"红了不止一个：{sorted(fs.ids)}"
 
 
+async def test_mutation_diff_applies_under_hostile_git_config(tmp_path,
+                                                              monkeypatch):
+    """diff 的输出格式必须钉死，否则用户的 ~/.gitconfig 能让整份任务集打不上。
+
+    `diff.noprefix=true` 下裸 `git diff` 产出 `--- calc.py`，而 workspace 的
+    `git apply` 走默认 -p1，会以 exit 128 拒收；`color.diff=always` 把 ANSI
+    转义写进 diff 正文。`git clone --local` 不隔离全局配置，克隆出来的工作树
+    照样吃这两条 —— 后果是每条 mutated 任务都要等到评测时才炸。
+    """
+    gitconfig = tmp_path / "gitconfig"
+    gitconfig.write_text("[diff]\n\tnoprefix = true\n"
+                         "[color]\n\tdiff = always\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
+    repo = _make_green_repo(tmp_path)
+    tasks = await mutate_tasks(str(repo), PytestAdapter(), max_tasks=1,
+                               workdir=tmp_path / "w")
+    assert len(tasks) == 1
+    diff = tasks[0].mutation_diff
+    assert "\x1b[" not in diff, f"diff 正文里混进了 ANSI 转义：{diff!r}"
+    assert diff.startswith("diff --git a/calc.py b/calc.py"), diff
+    # 直接把 diff 喂给 git apply —— 这是评测时真正会走的那条路径
+    dest = tmp_path / "apply-here"
+    subprocess.run(["git", "clone", "--local", "--quiet", str(repo), str(dest)],
+                   check=True)
+    proc = subprocess.run(["git", "apply", "--check", "-"], cwd=dest,
+                          input=diff, capture_output=True, text=True)
+    assert proc.returncode == 0, f"变异补丁打不上：{proc.stderr}"
+
+
+async def test_candidate_failure_is_reported_not_swallowed(tmp_path,
+                                                           monkeypatch):
+    """候选跑挂必须上报，不能静默 continue。
+
+    被吞掉的里面包括测试超时（`<` → `<=` 正是制造死循环的经典变异）：用户
+    只看到「产出 0 个冒烟任务」，分不出是「没变红」还是「每个候选都跑满超时
+    被杀」。顺带钉住超时值 —— 死循环变异是预期内的产物，不该等满 300 秒。
+    """
+    from aifix.eval import mutate as mutate_mod
+
+    seen: list[tuple[str, int, str | None]] = []
+    timeouts: list[float | None] = []
+
+    async def boom(tree, adapter, scope_files, timeout=None):
+        timeouts.append(timeout)
+        raise RuntimeError("测试未产出报告 x.xml：测试进程没能正常跑完")
+
+    monkeypatch.setattr(mutate_mod, "_run", boom)
+    repo = _make_green_repo(tmp_path)
+    tasks = await mutate_tasks(str(repo), PytestAdapter(), max_tasks=5,
+                               workdir=tmp_path / "w",
+                               on_progress=lambda p, n, e: seen.append((p, n, e)))
+    assert tasks == []
+    failed = [s for s in seen if s[1] == -1]
+    assert len(failed) == 3, f"calc.py 三个候选全跑挂，应逐个上报：{seen}"
+    for ident, _, error in failed:
+        assert ident.startswith("calc.py:"), seen      # 标识要指到具体候选
+        assert "测试未产出报告" in (error or ""), seen
+    assert timeouts and all(t is not None and 0 < t < 300 for t in timeouts), \
+        f"候选超时不该沿用 run_scoped 的 300 秒默认值：{timeouts}"
+
+
+async def test_unreadable_source_does_not_abort_the_round(tmp_path):
+    """读不出来的源文件只丢它自己 —— 已收进 tasks 的成果不能跟着陪葬。"""
+    seen: list[tuple[str, int, str | None]] = []
+    repo = _make_unreadable_repo(tmp_path)
+    tasks = await mutate_tasks(str(repo), PytestAdapter(), max_tasks=5,
+                               scope="full", workdir=tmp_path / "w",
+                               on_progress=lambda p, n, e: seen.append((p, n, e)))
+    assert [t.gold_files for t in tasks] == [["calc.py"]], \
+        f"calc.py 的变异必须活下来：{[t.task_id for t in tasks]}"
+    assert {p for p, n, _ in seen if n == -1} == {"latin1.py", "dangling.py"}, \
+        seen
+
+
 async def test_refuses_a_repo_that_is_already_red(tmp_path):
     """本来就红的仓库上做变异，分不清红是变异造成的还是本来就有的。"""
     repo = _make_red_repo(tmp_path)
@@ -281,8 +400,9 @@ async def test_smart_scope_skips_files_no_test_file_is_named_after(tmp_path):
     # 这个仓库压根产不出任务
     full = await mutate_tasks(str(repo), PytestAdapter(), max_tasks=5,
                               scope="full", workdir=tmp_path / "w2")
-    assert [t.gold_files for t in full] == [["gauge.py"]] * len(full)
+    # 非空守卫必须写在前面：full == [] 时下面那条全集比对恒真
     assert len(full) >= 1, "full 范围下 gauge.py 的变异必须能被验出来"
+    assert [t.gold_files for t in full] == [["gauge.py"]] * len(full)
 
 
 async def test_seed_makes_the_selection_reproducible(tmp_path):
@@ -293,3 +413,8 @@ async def test_seed_makes_the_selection_reproducible(tmp_path):
     b = await mutate_tasks(str(repo), PytestAdapter(), max_tasks=1, seed=3,
                            workdir=tmp_path / "w2")
     assert [t.task_id for t in a] == [t.task_id for t in b] != []
+    # 另一侧要有区分度：seed 不参与选点的话（比如候选顺序被写死），上面那条
+    # 照样通过。calc.py 三个候选里 seed=3 取到 `>` → `>=`，seed=0 取到 `+` → `-`
+    c = await mutate_tasks(str(repo), PytestAdapter(), max_tasks=1, seed=0,
+                           workdir=tmp_path / "w3")
+    assert [t.task_id for t in c] != [t.task_id for t in a]

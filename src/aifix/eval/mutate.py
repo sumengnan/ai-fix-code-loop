@@ -36,8 +36,10 @@ from __future__ import annotations
 
 import ast
 import random
+import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterator
@@ -73,6 +75,28 @@ class Mutation:
 # 一处待施加的替换：改哪一行、行内哪个字节区间、换成什么、怎么描述。
 # 字节区间而不是字符区间 —— 见 _splice 的说明。
 _Edit = tuple[int, int, int, str, str]
+
+_LINE_SEP = re.compile(r"(\r\n|\r|\n)")
+
+
+def _split_lines(source: str) -> list[str]:
+    r"""按 CPython 分词器认的行结束符切行，保留结束符。
+
+    **不能用 str.splitlines**：它还在 `\x0c`（换页符，Emacs 分页符，CPython
+    标准库里就有）、`\x0b`、`\x1c`-`\x1e`、`\x85`、` `、` ` 上断行，
+    而分词器只认 `\n` / `\r\n` / `\r`（后三个字符还能合法地出现在字符串字面量
+    里）。行数组只要比 AST 的行计数多出一行，后面所有 `lines[lineno-1]` 全部
+    错位：落点、行号、description 里的原值一起错，而改出来的源码照样能
+    ast.parse 通过 —— 这一类错误自检抓不住。
+    """
+    parts = _LINE_SEP.split(source)
+    # split 带捕获组时结果是「正文, 分隔符, 正文, 分隔符, …, 正文」，两两合并
+    lines = [parts[i] + (parts[i + 1] if i + 1 < len(parts) else "")
+             for i in range(0, len(parts), 2)]
+    if lines and lines[-1] == "":
+        # 源码以换行结尾时最后会多出一个空串，它不是一行
+        lines.pop()
+    return lines
 
 
 def _splice(lines: list[str], lineno: int, start: int, end: int,
@@ -213,7 +237,7 @@ def mutations(source: str) -> Iterator[Mutation]:
     except SyntaxError:
         # 输入就是坏的，谈不上变异
         return
-    lines = source.splitlines(keepends=True)
+    lines = _split_lines(source)
     for lineno, start, end, new_text, description in sorted(
             _collect(tree, lines), key=lambda e: (e[0], e[1], e[4])):
         mutated = _splice(lines, lineno, start, end, new_text)
@@ -270,11 +294,35 @@ def _scope_for(rel: str, index: dict[str, list[str]],
     return [f for f in sorted(index) if stem in PurePosixPath(f).name]
 
 
+def _mutation_diff(tree: Path, rel: str) -> str:
+    """取工作区里那一处变异的 unified diff，输出格式全部钉死。
+
+    产出的 diff 会随 jsonl 走到评测机上被 `git apply`（默认 -p1）施加，所以
+    它不能受任何一侧的 git 配置影响：
+    - `diff.noprefix=true`（常见的全局配置）会让输出变成 `--- calc.py`，
+      `git apply` 直接以 exit 128 拒收「lacks filename information」；
+      `diff.mnemonicPrefix` 会把前缀换成 `c/`、`w/` 之类，同样打不上。
+    - `color.diff=always` 会把 ANSI 转义写进 diff 正文。
+    - `diff.external` / gitattributes 的 textconv 会让输出根本不是补丁。
+    `git clone --local` 不隔离 `~/.gitconfig`，克隆出来的工作树照样吃这些配置，
+    所以必须在命令行上一条条压掉 —— 命令行选项优先于配置。
+    `--binary` 只影响被 git 判成二进制的文件，让它们也产出可施加的补丁而不是
+    一句「Binary files differ」（那句非空，会骗过下面的 diff.strip() 检查）。
+    """
+    return _git(tree, "-c", "diff.noprefix=false", "diff", "--no-color",
+                "--no-ext-diff", "--no-textconv", "--binary",
+                "--src-prefix=a/", "--dst-prefix=b/", "--", rel)
+
+
 async def _run(tree: Path, adapter: PytestAdapter,
-               scope_files: list[str] | None):
+               scope_files: list[str] | None, timeout: float):
     if scope_files is None:
-        return await run_full_suite(tree, adapter, require_report=True)
-    return await run_scoped(tree, adapter, scope_files, require_report=True)
+        return await run_full_suite(tree, adapter, timeout=timeout,
+                                    require_report=True)
+    # run_scoped 的形参叫 test_ids，这里传的是测试**文件**路径：pytest 接受
+    # 文件路径作为 node id 的前缀形式，mine.py 也是同样用法
+    return await run_scoped(tree, adapter, scope_files, timeout=timeout,
+                            require_report=True)
 
 
 async def mutate_tasks(repo: str, adapter: PytestAdapter, max_tasks: int = 10,
@@ -289,12 +337,24 @@ async def mutate_tasks(repo: str, adapter: PytestAdapter, max_tasks: int = 10,
 
     收下一个变异的条件是新失败数落在 `[1, max_new_failures]`：一个都没红说明
     这个变异没被任何测试覆盖到，不构成任务；红了一大片的变异太显眼（模型看
-    一眼失败面就知道要往哪改），也违反「单点缺陷」这个前提 —— ground truth
-    只有一个文件，却弄红了半个套件，那更像是接口契约被改了。
+    一眼失败面就知道要往哪改）。
+
+    **max_new_failures 只约束跑到的那个范围**，别把它读成全仓库的单点保证：
+    默认 `scope="smart"` 下计数用的失败集合只来自词干匹配到的那几个测试文件，
+    所以「变异一个被到处调用的符号，全仓红 200 条、而那个测试文件里只红 2 条」
+    照样会被收下。想让上限覆盖整个套件必须显式 `scope="full"`（每个候选跑一次
+    全量，慢得多）。这是有意的取舍：强制全仓单点会把 smart 的提速吃光。
+
+    另一个已知的口子：判红只跑一次 scoped，没有 mine_tasks 那样的 flaky 复核。
+    一个 flaky 用例就能造出一条假任务（它的红跟变异无关，改对了也过不了）。
+    冒烟集能接受这个概率，拿它当基准不能。
 
     on_progress(rel_path, n, error)：沿用 mine_tasks 的约定，n≥0 是这个源文件
     产出的任务数（0 是正常结果：没有候选、或候选全被丢弃、或 smart 范围没
-    匹配到测试文件）。
+    匹配到测试文件）；n=-1 且 error 非空表示这一处被跳过（源文件读不出来，
+    或某个候选验证跑挂），此时第一个参数是被跳过的目标（`路径` 或
+    `路径:行号`）。两者必须能分开 —— 「没弄红任何测试」是正常结果，
+    「验证跑挂了」是要去看的问题。
     """
     workdir = Path(workdir or Path(repo) / ".aifix" / "mutate")
     shutil.rmtree(workdir, ignore_errors=True)
@@ -308,7 +368,9 @@ async def mutate_tasks(repo: str, adapter: PytestAdapter, max_tasks: int = 10,
         # 变异只落在这份克隆里，源仓库一个字节都不动 —— 产出的 Task 带的是
         # unified diff，materialize 时才现场施加
         materialize(repo, head, head, [], tree)
+        t0 = time.monotonic()
         green = await run_full_suite(tree, adapter, require_report=True)
+        baseline_secs = time.monotonic() - t0
         if green.ids:
             raise RuntimeError(
                 f"仓库 HEAD（{head[:8]}）不是全绿，无法做变异："
@@ -323,6 +385,12 @@ async def mutate_tasks(repo: str, adapter: PytestAdapter, max_tasks: int = 10,
                 f"仓库 HEAD（{head[:8]}）的全量一个用例都没跑到"
                 f"（worktree={tree}），本次结果不可信")
         index = _test_index(green.ran)
+        # 死循环是**预期内**的产物（`<` → `<=` 正是制造它的经典变异），不该
+        # 每个都等满 run_scoped 的 300 秒默认值。以刚测到的基线全量耗时为尺：
+        # 候选跑的是这个套件的子集（scope=full 时至多等于它），耗时超过基线
+        # 三倍只可能是变异把它拖住了。下限 30 秒兜住冷启动与首次导入的抖动，
+        # 上限不高于原默认值，保证这个改动只会更早放弃、不会更晚。
+        candidate_timeout = min(300.0, max(30.0, baseline_secs * 3))
 
         paths = [p for p in _git(tree, "ls-files", "--", "*.py").split("\n")
                  if p.strip()]
@@ -341,7 +409,15 @@ async def mutate_tasks(repo: str, adapter: PytestAdapter, max_tasks: int = 10,
                     on_progress(rel, 0, None)
                 continue
             path = tree / rel
-            original = path.read_text(encoding="utf-8")
+            try:
+                original = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as e:
+                # `git ls-files '*.py'` 会捞到非 UTF-8 编码声明的文件和断链
+                # 符号链接。让它们穿出去会掀翻整轮，把已经收进 tasks 的成果
+                # 一并丢掉 —— 读不出来只该丢掉这一个文件。
+                if on_progress:
+                    on_progress(rel, -1, str(e))
+                continue
             candidates = list(mutations(original))
             rng.shuffle(candidates)
             n = 0
@@ -350,12 +426,18 @@ async def mutate_tasks(repo: str, adapter: PytestAdapter, max_tasks: int = 10,
                     break
                 path.write_text(m.source, encoding="utf-8")
                 try:
-                    fs = await _run(tree, adapter, scope_files)
+                    fs = await _run(tree, adapter, scope_files,
+                                    candidate_timeout)
                     # 趁变异还在工作区里取 diff。每个 Mutation.source 都是从
                     # 原文整体重算的，所以工作区里永远只有一处改动
-                    diff = _git(tree, "diff", "--", rel)
-                except RuntimeError:
-                    # 报告缺失 / git 失败：这一个候选作废，不带走整轮变异
+                    diff = _mutation_diff(tree, rel)
+                except RuntimeError as e:
+                    # 报告缺失（多半是变异造出死循环、测试超时被杀）/ git 失败：
+                    # 这一个候选作废，不带走整轮变异。但必须上报 —— 静默吞掉的
+                    # 话，用户看到「产出 0 个冒烟任务」，分不出是「没变红」还是
+                    # 「每个候选都跑满超时被杀」
+                    if on_progress:
+                        on_progress(f"{rel}:{m.lineno}", -1, str(e))
                     continue
                 finally:
                     # 还原必须无条件执行 —— 上一个变异留在工作区里，下一个
