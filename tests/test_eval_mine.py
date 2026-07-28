@@ -146,6 +146,35 @@ async def test_verify_drops_a_test_that_disappeared_at_the_commit(
         "在 C 处消失的用例被当成了红转绿")
 
 
+async def test_verify_rejects_candidates_the_recheck_never_ran(
+        history_repo, tmp_path, monkeypatch):
+    """run_scoped 整轮中止（pytest 收集阶段崩掉）时不能把候选全放行。
+
+    真实触发场景：候选 id 是 make_test_id 从 junit 报告合成出来的，不是
+    pytest 原生 nodeid。pytest 默认不写 <testcase file="..."> 属性，
+    make_test_id 对类内测试的回退路径会拼出不存在的路径，导致 run_scoped
+    在收集阶段就整轮中止，写出一份 tests="0" 的空报告 —— require_report
+    检查不出这种情况（报告文件确实存在），FailureSet.ran 和 .ids 都是空集。
+
+    此前的实现只看 `cand - recheck.ids`：recheck.ids 为空时这个表达式
+    退化成 `cand`，即整批候选被误判成「复跑全绿」而放行。用 monkeypatch
+    直接模拟这个空 ran/空 ids 的返回值，比真造一个类内测试仓库更直接。
+    """
+    import aifix.eval.mine as mine
+    from aifix.adapters.base import FailureSet
+
+    async def scoped_collect_crash(*a, **kw):
+        # 模拟 pytest 收集阶段崩掉：报告存在但一个用例都没跑到。
+        return FailureSet(failures={}, ran=frozenset())
+
+    monkeypatch.setattr(mine, "run_scoped", scoped_collect_crash)
+
+    h = history_repo
+    got = await verify_commit(str(h["path"]), h["commit"], h["base"],
+                              h["test_files"], PytestAdapter(), tmp_path / "v")
+    assert got == [], "复跑没真跑到的候选，不该被当成「复跑通过」全部放行"
+
+
 def _commit(repo, msg: str) -> None:
     subprocess.run(["git", "-c", "user.email=t@example.com",
                     "-c", "user.name=t", "commit", "-q", "-m", msg],

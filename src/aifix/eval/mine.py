@@ -87,6 +87,22 @@ async def verify_commit(repo: str, commit: str, base_commit: str,
     任务集是要被反复使用的 ground truth，宁可跳过一个 commit，也不能
     把一批假任务写进去 —— 假任务不会报错，只会让所有模型的修复成功率
     一起变低，看起来像「模型都不行」。
+
+    末尾 run_scoped 复跑候选用例时，传给 pytest 的不是原生 nodeid，而是
+    adapter.make_test_id 从 junit 报告合成出来的 id。pytest 默认的
+    junit_family=xunit2 不写 <testcase> 的 file 属性，make_test_id 遇到
+    file=None 时走 `classname.replace(".", "/") + ".py"` 这条回退路径 ——
+    对类内测试（`test_foo.TestBar::test_baz`）会拼出一个根本不存在的路径
+    （`test_foo/TestBar.py::test_baz`，M1 遗留，见 docs 的「交给 M3b 的
+    缺口」）。真实仓库里类内测试很常见，候选集只要混进一个，pytest 就在
+    收集阶段整轮中止（exit code 4），连一个用例都没跑，写出的是一份
+    tests="0" 的空报告 —— 报告文件存在，require_report 检查不出异常，
+    看起来像「全部复跑通过」。
+
+    所以不能只看 `cand - recheck.ids`（复跑后不在失败集里的）就当成过关：
+    必须先用 recheck.ran 确认这个用例真的被 pytest 跑到过，跑不到的
+    候选（包括这种整轮中止的情形）一律不能入选，而不是被这条静默路径
+    误判成「复跑绿了」全部放行。
     """
     workdir = Path(workdir)
     shutil.rmtree(workdir, ignore_errors=True)
@@ -107,7 +123,11 @@ async def verify_commit(repo: str, commit: str, base_commit: str,
     # 每一轮评测。
     recheck = await run_scoped(workdir, adapter, sorted(cand),
                               require_report=True)
-    return sorted(cand - recheck.ids)
+    # `cand & recheck.ran`：只认真的跑到了的候选。少了这一步，一旦
+    # make_test_id 对某个候选合成出无效路径导致 pytest 整轮中止，
+    # recheck.ids 会是空集，`cand - recheck.ids` 就把整批候选误判成
+    # 复跑全绿而放行。
+    return sorted((cand & recheck.ran) - recheck.ids)
 
 
 async def mine_tasks(repo: str, adapter: PytestAdapter, limit: int = 50,
