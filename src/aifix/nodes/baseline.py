@@ -57,7 +57,14 @@ async def _rm_reports(sb: LocalSandbox, adapter: ProjectAdapter,
                       worktree: Path, scoped: bool) -> None:
     """删掉本次跑出的报告 —— 可能不止一份。
 
-    不留产物是硬要求：Worktree.commit() 的 git add -A 会把它扫进交付分支。
+    理由是**陈旧报告会被下一跑当成自己的结果**：report_paths 只看文件系统
+    当前状态，留在原地的上一轮报告会被 parse_junit 一并解析（见
+    maven_adapter.report_paths 的说明）。flaky 确认据此判定，不报错，只是判错。
+
+    此处原先写的是「Worktree.commit() 的 git add -A 会把它扫进交付分支」——
+    那是假话：commit 只 `git add -- <ApplyPatchTool 记账过的路径>`，它的
+    docstring 里专门写着绝不用 git add -A。tests/test_maven_e2e.py 里有一条
+    真跑 mvn 的验收：交付分支的树上连整个 target/ 都没有。
     """
     stale = adapter.report_paths(worktree, scoped=scoped)
     if stale:

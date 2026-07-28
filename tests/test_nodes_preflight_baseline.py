@@ -236,7 +236,7 @@ async def test_run_full_suite_result_is_unchanged_by_the_refactor(buggy_repo):
     assert f.line == 3
     assert f.message == "assert -1 == 5\n +  where -1 = add(2, 3)"
     assert "add(2, 3)" in f.trace
-    # 跑完不留产物：Worktree.commit() 的 git add -A 会把它扫进交付分支
+    # 跑完不留产物：留在原地的报告会被下一跑的 report_paths 当成自己的结果
     assert list(buggy_repo.glob(".aifix-*.xml")) == []
 
 
