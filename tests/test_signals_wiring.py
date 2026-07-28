@@ -343,6 +343,15 @@ async def test_rolled_back_attempt_does_not_feed_the_signal_metric(
     assert count_signals(facts) == 0, "指标只对真正交付的补丁负责"
     # 诊断价值不能丢：那一轮确实很可疑，只是换了个不进指标的名字
     assert "signals_discarded" in keys
+    discarded = next(f["value"] for f in facts
+                     if f["key"] == "signals_discarded")
+    # 与交付侧同尺：三类各自的列表，不是一个整数。facts.jsonl 里并排出现
+    # `removed_public_symbol: ["mul", ...]`（1 条 = 1 类）和
+    # `signals_discarded: 11`（11 = 11 个符号）时，拿这两个数比大小必然得出
+    # 错的结论。名字也不能丢 —— 复盘要知道它删的是 mul 还是 add。
+    assert isinstance(discarded, dict), "量纲必须与交付侧一致，不是个数"
+    assert discarded["removed_public_symbols"] == ["mul"]
+    assert discarded["new_module_state"] == ["CACHE"]
     # 交付的补丁干净，报告里就不该有这一节
     assert "值得多看一眼" not in state["report_md"]
 

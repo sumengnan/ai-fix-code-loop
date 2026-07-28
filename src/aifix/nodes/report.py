@@ -26,6 +26,12 @@ def _signal_section(signals: list[dict[str, Any]]) -> list[str]:
     """
     groups: list[tuple[str, list[dict[str, Any]]]] = []
     for entry in signals:
+        # 形状检查：`state["signals"]` 从 dict 换成 list 之后，旧 checkpoint
+        # 里存的还是 dict，`list(那个 dict)` 得到的是一串字符串键 ——
+        # `entry.get` 当场 AttributeError，而此时修复早已提交进交付分支，
+        # 用户拿到的是一个「全都做完了却在最后一步炸掉」的 run。
+        if not isinstance(entry, dict):
+            continue
         if not any(entry.get(k) for k, _ in _SIGNAL_CN):
             continue
         test_id = entry.get("test_id") or "—"

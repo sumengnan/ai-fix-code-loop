@@ -77,8 +77,9 @@ def count_signals(facts: list[dict[str, Any]]) -> int:
     `eval/score.py` 把这个组合定义为规格套利的指纹，指纹会变成假的，方向还
     偏向爱试错的模型。
 
-    这一列的两条已知偏差（对诊断解析失败的模型系统性偏低、只统计交付的补丁）
-    见 `eval/score.py` 的模块 docstring。
+    这一列的三条已知偏差见 `eval/score.py` 的模块 docstring：对诊断解析失败
+    的模型系统性偏低、只统计交付的补丁、单位是「类」不是「个」（后两条就是
+    上面这两段说的事，第一条只在 score.py 那边写全）。
     """
     return sum(1 for f in facts if f.get("key") in _SIGNAL_KEYS)
 

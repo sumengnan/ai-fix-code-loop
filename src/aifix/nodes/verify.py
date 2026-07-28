@@ -120,9 +120,16 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
             # 核心循环对每个 failure 各跑一轮 verify，替换只会剩最后一轮。
             signals.append({"test_id": target, **asdict(sig)})
     elif not sig.is_empty():
-        # 换一个**不被 eval 计数**的 key：被丢弃的尝试仍有诊断价值（模型试
-        # 过什么是复盘的素材），但它不该出现在任何指标里。
-        trace.fact("signals_discarded", sig.count)
+        # 换一个**不被 eval 计数**的 key（见 eval/runner._SIGNAL_KEYS）：被丢
+        # 弃的尝试仍有诊断价值（模型试过什么是复盘的素材），但它不该出现在任
+        # 何指标里。
+        #
+        # value 存三类各自的**列表**，与上面交付侧同尺。存个数的话，
+        # facts.jsonl 里会并排出现 `removed_public_symbol: ["mul","f0",…]`
+        # （1 条 = 1 类）和 `signals_discarded: 11`（11 = 11 个符号），谁拿这
+        # 两个数比大小都会得出错的结论；而且名字全丢了 —— 复盘时不知道它删的
+        # 是 mul 还是 add，「模型试过什么」正是这条 fact 存在的理由。
+        trace.fact("signals_discarded", asdict(sig))
 
     results = list(state["results"])
     common = {"flaky_filtered": sorted(flaky),
