@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 
 from ..adapters.pytest_adapter import PytestAdapter
 from ..nodes.baseline import run_full_suite, run_scoped
+from ..signals import under_dirs
 from .task import Task
 from .workspace import materialize
 
@@ -37,12 +38,14 @@ def split_paths(paths: list[str],
     """
     tests: list[str] = []
     src: list[str] = []
-    # 按**分段**比前缀，不用裸 startswith：`testdata/x.py`.startswith("test")
-    # 是 True，但它不是 `test` 目录下的文件
-    prefixes = [PurePosixPath(d).parts for d in test_dirs]
     for p in paths:
         pp = PurePosixPath(p)
-        in_test_dir = any(pp.parts[:len(d)] == d for d in prefixes if d)
+        # 「在不在测试目录里」这个判定与 tools/patch.py 的「不许改测试文件」
+        # 守卫问的是同一个问题，共用 signals.under_dirs 的那一份实现。本分支
+        # 上这两处一度各有一份：mine 升级成了分段前缀匹配，patch.py 还停在
+        # `parts[0] in test_dirs` —— M5 的 MavenAdapter 一落地（test_dirs 是
+        # `["src/test"]`，首段为 `src`），那道守卫就会静默放行改测试的补丁。
+        in_test_dir = under_dirs(p, test_dirs)
         is_py = pp.suffix == ".py"
         # 两侧的判据刻意不对称。测试目录**内**的任意文件都算测试侧，后缀不
         # 限：夹具、数据、快照都得跟着测试一起被 materialize 嫁接。目录**外**
