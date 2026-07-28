@@ -151,7 +151,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--test", default=None,
                      help="只修这一个失败用例（test_id）")
     run.add_argument("--budget", type=float, default=None,
-                     help="本次 run 的美元预算上限")
+                     help="本次 run 的美元上限。语义是「越线之后不再发起新的"
+                          "模型调用」——成本只有在调用返回后才知道，所以最后"
+                          "那一次必然已经花掉。需要配置 AIFIX_PRICE_MAP")
     run.add_argument("--dry-run", action="store_true",
                      help="只跑 preflight + baseline，报告有多少活")
 
@@ -169,6 +171,12 @@ def build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--label", default=None,
                     help="这一轮的模型标签，默认取 fixer 的 model")
     ev.add_argument("--out", default=None)
+    ev.add_argument("--budget-per-task", type=float, default=None,
+                    help="每个任务的美元上限")
+    ev.add_argument("--budget-total", type=float, default=None,
+                    help="整批的美元上限。检查发生在派发时按并发上限预留额度，"
+                         "所以整批超支上界 = 并发数 × 一次模型调用的成本，"
+                         "而不是随任务数线性放大")
 
     rep = sub.add_parser("eval-report", help="把若干轮结果渲染成对比表")
     rep.add_argument("results", nargs="+")
@@ -225,6 +233,11 @@ def _cmd_eval(args) -> None:
     from .eval.task import Task, TaskResult, read_jsonl, write_jsonl
 
     config = AifixConfig()
+    if args.budget_per_task is not None:
+        config = config.model_copy(
+            update={"budget_usd": args.budget_per_task})
+    require_price_map_for_usd_budget(
+        config, also_explicit=args.budget_total is not None)
     label = args.label or config.fixer.model or "未命名"
     tasks = read_jsonl(Path(args.tasks), Task)
     workdir = Path(tempfile.mkdtemp(prefix="aifix-eval-"))
@@ -235,7 +248,8 @@ def _cmd_eval(args) -> None:
 
     print(f"{len(tasks)} 个任务 · {label} · 并行 {args.parallel}")
     results = asyncio.run(run_suite(tasks, config, label, workdir,
-                                    parallel=args.parallel, on_done=done))
+                                    parallel=args.parallel, on_done=done,
+                                    total_usd=args.budget_total))
     out = Path(args.out or f"evals/results-{_safe_label(label)}.jsonl")
     write_jsonl(out, results)
     print()

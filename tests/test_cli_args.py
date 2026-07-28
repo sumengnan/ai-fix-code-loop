@@ -139,3 +139,41 @@ def test_cli_budget_flag_counts_as_explicit():
 
     cfg = AifixConfig().model_copy(update={"budget_usd": 0.6})
     assert "budget_usd" in cfg.model_fields_set
+
+
+def test_eval_budget_flags():
+    a = build_parser().parse_args(
+        ["eval", "t.jsonl", "--budget-per-task", "0.5", "--budget-total", "5"])
+    assert a.budget_per_task == 0.5
+    assert a.budget_total == 5.0
+
+
+def test_eval_budget_flags_default_to_none():
+    a = build_parser().parse_args(["eval", "t.jsonl"])
+    assert a.budget_per_task is None
+    assert a.budget_total is None
+
+
+def _sub_help(name: str) -> str:
+    """取某个子命令的帮助文本。
+
+    argparse 没有公开的取法，只能从 actions 里找 _SubParsersAction；
+    按类型找而不是按下标取，子命令增减时不会错位。
+    """
+    import argparse
+    for act in build_parser()._actions:
+        if isinstance(act, argparse._SubParsersAction):
+            return act.choices[name].format_help()
+    raise AssertionError("没有找到子命令解析器")
+
+
+def test_run_budget_help_states_the_contract():
+    """契约必须出现在 --help 里：越线之后不再发起新调用，不是不超一分钱。
+
+    用户有权知道这个保证的边界在哪儿，而不是超支之后才发现。
+    """
+    assert "不再发起新的模型调用" in _sub_help("run")
+
+
+def test_eval_total_help_states_the_overshoot_bound():
+    assert "并发数" in _sub_help("eval"), "超支上界要写进 --help"
