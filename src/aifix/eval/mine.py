@@ -94,24 +94,22 @@ async def verify_commit(repo: str, commit: str, base_commit: str,
                         workdir: Path) -> list[str]:
     """返回「在 C^ 处红、在 C 处绿」的用例；不成立返回 []。
 
-    两次全量测试，很贵 —— 但这是 ground truth 的来源，省不得。
-    筛选（split_paths / is_candidate）已经把绝大多数 commit 挡在了外面。
+    四个阶段：scoped 到 test_files 取红、scoped 到 test_files 取绿、
+    scoped 到候选本身复跑确认、最后回到 C^ 状态跑一次全量确认。红转绿的
+    判定只需要本次 commit 动过的那几个测试文件，跑全量是白花时间 ——
+    实测本仓库单次全量 171 秒，一个候选 commit 两次全量约 6 分钟，而候选
+    在真实仓库里占提交总数的六成以上，这是把评测规模做上去的最大阻碍。
 
     任何一次测试没能产出报告都抛 RuntimeError（require_report=True）：
     任务集是要被反复使用的 ground truth，宁可跳过一个 commit，也不能
     把一批假任务写进去 —— 假任务不会报错，只会让所有模型的修复成功率
     一起变低，看起来像「模型都不行」。
 
-    末尾 run_scoped 复跑候选用例时，传给 pytest 的不是原生 nodeid，而是
-    adapter.make_test_id 从 junit 报告合成出来的 id。pytest 默认的
-    junit_family=xunit2 不写 <testcase> 的 file 属性，make_test_id 遇到
-    file=None 时走 `classname.replace(".", "/") + ".py"` 这条回退路径 ——
-    对类内测试（`test_foo.TestBar::test_baz`）会拼出一个根本不存在的路径
-    （`test_foo/TestBar.py::test_baz`，M1 遗留，见 docs 的「交给 M3b 的
-    缺口」）。真实仓库里类内测试很常见，候选集只要混进一个，pytest 就在
-    收集阶段整轮中止（exit code 4），连一个用例都没跑，写出的是一份
-    tests="0" 的空报告 —— 报告文件存在，require_report 检查不出异常，
-    看起来像「全部复跑通过」。
+    阶段 3 复跑候选用例时，传给 pytest 的不是原生 nodeid，而是
+    adapter.make_test_id 从 junit 报告合成出来的 id。无效 id 的代价不是
+    报错而是静默：pytest 在收集阶段整轮中止（exit code 4），连一个用例都
+    没跑，写出的是一份 tests="0" 的空报告 —— 报告文件存在，require_report
+    检查不出异常，看起来像「全部复跑通过」。
 
     所以不能只看 `cand - recheck.ids`（复跑后不在失败集里的）就当成过关：
     必须先用 recheck.ran 确认这个用例真的被 pytest 跑到过，跑不到的
@@ -121,27 +119,63 @@ async def verify_commit(repo: str, commit: str, base_commit: str,
     workdir = Path(workdir)
     shutil.rmtree(workdir, ignore_errors=True)
     materialize(repo, base_commit, commit, test_files, workdir)
-    red = await run_full_suite(workdir, adapter, require_report=True)
+    # materialize 之后的 HEAD 就是「C^ 源码 + C 测试」这个状态。它可能是
+    # base_commit 本身（测试无差异时不建提交），也可能是 materialize 新建的
+    # 那个提交 —— 阶段 4 要回到这里，所以现在就记下来
+    staged_head = _git(workdir, "rev-parse", "HEAD").strip()
+
+    # test_files 含测试目录下的非 .py 夹具（见 split_paths），它们能被
+    # materialize 嫁接，但不能出现在 pytest 命令行上
+    scope = [p for p in test_files if PurePosixPath(p).suffix == ".py"]
+    if not scope:
+        return []
+    red = await run_scoped(workdir, adapter, scope, require_report=True)
     if not red.ids:
         return []
     _git(workdir, "checkout", "--force", "--quiet", commit)
-    green = await run_full_suite(workdir, adapter, require_report=True)
+    green = await run_scoped(workdir, adapter, scope, require_report=True)
+
     # 交 green.ran 而不是只做差集：一个用例在 C 处被删掉或被跳过时，同样
     # 不会出现在 green.failures 里，但那不是「红转绿」——拿它当任务，
     # 任何模型都不可能通过，成功率被白白拉低。
     cand = (red.ids - green.ids) & green.ran
+    # 文件级 id（收集错误）：green 侧该文件正常收集，发出的是各个用例，
+    # 文件级 id 本身不会出现在 green.ran 里 —— 光靠上面那行会把「测试文件
+    # 在 C^ 导入失败、在 C 正常」整类候选静默丢掉。实测本仓库 65 个候选
+    # commit 里 32 个新增了测试文件，那正是这一类。
+    cand |= {i for i in (red.ids - green.ids)
+             if "::" not in i and _file_went_green(i, green)}
     if not cand:
         return []
-    # 再单跑一遍这几个用例：全量套件里的顺序依赖与状态污染会让「碰巧这一次
-    # 绿了」混进来。这一步很便宜（只跑几个用例），而一个误判会污染此后
-    # 每一轮评测。
+    # 再单跑一遍这几个用例：顺序依赖与状态污染会让「碰巧这一次绿了」混进来。
+    # 这一步很便宜（只跑几个用例），而一个误判会污染此后每一轮评测。
     recheck = await run_scoped(workdir, adapter, sorted(cand),
-                              require_report=True)
-    # `cand & recheck.ran`：只认真的跑到了的候选。少了这一步，一旦
-    # make_test_id 对某个候选合成出无效路径导致 pytest 整轮中止，
-    # recheck.ids 会是空集，`cand - recheck.ids` 就把整批候选误判成
-    # 复跑全绿而放行。
-    return sorted((cand & recheck.ran) - recheck.ids)
+                               require_report=True)
+    # 只认真的跑到了的候选。少了这一步，一旦 make_test_id 对某个候选合成出
+    # 无效路径导致 pytest 整轮中止，recheck.ids 会是空集，
+    # `cand - recheck.ids` 就把整批候选误判成复跑全绿而放行。
+    cand = {i for i in cand
+            if (_file_went_green(i, recheck) if "::" not in i
+                else (i in recheck.ran and i not in recheck.ids))}
+    if not cand:
+        return []
+    # 阶段 4：回到 C^ 状态跑一次全量。评测时 run_task 是用全量 baseline
+    # 复现 target_test 的，scoped 下红、全量下绿的用例（顺序依赖、状态
+    # 污染）到那时会变成 error —— 安全，但白跑一次模型。把这份浪费挪到
+    # 这里一次性付清
+    _git(workdir, "checkout", "--force", "--quiet", staged_head)
+    red_full = await run_full_suite(workdir, adapter, require_report=True)
+    return sorted(cand & red_full.ids)
+
+
+def _file_went_green(file_id: str, fs) -> bool:
+    """文件级 id 在 fs 这一侧「该文件的用例至少跑到一个且全部通过」。
+
+    要求「至少跑到一个」而不只是「没有失败」：文件根本没被收集时同样
+    没有失败，那不是变绿。
+    """
+    cases = {i for i in fs.ran if i.startswith(file_id + "::")}
+    return bool(cases) and not (cases & fs.ids)
 
 
 async def mine_tasks(repo: str, adapter: PytestAdapter, limit: int = 50,

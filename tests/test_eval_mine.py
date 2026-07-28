@@ -133,23 +133,23 @@ async def test_no_tasks_when_the_green_run_produces_no_report(
     """
     import aifix.eval.mine as mine
 
-    real = mine.run_full_suite
+    real = mine.run_scoped
     calls = {"n": 0}
 
     async def flaky(*a, **kw):
         calls["n"] += 1
-        if calls["n"] >= 2:                      # 第二次 = C 处那一跑
-            raise RuntimeError("测试未产出报告 .aifix-report.xml")
+        if calls["n"] >= 2:                      # 第二次 scoped = C 处那一跑
+            raise RuntimeError("测试未产出报告 .aifix-recheck.xml")
         return await real(*a, **kw)
 
-    monkeypatch.setattr(mine, "run_full_suite", flaky)
+    monkeypatch.setattr(mine, "run_scoped", flaky)
     seen = []
     tasks = await mine_tasks(str(history_repo["path"]), PytestAdapter(),
                              limit=10, workdir=tmp_path / "m",
                              on_progress=lambda sha, n, error=None:
                                  seen.append((n, error)))
     assert tasks == []
-    assert calls["n"] >= 2, "第二次全量测试没被调用，这个测试没测到东西"
+    assert calls["n"] >= 2, "C 处那一跑没被调用，这个测试没测到东西"
     # 「验证失败被跳过」必须能与「这个 commit 没有可用用例」区分开
     assert any(err is not None for _, err in seen)
 
@@ -205,7 +205,15 @@ async def test_verify_rejects_candidates_the_recheck_never_ran(
     import aifix.eval.mine as mine
     from aifix.adapters.base import FailureSet
 
+    real = mine.run_scoped
+    calls = {"n": 0}
+
     async def scoped_collect_crash(*a, **kw):
+        # 只让阶段 3（复跑候选）崩掉。阶段 1/2 必须走真的实现，否则阶段 1
+        # 就拿不到红用例、提前返回 []，这个断言会变成恒真。
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return await real(*a, **kw)
         # 模拟 pytest 收集阶段崩掉：报告存在但一个用例都没跑到。
         return FailureSet(failures={}, ran=frozenset())
 
@@ -214,7 +222,102 @@ async def test_verify_rejects_candidates_the_recheck_never_ran(
     h = history_repo
     got = await verify_commit(str(h["path"]), h["commit"], h["base"],
                               h["test_files"], PytestAdapter(), tmp_path / "v")
+    assert calls["n"] == 3, (
+        f"阶段 3 没被调到（实际 {calls['n']} 次 scoped），这个测试没测到东西")
     assert got == [], "复跑没真跑到的候选，不该被当成「复跑通过」全部放行"
+
+
+async def test_scoped_stage_does_not_run_the_whole_suite(
+        history_repo, tmp_path, monkeypatch):
+    """阶段 1/2 只跑 test_files —— 全量只在最后确认时跑一次。
+
+    此前每个候选 commit 要跑两次全量（实测本仓库单次 171 秒），而红转绿的
+    判定只需要 test_files 这几个文件。省下的时间直接决定挖掘能覆盖多少
+    commit。
+    """
+    import aifix.eval.mine as mine
+
+    real_scoped, real_full = mine.run_scoped, mine.run_full_suite
+    scoped_calls: list[list[str]] = []
+    full_calls = {"n": 0}
+
+    async def spy_scoped(worktree, adapter, test_ids, **kw):
+        scoped_calls.append(list(test_ids))
+        return await real_scoped(worktree, adapter, test_ids, **kw)
+
+    async def spy_full(worktree, adapter, **kw):
+        full_calls["n"] += 1
+        return await real_full(worktree, adapter, **kw)
+
+    monkeypatch.setattr(mine, "run_scoped", spy_scoped)
+    monkeypatch.setattr(mine, "run_full_suite", spy_full)
+
+    h = history_repo
+    got = await verify_commit(str(h["path"]), h["commit"], h["base"],
+                              h["test_files"], PytestAdapter(), tmp_path / "v")
+
+    assert got == [h["target"]], "改成 scoped 之后结论必须还是原来那一条"
+    assert len(scoped_calls) == 3, (
+        f"应是阶段 1/2/3 三次 scoped，实际 {len(scoped_calls)} 次")
+    assert full_calls["n"] == 1, (
+        f"全量只该在阶段 4 跑一次，实际 {full_calls['n']} 次")
+    # 阶段 1/2 的范围恰好是 test_files —— 多一个文件就是白跑，少一个就漏判
+    assert scoped_calls[0] == h["test_files"]
+    assert scoped_calls[1] == h["test_files"]
+    # 阶段 3 收窄到候选本身
+    assert scoped_calls[2] == [h["target"]]
+
+
+async def test_candidate_red_only_under_scope_is_dropped(
+        history_repo, tmp_path):
+    """scoped 下红、全量下绿的用例必须被阶段 4 排除。
+
+    评测时 run_task 是用**全量** baseline 复现 target_test 的。一个只在
+    单跑时红（依赖某个全局状态没被初始化）的用例，到评测时会因为别的测试
+    文件先跑并初始化了那个状态而变绿，于是判成 error —— 安全，但白跑一次
+    模型。把这份浪费挪到挖掘时一次性付清。
+
+    仓库形状：`appstate.READY` 在 C^ 是 False、C 是 True；
+    `tests/test_a_setup.py` 会把它置 True，且按收集顺序排在目标文件之前。
+    于是 tests/test_zz.py 里两个用例在阶段 1/2/3 表现完全一样（scoped 下
+    红转绿），只有阶段 4 的全量能把它们分开。
+    """
+    repo = history_repo["path"]
+
+    # C^：calc 退回有 bug，appstate 未就绪，另有一个会把它置就绪的测试文件
+    (repo / "calc.py").write_text(
+        "def add(a, b):\n    return a - b\n", encoding="utf-8")
+    (repo / "appstate.py").write_text("READY = False\n", encoding="utf-8")
+    (repo / "tests" / "test_a_setup.py").write_text(
+        "import appstate\n\n\n"
+        "def test_setup_marks_ready():\n"
+        "    appstate.READY = True\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    _commit(repo, "break calc, add appstate 与置位测试")
+    base = _rev(repo, "HEAD")
+
+    # C：修好 calc、appstate 默认就绪，并新增一个测试文件同时覆盖两者
+    (repo / "calc.py").write_text(
+        "def add(a, b):\n    return a + b\n", encoding="utf-8")
+    (repo / "appstate.py").write_text("READY = True\n", encoding="utf-8")
+    (repo / "tests" / "test_zz.py").write_text(
+        "import appstate\nimport calc\n\n\n"
+        "def test_needs_ready():\n"
+        "    assert appstate.READY\n\n\n"
+        "def test_sum_is_addition():\n"
+        "    assert calc.add(2, 3) == 5\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    _commit(repo, "fix: calc 与 appstate")
+    commit = _rev(repo, "HEAD")
+
+    got = await verify_commit(str(repo), commit, base, ["tests/test_zz.py"],
+                              PytestAdapter(), tmp_path / "v")
+
+    # 真红的那条留下，只在 scoped 下红的那条被丢掉 —— 两个方向都要成立，
+    # 否则「全丢了」或「全留了」都能蒙混过去
+    assert got == ["tests/test_zz.py::test_sum_is_addition"], (
+        "test_needs_ready 只在 scoped 下红，全量下会被 test_a_setup 救绿，"
+        "不该进任务集")
 
 
 def _commit(repo, msg: str) -> None:
