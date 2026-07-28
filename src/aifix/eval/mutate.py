@@ -35,6 +35,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import random
 import re
 import shutil
@@ -253,11 +254,20 @@ def mutations(source: str) -> Iterator[Mutation]:
 # ---------------------------------------------------------------- 任务产出层
 
 def _git(cwd: str | Path, *args: str) -> str:
-    res = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
-                         text=True)
+    r"""跑 git 并按字节取回输出，**不能用 `text=True`**。
+
+    `text=True` 会对 stdout 做 universal newline 翻译：diff 正文里属于文件
+    内容的 `\r\n` 被翻成 `\n`，而工作区与 blob 两侧都还是 CRLF —— 产出的补丁
+    上下文对不上，评测时 materialize 的 `git apply` 报 "patch does not apply"
+    并让整个任务作废。这一层与 _read_source 那一层是两回事：读写保住了行尾，
+    取 diff 这一步照样能把它抹掉。
+    """
+    res = subprocess.run(["git", *args], cwd=cwd, capture_output=True)
     if res.returncode != 0:
-        raise RuntimeError(f"git {' '.join(args)} 失败：{res.stderr.strip()}")
-    return res.stdout
+        raise RuntimeError(
+            f"git {' '.join(args)} 失败："
+            f"{res.stderr.decode('utf-8', 'replace').strip()}")
+    return res.stdout.decode("utf-8")
 
 
 def _test_index(ran: frozenset[str]) -> dict[str, list[str]]:
@@ -312,6 +322,41 @@ def _mutation_diff(tree: Path, rel: str) -> str:
     return _git(tree, "-c", "diff.noprefix=false", "diff", "--no-color",
                 "--no-ext-diff", "--no-textconv", "--binary",
                 "--src-prefix=a/", "--dst-prefix=b/", "--", rel)
+
+
+def _read_source(path: Path) -> str:
+    r"""读源码，原样保留行尾。
+
+    **不能用 `read_text`**：它走 universal newline，把 `\r\n` 归一成 `\n`，
+    `write_text` 再写回 `\n` —— 一份 CRLF 源文件的「单点变异」于是变成整份
+    文件的行尾都被改掉，diff 是整文件重写。那恰好是本模块开头说要避免的形状：
+    既不像真实 bug，也会当场撞上巨型 diff 守卫。
+    """
+    with open(path, encoding="utf-8", newline="") as f:
+        return f.read()
+
+
+def _write_source(path: Path, text: str) -> None:
+    """写回源码，原样保留行尾（见 _read_source）。
+
+    `newline=""` 同时挡住写侧的转换：默认的 `newline=None` 在 Windows 上会把
+    `\n` 写成 `\r\n`，CRLF 文件则被写成 `\r\r\n`。
+    """
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+
+
+def _mutation_tag(m: Mutation) -> str:
+    """变异在 task_id 里的标识：给人看的 description + 内容短哈希。
+
+    光有 `文件:行号:目标用例` 不够唯一 —— 同一行上的多个算子（「比较运算符」
+    加「整数常量」是最常见的组合）弄红同一个用例时，三者逐字相同。
+    光加 description 也不够：`a > b and a > 10` 这一行上两个 `>` 的
+    description 同样逐字相同。哈希取自变异后的完整源码，落点不同的两个变异
+    必然不同。
+    """
+    digest = hashlib.sha1(m.source.encode("utf-8")).hexdigest()[:8]
+    return f"{m.description}#{digest}"
 
 
 async def _run(tree: Path, adapter: PytestAdapter,
@@ -410,7 +455,7 @@ async def mutate_tasks(repo: str, adapter: PytestAdapter, max_tasks: int = 10,
                 continue
             path = tree / rel
             try:
-                original = path.read_text(encoding="utf-8")
+                original = _read_source(path)
             except (OSError, UnicodeDecodeError) as e:
                 # `git ls-files '*.py'` 会捞到非 UTF-8 编码声明的文件和断链
                 # 符号链接。让它们穿出去会掀翻整轮，把已经收进 tasks 的成果
@@ -424,7 +469,7 @@ async def mutate_tasks(repo: str, adapter: PytestAdapter, max_tasks: int = 10,
             for m in candidates:
                 if len(tasks) >= max_tasks:
                     break
-                path.write_text(m.source, encoding="utf-8")
+                _write_source(path, m.source)
                 try:
                     fs = await _run(tree, adapter, scope_files,
                                     candidate_timeout)
@@ -442,13 +487,14 @@ async def mutate_tasks(repo: str, adapter: PytestAdapter, max_tasks: int = 10,
                 finally:
                     # 还原必须无条件执行 —— 上一个变异留在工作区里，下一个
                     # 候选的「新失败」就分不清是谁造成的了
-                    path.write_text(original, encoding="utf-8")
+                    _write_source(path, original)
                 new = sorted(fs.ids)
                 if not (1 <= len(new) <= max_new_failures) or not diff.strip():
                     continue
                 target = new[0]
                 tasks.append(Task(
-                    task_id=f"{name}@mut::{rel}:{m.lineno}::{target}",
+                    task_id=(f"{name}@mut::{rel}:{m.lineno}::"
+                             f"{_mutation_tag(m)}::{target}"),
                     repo=str(Path(repo).resolve()), commit=head,
                     base_commit=head, test_files=[], target_test=target,
                     gold_files=[rel], adapter=adapter.name,
@@ -458,4 +504,17 @@ async def mutate_tasks(repo: str, adapter: PytestAdapter, max_tasks: int = 10,
                 on_progress(rel, n, None)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+    # 出口自检：id 撞车的代价不是报错而是静默失真。runner._safe_id 对相同
+    # 输入给出相同 run_id，两个任务克隆进同一个目录，第二个 prepare_task_repo
+    # 报 destination already exists，被 run_suite 的 except 吞成「评测故障」——
+    # 任务数比 jsonl 行数少、故障凭空多几条，看起来像环境问题。宁可当场炸，
+    # 也不要把撞车的任务集交出去。
+    ids = [t.task_id for t in tasks]
+    if len(set(ids)) != len(ids):
+        dup = sorted({i for i in ids if ids.count(i) > 1})
+        raise RuntimeError(
+            f"变异产出了重复的 task_id：{'、'.join(dup)}。"
+            "评测时它们会撞进同一个工作目录，第二个任务直接失败并被记成"
+            "评测故障 —— 这是 bug，不是可以放行的任务集")
     return tasks

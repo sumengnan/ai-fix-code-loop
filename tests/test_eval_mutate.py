@@ -405,6 +405,111 @@ async def test_smart_scope_skips_files_no_test_file_is_named_after(tmp_path):
     assert [t.gold_files for t in full] == [["gauge.py"]] * len(full)
 
 
+def _make_collision_repo(tmp_path: Path) -> Path:
+    """同一行上两个可变异算子，且它们弄红的是同一个用例。
+
+    `n > 10` 上的 `>` → `>=` 与 `10` → `11` 都只弄红 test_is_big：源文件、
+    行号、target_test 三者全同，task_id 里再没有别的东西能把它们分开。
+    """
+    return _init_repo(tmp_path / "collide", {
+        "pytest.ini": _PYTEST_INI,
+        "gate.py": "def is_big(n):\n    return n > 10\n",
+        "tests/test_gate.py": (
+            "from gate import is_big\n\n\n"
+            "def test_is_big():\n"
+            "    assert is_big(11) is True\n"
+            "    assert is_big(10) is False\n"),
+    })
+
+
+def _make_crlf_repo(tmp_path: Path) -> Path:
+    """calc.py 用 CRLF 行尾（Windows 上产生的仓库里很常见）。
+
+    `.gitattributes` 里 `* -text` 关掉 git 的行尾转换，保证不管跑测试的人
+    `core.autocrlf` 配成什么，工作区里拿到的都是 CRLF。
+    """
+    repo = _init_repo(tmp_path / "crlf", {
+        "pytest.ini": _PYTEST_INI,
+        ".gitattributes": "* -text\n",
+        "tests/test_calc.py": _GREEN_TEST,
+    })
+    (repo / "calc.py").write_bytes(_GREEN_SRC.replace("\n", "\r\n").encode())
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.email=t@example.com",
+                    "-c", "user.name=t", "commit", "-q", "-m", "crlf"],
+                   cwd=repo, check=True)
+    return repo
+
+
+async def test_task_ids_are_unique(tmp_path):
+    """撞 id 的两个任务在评测时会静默退化成一条「评测故障」。
+
+    runner._safe_id 对相同输入给出相同 run_id，两个任务于是克隆进同一个
+    目录，第二个 prepare_task_repo 报 destination already exists，被
+    run_suite 的 except 吞成评测故障：分母少一个、故障多一条，看起来像
+    环境问题，而真正原因是 id 撞车。`--max-tasks N` 也不再是 N 个不同任务。
+    """
+    repo = _make_collision_repo(tmp_path)
+    tasks = await mutate_tasks(str(repo), PytestAdapter(), max_tasks=5,
+                               workdir=tmp_path / "w")
+    ids = [t.task_id for t in tasks]
+    # 非空守卫写在前面：tasks 为空时下面那条唯一性断言恒真
+    assert len(tasks) == 2, f"两个算子都该弄红 test_is_big：{ids}"
+    assert len(set(ids)) == 2, f"两个任务撞了同一个 id：{ids}"
+    for t in tasks:
+        # id 会被 _safe_id 洗成分支名与目录名
+        assert "\n" not in t.task_id and '"' not in t.task_id
+
+
+async def test_duplicate_ids_blow_up_instead_of_shipping_a_broken_set(
+        tmp_path, monkeypatch):
+    """id 撞车是 bug，宁可当场炸也不要静默产出撞车的任务集。
+
+    id 里编进什么都挡不住「两个变异其实完全一样」这种情形，所以出口处必须
+    有一道自检 —— 少了它，撞车的代价要到评测跑到一半才以「评测故障」的形式
+    露头，而那时已经分不清是环境问题还是任务集问题。
+    """
+    from aifix.eval import mutate as mutate_mod
+
+    real = mutate_mod.mutations
+
+    def twice(source: str):
+        # 同一个变异出现两次：description、行号、变异后源码全同
+        first = list(real(source))[:1]
+        return iter(first * 2)
+
+    monkeypatch.setattr(mutate_mod, "mutations", twice)
+    repo = _make_green_repo(tmp_path)
+    with pytest.raises(RuntimeError, match="task_id"):
+        await mutate_tasks(str(repo), PytestAdapter(), max_tasks=5,
+                           workdir=tmp_path / "w")
+
+
+async def test_crlf_source_keeps_the_diff_single_point(tmp_path):
+    """CRLF 源文件的变异 diff 必须还是单点的，不能是整文件重写。
+
+    `read_text` 走 universal newline 把 `\\r\\n` 归一成 `\\n`、`write_text`
+    再写回 `\\n`，整份文件的行尾都被改掉 —— 产出的 diff 恰好是模块 docstring
+    要避免的那个形状：既不像真实 bug，也会当场撞上巨型 diff 守卫。
+    """
+    repo = _make_crlf_repo(tmp_path)
+    tasks = await mutate_tasks(str(repo), PytestAdapter(), max_tasks=1,
+                               workdir=tmp_path / "w")
+    assert len(tasks) == 1
+    lines = tasks[0].mutation_diff.splitlines()
+    minus = [ln for ln in lines if ln.startswith("-") and not ln.startswith("---")]
+    plus = [ln for ln in lines if ln.startswith("+") and not ln.startswith("+++")]
+    assert (len(minus), len(plus)) == (1, 1), tasks[0].mutation_diff
+    # 补丁要真的打得上 —— 行尾错一个字节，git apply 就找不到上下文
+    dest = tmp_path / "apply-here"
+    subprocess.run(["git", "clone", "--local", "--quiet", str(repo), str(dest)],
+                   check=True)
+    proc = subprocess.run(["git", "apply", "--check", "-"], cwd=dest,
+                          input=tasks[0].mutation_diff, capture_output=True,
+                          text=True)
+    assert proc.returncode == 0, f"变异补丁打不上：{proc.stderr}"
+
+
 async def test_seed_makes_the_selection_reproducible(tmp_path):
     """同一个 seed 两次跑出同一批任务，换 seed 才允许不同。"""
     repo = _make_green_repo(tmp_path)
