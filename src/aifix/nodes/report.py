@@ -56,6 +56,25 @@ def _signal_section(signals: list[dict[str, Any]]) -> list[str]:
                     "它们只是说：合并之前值得亲眼看一遍这个 diff。"]
 
 
+def count_fixed(results: list[dict[str, Any]]) -> int:
+    """判定为「已修复」的用例数。
+
+    报告里的那个数与落进 trajectory 的 fixed 列必须是同一个 —— 各算各的，
+    两边的口径迟早会分家，而分家之后两个数都还是「看着对」。
+    """
+    return sum(1 for r in results if r["verdict"] == "better")
+
+
+def cost_is_unknown(tokens: int, usd: float) -> bool:
+    """花了 token 却算出 0 元 —— 没配价格表，effective_cost 恒为 0。
+
+    这个 0 与「真的没花钱」在这里区分不了，所以一律当作「不知道」：
+    显示假的 $0.00、往库里存一个 0.0，都会让此后按成本做的排序与汇总变成
+    看起来完全正常的假结论。
+    """
+    return tokens > 0 and usd == 0.0
+
+
 def render_report(state: dict[str, Any]) -> str:
     abort = state.get("abort")
     results = state["results"]
@@ -66,13 +85,13 @@ def render_report(state: dict[str, Any]) -> str:
         return (f"# aifix run {state['run_id']}\n\n"
                 f"**中止**：{abort}\n")
 
-    fixed = sum(1 for r in results if r["verdict"] == "better")
+    fixed = count_fixed(results)
     total = len(state["baseline_ids"])
     tokens = state["spent_tokens"]
     usd = state["spent_usd"]
-    # 花了 token 却算出 0 元，说明没配价格表。显示假的 $0.00 比不显示更糟。
+    # 显示假的 $0.00 比不显示更糟，见 cost_is_unknown
     cost = (f"未知（未配置 AIFIX_PRICE_MAP）（{tokens:,} tokens）"
-            if tokens > 0 and usd == 0.0
+            if cost_is_unknown(tokens, usd)
             else f"{fmt_usd(usd)}（{tokens:,} tokens）")
     lines = [
         f"# aifix run {state['run_id']}",

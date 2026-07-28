@@ -573,10 +573,18 @@ def test_stats_renders_decoded_values_in_frequency_order(repo, capsys):
 def test_stats_shows_a_dash_when_the_fixed_count_is_unknown(repo, capsys):
     """「取不到」和「是 0」是两回事。
 
-    修复数只能从 report.md 解；解不出来时库里是 NULL。渲染成 0 就是在说
-    「这批 run 一个都没修好」—— 那是另一回事，而且看起来完全正常。
+    修复数取自 run 收尾时落的 fact，老产物里没有这条、只能解 report.md，
+    两条都没有时库里是 NULL。渲染成 0 就是在说「这批 run 一个都没修好」——
+    那是另一回事，而且看起来完全正常。
+
+    造一个两条都缺的 run：删掉 report.md 已经不够了（fact 还在），而这里
+    要测的正是 NULL 这一列怎么渲染。
     """
-    (repo / ".aifix" / "runs" / "r_huge" / "report.md").unlink()
+    old = repo / ".aifix" / "runs" / "r_old"
+    old.mkdir()
+    (old / "facts.jsonl").write_text(
+        json.dumps({"run_id": "r_old", "key": "baseline_failures", "value": 1})
+        + "\n", encoding="utf-8")
     _run_cmd(["ingest", "--repo", str(repo)])
     capsys.readouterr()
     _run_cmd(["stats", "--repo", str(repo)])

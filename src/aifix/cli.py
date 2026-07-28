@@ -17,7 +17,8 @@ from .nodes.baseline import baseline_node
 from .nodes.detect import detect_node
 from .nodes.fix import fix_node
 from .nodes.preflight import preflight_node
-from .nodes.report import render_report, report_node
+from .nodes.report import (cost_is_unknown, count_fixed, render_report,
+                           report_node)
 from .nodes.verify import verify_node
 # replay 与 trajectory 可以放在模块顶部：它们只读 jsonl / sqlite，一个
 # aifix 内部模块都不 import，不存在 eval 子包那条 `eval.runner → cli` 的环
@@ -161,10 +162,31 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                     _backfill_in_flight_result(state)
                     break
 
+        _record_run_summary(trace, state)
         state.update(report_node(state))
     finally:
         trace.close()
     return state
+
+
+def _record_run_summary(trace: RunTrace, state: AifixState) -> None:
+    """把 run 的收尾数据落成事实：适配器、分支、修复数、花销。
+
+    这四类值以前只存在于渲染出来的 report.md 里，跨 run 的轨迹表只能拿正则
+    去解自己渲染的 markdown —— 报告改一个字，那几列就静默变成 NULL，而聚合
+    查询照跑不误、给出的每个数都是「看着正常」的错数。事实是数据契约，报告
+    是渲染，两者不该反过来。
+
+    写在 report_node 之前：报告本身会因为字段缺失而少印一行，事实不会。
+    """
+    trace.fact("adapter", state["adapter_name"])
+    trace.fact("branch", state["branch"])
+    trace.fact("fixed", count_fixed(state["results"]))
+    tokens, usd = state["spent_tokens"], state["spent_usd"]
+    trace.fact("spent_tokens", tokens)
+    # 没配价格表时成本恒为 0，落库存 0.0 就是伪造 $0.00。写 None 是**有意的**
+    # 事实：「花了钱，但这次不知道花了多少」——与「真的没花钱」是两回事。
+    trace.fact("spent_usd", None if cost_is_unknown(tokens, usd) else usd)
 
 
 _LABEL_UNSAFE = re.compile(r"[^\w.-]+", re.UNICODE)

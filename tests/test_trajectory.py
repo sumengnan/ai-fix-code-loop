@@ -254,6 +254,67 @@ def test_runs_行的字段取自真实产物(repo: Path) -> None:
 
 # ---------- 聚合 ----------
 
+def test_五列各有一条_fact(repo: Path) -> None:
+    """adapter / branch / fixed / 花销必须是落盘的事实，不是报告里的渲染结果。"""
+    trajectory.ingest(repo)
+    with _db(repo) as con:
+        keys = {r[0] for r in con.execute(
+            "SELECT key FROM facts WHERE run_id='r_fix'")}
+    assert {"adapter", "branch", "fixed", "spent_tokens", "spent_usd"} <= keys
+
+
+def test_五列取自_fact_而不是解_report_md(repo: Path) -> None:
+    """把 report.md 全删掉，五列仍然正确。
+
+    report.md 是**渲染**不是数据契约。只断言「值对」的话走正则也能全绿 ——
+    区分度全在这一步删除上：报告改一个字，正则那条链子就静默断掉，五列变成
+    NULL 而聚合查询不会报错。
+    """
+    for d in (repo / ".aifix" / "runs").iterdir():
+        (d / "report.md").unlink()
+
+    trajectory.ingest(repo)
+    with _db(repo) as con:
+        con.row_factory = sqlite3.Row
+        fix = con.execute(
+            "SELECT * FROM runs WHERE run_id='r_fix'").fetchone()
+        guard = con.execute(
+            "SELECT * FROM runs WHERE run_id='r_guard'").fetchone()
+    assert fix["adapter"] == "pytest"
+    assert fix["branch"] == "aifix/r_fix"
+    assert fix["fixed"] == 1
+    assert fix["spent_tokens"] == 45
+    # 没配价格表 —— 这一列必须是 NULL，不能因为改走 fact 就变回假的 0.0
+    assert fix["spent_usd"] is None
+    # 对照组：没修好的那个是 0，不是 1（fixed 恒等于 baseline 的实现也会全绿）
+    assert guard["fixed"] == 0
+
+
+def test_没有_fact_的老产物回退解_report_md(tmp_path: Path) -> None:
+    """构造目录：M4 之前落下的 run 只有 markdown，正则那条回退必须保留。"""
+    d = tmp_path / ".aifix" / "runs" / "old"
+    d.mkdir(parents=True)
+    (d / "facts.jsonl").write_text(
+        json.dumps({"run_id": "old", "key": "baseline_failures", "value": 2})
+        + "\n", encoding="utf-8")
+    (d / "report.md").write_text(
+        "# aifix run old\n\n"
+        "- 适配器：pytest\n"
+        "- 分支：`aifix/old`\n"
+        "- 修复：**1 / 2**\n"
+        "- 成本：$0.1234（1,200 tokens）\n", encoding="utf-8")
+
+    assert trajectory.ingest(tmp_path) == 1
+    with _db(tmp_path) as con:
+        con.row_factory = sqlite3.Row
+        row = con.execute("SELECT * FROM runs WHERE run_id='old'").fetchone()
+    assert row["adapter"] == "pytest"
+    assert row["branch"] == "aifix/old"
+    assert row["fixed"] == 1
+    assert row["spent_tokens"] == 1200
+    assert row["spent_usd"] == 0.1234
+
+
 def test_query_stats_按_adapter_聚合_run_数与修复数(repo: Path) -> None:
     trajectory.ingest(repo)
     stats = trajectory.query_stats(repo)

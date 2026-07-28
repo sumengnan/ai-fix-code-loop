@@ -57,9 +57,17 @@ CREATE TABLE IF NOT EXISTS facts (
 CREATE INDEX IF NOT EXISTS facts_key ON facts(key);
 """
 
-# report.md 是**渲染**不是数据契约：adapter / branch / fixed / 花销这几个字段
-# 目前只存在于报告里（facts.jsonl 没写过），只能从这儿解。所以每条都写成
-# 「解不出来就是 None」—— 报告改版时这几列变 NULL，而不是解出一个错的数。
+# 这五列的类型。run_once 各写一条同名的 fact，是它们的**数据契约**来源。
+_COLUMN_TYPES: dict[str, Any] = {
+    "adapter": str, "branch": str, "fixed": int,
+    "spent_tokens": int, "spent_usd": (int, float),
+}
+
+# 下面这套正则只是**回退**：M4 之前落下的 run 没写过这五条 fact，只有渲染出来
+# 的 report.md。用正则解自己渲染的 markdown 是一条会悄悄断掉的链子 —— 报告改
+# 一个字，五列就静默变成 NULL，而聚合查询照跑不误。所以新产物一律走 fact，
+# 这里只伺候已经落盘、再也不会重新生成的老目录。
+# 每条都写成「解不出来就是 None」：报告改版时这几列变 NULL，而不是解出一个错的数。
 _RE_ADAPTER = re.compile(r"^- 适配器：(.+)$", re.M)
 _RE_BRANCH = re.compile(r"^- 分支：`(.+)`$", re.M)
 _RE_FIXED = re.compile(r"^- 修复：\*\*(\d+) / (\d+)\*\*$", re.M)
@@ -113,6 +121,28 @@ def _parse_report(path: Path) -> dict[str, Any]:
     return out
 
 
+def _run_columns(run_level: dict[str, Any],
+                 report: dict[str, Any]) -> dict[str, Any]:
+    """五列优先取 fact，取不到才回退到 report.md 解出来的那份。"""
+    out: dict[str, Any] = {}
+    for key, want in _COLUMN_TYPES.items():
+        if key in run_level:
+            value = run_level[key]
+            # value 为 None 是**有意写下的**：花了 token 却没配价格表时，成本
+            # 是「不知道」而不是 0。这也是一条取到了的事实，不能因为它是空的
+            # 就退回去解报告 —— 报告那边同样只会解出「未知」。
+            if value is None:
+                out[key] = None
+                continue
+            # 类型对不上说明产物的形状变了：宁可退回正则，也不要往 INTEGER 列
+            # 里塞一个字符串（sqlite 不拦，此后所有比大小的查询都是错的）
+            if isinstance(value, want) and not isinstance(value, bool):
+                out[key] = value
+                continue
+        out[key] = report[key]
+    return out
+
+
 def _connect(db: Path) -> sqlite3.Connection:
     db.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(db)
@@ -136,7 +166,8 @@ def _ingest_one(con: sqlite3.Connection, run_dir: Path) -> None:
             # 逐字节相同的文本，否则按 value 分组会把同一条事实拆成两组
             json.dumps(rec.get("value"), ensure_ascii=False, sort_keys=True),
         ))
-        if key in ("baseline_failures", "abort", "abort_kind"):
+        if key in ("baseline_failures", "abort", "abort_kind") \
+                or key in _COLUMN_TYPES:
             run_level[key] = rec.get("value")
 
     # 先删后插：run_id 不是 facts 的主键（一个 run 有几十条），INSERT OR
@@ -147,15 +178,15 @@ def _ingest_one(con: sqlite3.Connection, run_dir: Path) -> None:
         "INSERT INTO facts(run_id, failure, attempt, key, value) "
         "VALUES (?, ?, ?, ?, ?)", rows)
 
-    report = _parse_report(run_dir / "report.md")
+    cols = _run_columns(run_level, _parse_report(run_dir / "report.md"))
     baseline = run_level.get("baseline_failures")
     con.execute(
         "INSERT OR REPLACE INTO runs(run_id, started_at, adapter, branch, "
         "baseline_failures, fixed, spent_tokens, spent_usd, abort, abort_kind)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (run_id, _started_at(run_dir), report["adapter"], report["branch"],
+        (run_id, _started_at(run_dir), cols["adapter"], cols["branch"],
          baseline if isinstance(baseline, int) else None,
-         report["fixed"], report["spent_tokens"], report["spent_usd"],
+         cols["fixed"], cols["spent_tokens"], cols["spent_usd"],
          run_level.get("abort"), run_level.get("abort_kind")))
 
 
