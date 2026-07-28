@@ -103,3 +103,39 @@ def test_safe_label_fallback_for_empty():
     assert _safe_label("///") == "未命名"
     assert _safe_label("   ") == "未命名"
     assert _safe_label("") == "未命名"
+
+
+def test_explicit_usd_budget_without_price_map_is_refused():
+    """设了上限却没价格表 = 一个系统给不了的保证。当场拒绝。"""
+    from aifix.cli import require_price_map_for_usd_budget
+    from aifix.config import AifixConfig
+
+    cfg = AifixConfig(budget_usd=0.6)          # 显式提供
+    with pytest.raises(SystemExit) as e:
+        require_price_map_for_usd_budget(cfg)
+    msg = str(e.value)
+    assert "AIFIX_PRICE_MAP" in msg, "报错要说清楚缺什么、怎么配"
+
+
+def test_default_usd_budget_without_price_map_is_allowed():
+    """没显式要求就不打扰 —— 退回 token 闸。"""
+    from aifix.cli import require_price_map_for_usd_budget
+    from aifix.config import AifixConfig
+
+    require_price_map_for_usd_budget(AifixConfig())   # 不抛即通过
+
+
+def test_explicit_usd_budget_with_price_map_is_allowed():
+    from aifix.cli import require_price_map_for_usd_budget
+    from aifix.config import AifixConfig
+
+    cfg = AifixConfig(budget_usd=0.6, price_map={"m": [0.001, 0.002]})
+    require_price_map_for_usd_budget(cfg)             # 不抛即通过
+
+
+def test_cli_budget_flag_counts_as_explicit():
+    """--budget 走的是 model_copy，也会被 model_fields_set 记住。"""
+    from aifix.config import AifixConfig
+
+    cfg = AifixConfig().model_copy(update={"budget_usd": 0.6})
+    assert "budget_usd" in cfg.model_fields_set

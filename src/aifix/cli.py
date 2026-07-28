@@ -116,6 +116,33 @@ def _safe_label(label: str) -> str:
     return _LABEL_UNSAFE.sub("_", label).strip("_") or "未命名"
 
 
+def require_price_map_for_usd_budget(config: AifixConfig,
+                                     also_explicit: bool = False) -> None:
+    """显式要求了美元上限却没有价格表 —— 当场拒绝。
+
+    also_explicit：给 `eval --budget-total` 用。那个上限不进配置对象
+    （它是这一次调用的调度约束，不是项目配置），所以 model_fields_set
+    看不见它，得由调用方把「用户确实要求了美元闸」这件事带进来。
+
+    不配价格表时 effective_cost 恒为 0，美元闸永远不会触发：用户设了上限，
+    系统欣然接受，然后一分钱不拦。与其给一个假的保证，不如现在就停。
+
+    「显式」由 pydantic 的 model_fields_set 判定，默认值不在其中；CLI 的
+    --budget 走 model_copy(update=...)，同样会被记住，所以一处判定管住
+    环境变量、构造参数、命令行三条来源。
+    """
+    explicit = also_explicit or "budget_usd" in config.model_fields_set
+    if not explicit or config.price_map:
+        return
+    raise SystemExit(
+        "拒绝启动：设置了美元预算上限，但没有配置价格表，这个上限不会生效。\n"
+        "  没有 price_map 时成本恒为 0，闸永远不触发 —— 与其给一个假的保证，"
+        "不如现在就停。\n"
+        "  修法一：配置价格表（每千 token 的 [输入价, 输出价]）\n"
+        "    export AIFIX_PRICE_MAP='{\"deepseek-v4-pro\": [0.003, 0.006]}'\n"
+        "  修法二：去掉美元上限，改用 AIFIX_BUDGET_TOKENS 限制 token")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aifix")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -164,6 +191,7 @@ def _cmd_run(args) -> None:
     config = AifixConfig()
     if args.budget is not None:
         config = config.model_copy(update={"budget_usd": args.budget})
+    require_price_map_for_usd_budget(config)
     state = asyncio.run(run_once(
         Path(args.repo).resolve(), config, run_id=uuid.uuid4().hex[:8],
         only_test=args.test, dry_run=args.dry_run))
