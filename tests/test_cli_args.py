@@ -203,3 +203,26 @@ def test_eval_total_help_states_the_overshoot_bound():
     assert "并发数×一次模型调用" in h, "超支上界要写进 --help"
     for stale in ("并发数-1", "并发数−1"):
         assert stale not in h, f"「{stale}」是 parallel=4 实测 4 倍超支证伪掉的旧说法"
+
+
+def test_mutate_subcommand_exists_and_states_its_positioning():
+    """帮助文本必须说清这是冒烟集不是基准 —— 否则这些数字会被当成结论。"""
+    text = _sub_help("mutate")     # 既有 helper，已剥 ANSI 且删掉全部空白
+    assert "冒烟集" in text
+    assert "不是基准" in text
+
+
+def test_mutate_flags():
+    args = build_parser().parse_args(
+        ["mutate", ".", "--max-tasks", "3", "--scope", "full"])
+    assert args.max_tasks == 3 and args.scope == "full"
+
+
+def test_mutate_defaults():
+    a = build_parser().parse_args(["mutate"])
+    assert a.repo == "."
+    assert a.max_tasks == 10
+    assert a.max_new_failures == 5
+    assert a.scope == "smart"
+    assert a.seed == 0
+    assert a.out == "evals/tasks-mutants.jsonl"

@@ -238,6 +238,24 @@ def build_parser() -> argparse.ArgumentParser:
                          "所以整批超支上界 = 并发数 × 一次模型调用的成本，"
                          "而不是随任务数线性放大")
 
+    mut = sub.add_parser(
+        "mutate", help="人造变异生成冒烟任务集",
+        description="产出的是冒烟集，不是基准。变异的分布与真实 bug 不同——"
+                    "它便宜、确定、可任意规模，用来验证链路本身是否工作；"
+                    "拿它跨模型比高低是过度解读。")
+    mut.add_argument("repo", nargs="?", default=".")
+    mut.add_argument("--max-tasks", type=int, default=10,
+                     help="最多产出多少个任务")
+    mut.add_argument("--max-new-failures", type=int, default=5,
+                     help="一个变异最多允许弄红几个用例。超过即丢弃 ——"
+                          "把套件炸掉一半的变异太显眼，也违反单点缺陷前提")
+    mut.add_argument("--scope", choices=["smart", "full"], default="smart",
+                     help="smart 只跑与被变异文件词干相关的测试文件（快，会漏，"
+                          "漏了只是少一个候选，不产生假任务）；full 每个变异跑一次全量")
+    mut.add_argument("--seed", type=int, default=0,
+                     help="变异选点的随机种子，固定后同一个仓库产出可复现")
+    mut.add_argument("--out", default="evals/tasks-mutants.jsonl")
+
     rep = sub.add_parser("eval-report", help="把若干轮结果渲染成对比表")
     rep.add_argument("results", nargs="+")
     return parser
@@ -249,6 +267,8 @@ def main() -> None:
         _cmd_run(args)
     elif args.cmd == "mine":
         _cmd_mine(args)
+    elif args.cmd == "mutate":
+        _cmd_mutate(args)
     elif args.cmd == "eval":
         _cmd_eval(args)
     elif args.cmd == "eval-report":
@@ -284,6 +304,26 @@ def _cmd_mine(args) -> None:
         limit=args.limit, max_tasks=args.max_tasks, on_progress=progress))
     write_jsonl(Path(args.out), tasks)
     print(f"产出 {len(tasks)} 个任务 → {args.out}")
+
+
+def _cmd_mutate(args) -> None:
+    # 延迟导入：eval 子包依赖 cli 模块（run_once），提到模块顶部会形成循环导入
+    from .adapters.pytest_adapter import PytestAdapter
+    from .eval.mutate import mutate_tasks
+    from .eval.task import write_jsonl
+
+    def progress(rel_path: str, n: int, error: str | None = None) -> None:
+        if error is not None:
+            print(f"  {rel_path}：变异失败，已跳过 —— {error}", flush=True)
+        else:
+            print(f"  {rel_path}：{n} 个可用任务", flush=True)
+
+    tasks = asyncio.run(mutate_tasks(
+        str(Path(args.repo).resolve()), PytestAdapter(),
+        max_tasks=args.max_tasks, max_new_failures=args.max_new_failures,
+        scope=args.scope, seed=args.seed, on_progress=progress))
+    write_jsonl(Path(args.out), tasks)
+    print(f"产出 {len(tasks)} 个冒烟任务 → {args.out}")
 
 
 def _cmd_eval(args) -> None:
