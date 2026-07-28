@@ -1,3 +1,4 @@
+from aifix.budget import fmt_usd
 from aifix.eval.score import render_table, summarize
 from aifix.eval.task import TaskResult
 
@@ -53,6 +54,30 @@ def test_table_has_one_row_per_model():
     assert "| B |" in md
     assert "定位准确率" in md
     assert "越界尝试" in md
+
+
+def test_zero_cost_with_tokens_spent_renders_as_unknown():
+    """没配价格表时成本恒为 0，显示假的 $0.000 比不显示更糟。
+
+    验收命令只设 API_KEY / BASE_URL / MODEL，不设 AIFIX_PRICE_MAP ——
+    第一张跨模型对比表的成本列两行都会是 0，读起来像「极其便宜」，
+    而不是「没数据」。report.py 早就这么处理了，score.py 不能再犯。
+    """
+    md = render_table([summarize([_r(cost_usd=0.0, tokens=12_345)])])
+    assert "$0.000" not in md
+    assert "未知" in md and "AIFIX_PRICE_MAP" in md
+
+
+def test_zero_cost_without_tokens_is_a_real_zero():
+    """一个 token 都没花（全 dry-run / 全出错）时，0 元就是 0 元。"""
+    md = render_table([summarize([_r(cost_usd=0.0, tokens=0)])])
+    assert "未知" not in md
+
+
+def test_cost_uses_shared_money_formatter():
+    """金额格式化复用 budget.fmt_usd，不另写一套。"""
+    md = render_table([summarize([_r(cost_usd=0.1256)])])
+    assert fmt_usd(0.1256) in md, md
 
 
 def test_table_marks_error_count():

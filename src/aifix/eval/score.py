@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from ..budget import fmt_usd
 from .task import TaskResult
 
 
@@ -19,6 +20,9 @@ class Summary(BaseModel):
     locate_rate: float
     fix_rate: float
     avg_cost_usd: float
+    # 用来判断「到底花没花 token」：没配价格表时 cost_usd 恒为 0，
+    # 光看成本分不出「便宜」和「没数据」。
+    avg_tokens: float
     avg_attempts: float
     violations: int             # 总次数，不是均值
     errors: int
@@ -31,7 +35,7 @@ def summarize(results: list[TaskResult]) -> Summary:
     n = len(valid)
     if n == 0:
         return Summary(model=model, tasks=0, locate_rate=0.0, fix_rate=0.0,
-                       avg_cost_usd=0.0, avg_attempts=0.0,
+                       avg_cost_usd=0.0, avg_tokens=0.0, avg_attempts=0.0,
                        violations=sum(r.violations for r in results),
                        errors=len(results) - n)
     return Summary(
@@ -39,10 +43,23 @@ def summarize(results: list[TaskResult]) -> Summary:
         locate_rate=sum(r.locate_hit for r in valid) / n,
         fix_rate=sum(r.verdict == "better" for r in valid) / n,
         avg_cost_usd=sum(r.cost_usd for r in valid) / n,
+        avg_tokens=sum(r.tokens for r in valid) / n,
         avg_attempts=sum(r.attempts for r in valid) / n,
         violations=sum(r.violations for r in valid),
         errors=len(results) - n,
     )
+
+
+def _cost_cell(s: Summary) -> str:
+    """花了 token 却算出 0 元，说明没配价格表 —— 显示假的 $0.000 比不显示更糟。
+
+    跨模型对比表就是拿来决定「哪个模型更划算」的：一列整齐的 $0.000 会被
+    读成「极其便宜」，而不是「这一列没数据」。report.py 已经这么处理，
+    config.price_map 的注释也做了同样的承诺。
+    """
+    if s.avg_tokens > 0 and s.avg_cost_usd == 0.0:
+        return "未知（未配置 AIFIX_PRICE_MAP）"
+    return fmt_usd(s.avg_cost_usd)
 
 
 def render_table(summaries: list[Summary]) -> str:
@@ -54,6 +71,6 @@ def render_table(summaries: list[Summary]) -> str:
     for s in summaries:
         lines.append(
             f"| {s.model} | {s.tasks} | {s.locate_rate:.0%} | {s.fix_rate:.0%}"
-            f" | ${s.avg_cost_usd:.3f} | {s.avg_attempts:.1f}"
+            f" | {_cost_cell(s)} | {s.avg_attempts:.1f}"
             f" | {s.violations} | {s.errors} |")
     return "\n".join(lines) + "\n"
