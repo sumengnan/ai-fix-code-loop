@@ -25,16 +25,49 @@ _HUGE_FEEDBACK = (
     "改动已被回滚。请只改必要的那几行，用最小的 diff 修复问题。")
 
 
-async def _diff_lines(sandbox: LocalSandbox) -> int:
-    """工作区当前改动的行数（+/- 行）。"""
-    res = await sandbox.exec(["git", "diff", "--numstat"], 30.0)
+def _sum_numstat(stdout: str) -> int:
+    """`git ... --numstat` 的前两列求和。非数字（二进制文件是 `-`）跳过。"""
     total = 0
-    for line in res.stdout.splitlines():
+    for line in stdout.splitlines():
         parts = line.split("\t")
         if len(parts) >= 2:
             for n in parts[:2]:
                 if n.isdigit():
                     total += int(n)
+    return total
+
+
+async def _diff_lines(sandbox: LocalSandbox, touched: set[str]) -> int:
+    """工作区当前改动的行数（+/- 行），未跟踪的新文件也算。
+
+    `git diff` 看不见未跟踪文件，而「只新建一个文件」是完全合法的修复：
+    算出 0 会被判成 empty_diff，带着「你没有对任何文件做出修改」的反馈一路
+    重试到 giveup —— 模型每一轮都做对了，额度却烧光，trace 里还留下一个与
+    事实不符的 diff_lines: 0。
+
+    只统计 `touched` 里的路径。worktree 里跑过测试会留下一堆未跟踪产物
+    （__pycache__、覆盖率文件、日志），把它们算进来等于让 empty_diff 这道
+    守卫从此永不触发。touched 是 ApplyPatchTool 的记账，是 agent 唯一的修改
+    手段 —— 与 Worktree.commit 「绝不用 git add -A」是同一条理由、同一份名单。
+    """
+    total = _sum_numstat(
+        (await sandbox.exec(["git", "diff", "--numstat"], 30.0)).stdout)
+    if not touched:
+        # 空 pathspec 会让 ls-files 列出**全部**未跟踪文件，正是上面要避开的
+        return total
+    listed = await sandbox.exec(
+        ["git", "ls-files", "--others", "--exclude-standard", "--",
+         *sorted(touched)], 30.0)
+    for rel in listed.stdout.splitlines():
+        rel = rel.strip()
+        if not rel:
+            continue
+        # 与 /dev/null 比，行数口径和上面那次 numstat 完全一致；--no-index
+        # 有差异时以 1 退出，这里只读它的输出，退出码本就不是错误
+        added = await sandbox.exec(
+            ["git", "diff", "--numstat", "--no-index", "--", "/dev/null", rel],
+            30.0)
+        total += _sum_numstat(added.stdout)
     return total
 
 
@@ -119,7 +152,7 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
             for kind, n in count_violations(outcome.events).items():
                 for _ in range(n):
                     trace.fact("violation", kind)
-            lines = await _diff_lines(sandbox)
+            lines = await _diff_lines(sandbox, touched)
 
             if lines == 0:
                 kind, feedback = "empty_diff", _EMPTY_FEEDBACK

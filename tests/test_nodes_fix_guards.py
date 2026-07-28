@@ -20,6 +20,15 @@ _PATCH = """--- a/calc.py
 +    return a + b
 """
 
+# 只新建一个文件：源侧是 /dev/null，`git diff` 完全看不见它。
+_NEW_FILE = """--- /dev/null
++++ b/helper.py
+@@ -0,0 +1,3 @@
++def helper():
++    # 新建文件也是合法修复
++    return 1
+"""
+
 # 整文件重写：删掉原来 2 行，塞进 400 行。numstat 记 402 行改动。
 _HUGE = ("--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,400 @@\n"
          "-def add(a, b):\n"
@@ -147,6 +156,43 @@ async def test_good_patch_passes_guards_in_one_shot(buggy_repo):
         assert out["abort_reason"] is None
         assert out["diff_lines"] == 2
         assert client.calls == 2, "一次过，没有守卫重试"
+
+
+async def test_new_file_only_patch_is_not_an_empty_diff(buggy_repo):
+    """只新建一个文件也是合法的修复 —— `git diff` 看不见未跟踪文件。
+
+    看不见的后果不止是 trace 里记 0：守卫会判成 empty_diff，带着「你没有
+    对任何文件做出修改」的反馈一路重试到 giveup，白烧一个 failure 的额度，
+    而模型每一轮都做对了。
+    """
+    with Worktree(buggy_repo, run_id="r1") as wt:
+        st = _state(buggy_repo, wt, guard_giveup_limit=2)
+        client = _Scripted([_tool("apply_patch", json.dumps({"diff": _NEW_FILE})),
+                            _text("新建了一个模块")])
+        out = await fix_node(st, client=client)
+        assert (wt.path / "helper.py").is_file(), "前提没成立：补丁没落地"
+        assert out["guard_hits"] == [], "新建文件不该触发 empty_diff"
+        assert out["abort_reason"] is None
+        assert out["diff_lines"] == 3, "记的是新文件真实的 3 行，不是 0"
+        assert client.calls == 2, "一次过，不该有守卫重试"
+
+
+async def test_untracked_test_artifacts_do_not_count_as_changes(buggy_repo):
+    """反向：worktree 里跑过测试留下的未跟踪产物不算改动。
+
+    只统计 apply_patch 记账过的路径，别的一律不看 —— 否则 __pycache__ 一出现，
+    empty_diff 这道守卫就永远不触发了，「模型一字未改」再也拦不住。
+    """
+    with Worktree(buggy_repo, run_id="r1") as wt:
+        (wt.path / "__pycache__").mkdir()
+        (wt.path / "__pycache__" / "calc.pyc").write_bytes(b"\x00\x01\x02")
+        (wt.path / ".coverage").write_text("垃圾" * 100, encoding="utf-8")
+        st = _state(buggy_repo, wt, fix_guard_retries=0)
+        client = _Scripted([_text("已修复")])       # 一个字都没改
+        out = await fix_node(st, client=client)
+        assert out["diff_lines"] == 0
+        assert out["guard_hits"] == ["empty_diff"]
+        assert out["abort_reason"] == "empty_diff"
 
 
 async def test_fix_stops_when_failure_usd_budget_exhausted(buggy_repo):
