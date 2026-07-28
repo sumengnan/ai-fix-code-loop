@@ -261,6 +261,28 @@ def test_conftest_is_test_infrastructure_not_ground_truth():
     tests, src = split_paths(["conftest.py", "src/pkg/mod.py"], ["tests"])
     assert tests == ["conftest.py"]
     assert src == ["src/pkg/mod.py"]
+
+
+def test_test_dir_is_matched_as_a_path_prefix_not_just_the_first_segment():
+    """多段的测试目录必须能判出来。
+
+    起因不是假设：M5 要做的 MavenAdapter，标准布局是 `src/test/java/...`，
+    `test_dirs` 会是 `["src/test"]`，而现在的判据是 `parts[0] in test_dirs`
+    —— `parts[0]` 是 `src`，判不出来，整个 Java 测试树会被当成源文件塞进
+    gold_files。改成路径前缀匹配，对 pytest 的 `["tests", "test"]` 行为完全
+    不变（`tests/x.py` 的前缀就是 `tests`）。
+    """
+    tests, src = split_paths(
+        ["src/test/java/demo/CalcTest.java", "src/main/java/demo/Calc.java"],
+        ["src/test"])
+    assert tests == ["src/test/java/demo/CalcTest.java"]
+    # .java 不是 .py，不进 gold_files —— 这一条由 MavenAdapter 自己的
+    # 后缀判定接手，不在本函数的职责里
+    assert src == []
+    # 前缀必须按**分段**比，不能裸 startswith：`testdata/x.py` 不是
+    # `test` 目录下的文件
+    tests, src = split_paths(["testdata/x.py"], ["test"])
+    assert tests == [] and src == ["testdata/x.py"]
 ```
 
 - [ ] **步骤 2：跑测试确认失败**
@@ -287,9 +309,12 @@ def split_paths(paths: list[str],
     """
     tests: list[str] = []
     src: list[str] = []
+    # 按**分段**比前缀，不用裸 startswith：`testdata/x.py`.startswith("test")
+    # 是 True，但它不是 `test` 目录下的文件
+    prefixes = [PurePosixPath(d).parts for d in test_dirs]
     for p in paths:
         pp = PurePosixPath(p)
-        in_test_dir = bool(pp.parts) and pp.parts[0] in test_dirs
+        in_test_dir = any(pp.parts[:len(d)] == d for d in prefixes if d)
         # conftest.py 可能躺在仓库根目录 —— 既不在 test_dirs 里，也不以
         # test_ 开头，会被判成源文件进 gold_files。它是测试基础设施。
         if in_test_dir or pp.name == "conftest.py" or pp.name.startswith("test_"):
@@ -871,9 +896,9 @@ async def mutate_tasks(repo: str, adapter, max_tasks: int = 10,
 ```python
 def test_mutate_subcommand_exists_and_states_its_positioning():
     """帮助文本必须说清这是冒烟集不是基准 —— 否则这些数字会被当成结论。"""
-    text = _strip(_sub_help("mutate"))     # 剥 ANSI + 删全部空白，见既有 helper
-    assert _strip("冒烟集") in text
-    assert _strip("不是基准") in text
+    text = _sub_help("mutate")     # 既有 helper，已剥 ANSI 且删掉全部空白
+    assert "冒烟集" in text
+    assert "不是基准" in text
 
 
 def test_mutate_flags():
@@ -882,7 +907,7 @@ def test_mutate_flags():
     assert args.max_tasks == 3 and args.scope == "full"
 ```
 
-**注意**：`_sub_help` 的断言必须走既有的「剥 ANSI + 删全部空白」归一化。中文帮助文本没有词间空格，`textwrap` 在任意位置硬断，任何保留空白的比对都会随终端宽度飘（M3b 里 `COLUMNS=45` 当场红过）。若 `tests/test_cli_args.py` 里已有这个 helper，**复用它**。
+**注意**：`tests/test_cli_args.py:163` 已有 `_sub_help(name)`，它内部就做了「剥 ANSI + 删掉全部空白」（`"".join(_ANSI.sub("", ...).split())`）。**直接复用，不要另造归一化**。中文帮助文本没有词间空格，`textwrap` 在任意位置硬断，任何保留空白的比对都会随终端宽度飘——M3b 里 `COLUMNS=45` 当场红过一次。
 
 - [ ] **步骤 2：跑测试确认失败**
 

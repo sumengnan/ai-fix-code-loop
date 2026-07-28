@@ -100,7 +100,7 @@ tests.test_foo          →  路径 tests/test_foo.py，类 []
 
 **后果**：某个 commit 同时新增了测试所需的非 `.py` 夹具（数据文件、配置片段、快照），该文件不会被 `materialize` 嫁接到任务工作区。任务在 base 侧因缺文件而红、在 C 侧绿，通过全部现有校验进入任务集，但 ground truth 实际不可达——修复模型即便诊断和补丁都对，也可能因为缺夹具而通不过。这不是"捏造任务"（确实是红转绿），是任务质量问题。
 
-**修法**：**测试目录下的**非 `.py` 文件归入 `test_files`，跟着测试一起嫁接。判据沿用现有的 `pp.parts[0] in test_dirs`。
+**修法**：**测试目录下的**非 `.py` 文件归入 `test_files`，跟着测试一起嫁接。判据是**按路径分段的前缀匹配**，由 `signals.under_dirs(path, dirs)` 这一份实现统一提供（它在分段之前会把 `\` 归一成 `/`、去掉前导 `./`，并**大小写不敏感**地比较；判定同时服务 `tools/patch.py` 的「不许改测试文件」守卫——两处问的是同一个问题，复制成两份必然各自漂移）。不是 `pp.parts[0] in test_dirs`：M5 的 MavenAdapter 走 Maven 标准布局 `src/test/java/...`，`test_dirs` 会是 `["src/test"]`，只看第一段拿到的是 `src`，判不出来，整棵 Java 测试树会被当成源文件塞进 `gold_files`。按分段比而不是裸 `startswith`，是因为 `testdata/x.py` 不是 `test` 目录下的文件。对 pytest 的 `["tests", "test"]` 行为完全不变。
 
 非测试目录下的非 `.py` 文件继续忽略——**不进 `gold_files`**。`gold_files` 是 `locate_hit` 的判定依据，衡量的是 Detector 定位**源文件**的能力；把数据文件塞进去会稀释这个指标。
 
@@ -142,7 +142,13 @@ fa69ab16 tests=[test_cost_gate_e2e.py]   red=1 green=0 cand=1
 e3a1cfbe tests=[test_cli_args.py]        red=3 green=0 cand=3
 ```
 
-8 个候选 commit 产出 15 个可用用例，全程约 13 分钟——其中大头是 `test_cost_gate_e2e.py` 这类会起子进程的 e2e 文件。同样这 8 个 commit 走现在的两次全量路径需要约 48 分钟。所有 15 个候选都落在 `green.ran` 里，说明 §4.3 的收集错误在这一批里没有出现（这些提交都是往**已存在**的测试文件里加用例）。
+8 个候选 commit 产出 15 个可用用例，全程约 13 分钟——其中大头是 `test_cost_gate_e2e.py` 这类会起子进程的 e2e 文件。所有 15 个候选都落在 `green.ran` 里，说明 §4.3 的收集错误在这一批里没有出现（这些提交都是往**已存在**的测试文件里加用例）。
+
+> **事后更正（实现之后的真实测量）**：上面这段探针数据**只跑了阶段 1 和 2**，不含阶段 4 的那次全量确认。据此推算的提速被高估了。
+>
+> 实现完成后真跑 `aifix mine . --limit 25 --max-tasks 12`：扫 25 个提交、验证 6 个候选、产出 12 个任务，**18 分钟**（约 3 分钟/候选 = 一次全量 + 三次 scoped）。同样这 6 个候选走旧的两次全量路径约需 34 分钟。
+>
+> **实测提速约 1.9 倍，不是探针数据暗示的 3.7 倍。** 差别全在阶段 4——它把成本从「两次全量」降到「一次全量」，省的是一次，不是两次。真正被省掉的是**没有候选的那些 commit**：它们现在只花两次 scoped，而旧流程要为每一个都付两次全量。所以提速倍数取决于目标仓库的候选命中率，本仓库命中率高（6/6 都有产出），是提速倍数**最低**的那一端。
 
 **为什么阶段 4 不能省**：评测时 `run_task` 用**全量** baseline 复现 `target_test`（`baseline_node` 跑全量）。scoped 下红、全量下绿的用例（顺序依赖、状态污染）会在评测时变成 `error`——安全但浪费。阶段 4 把这个浪费挪到挖掘时，一次性付清。
 
@@ -197,7 +203,12 @@ e3a1cfbe tests=[test_cli_args.py]        red=3 green=0 cand=3
 | 算术运算符 | `+`↔`-`，`*`↔`//` |
 | 布尔常量 | `True`↔`False` |
 | 布尔运算符 | `and`↔`or` |
-| 数字常量 | `n` → `n+1` |
+| 整数常量 | `n` → `n+1`（只认 `type(value) is int`） |
+
+整数常量这一条有两处收窄，都写在 `mutate.py` 的模块 docstring 里：
+
+- **只认 `type(value) is int`**，不是"数字"。`bool` 是 `int` 的子类，不排除的话 `True` 会走 `n → n+1` 被改成 `2`；浮点与复数不在算子表里。`True`↔`False` 由上一行的布尔常量那条负责。
+- **只在几处位置上施加**：`Compare` / `BinOp` / `BoolOp` 的操作数，以及 `Return` / `Assign` 的右值。函数默认值（`def f(x=3)`）与 `AnnAssign`（`n: int = 7`）里的常量多半是接口契约，改一处会让一大片测试同时红，落不出"单点"的 ground truth。f-string 内部（整棵 `JoinedStr` 子树）也排除。
 
 每次只施加**一处**变异——多处变异让 ground truth 不再是单点，也不像真实 bug。
 
@@ -255,9 +266,10 @@ A 类（挖掘）与 C 类（变异）的分布不同，把它们的修复成功
 
 **输出**：
 
-- `trace.fact("removed_public_symbol", 名字)`、`trace.fact("new_module_state", 名字)`、`trace.fact("files_outside_suspect", 列表)`
+- `trace.fact("removed_public_symbol", 列表)`、`trace.fact("new_module_state", 列表)`、`trace.fact("files_outside_suspect", 列表)`。三类**各写一条**，value 是那一类的整个列表，不是一个符号一条：单位是「类」不是「个」，每个交付的补丁至多贡献 3 条。按符号个数展开的话，在一个文件里删 10 个符号记 10、把改动摊到 20 个文件一个符号没删记 1，跨模型比这一列就不是同一把尺（规模仍留在 value 与报告里，没有丢）。key 名沿用单数——facts.jsonl 是评测与人共同消费的数据契约，改名会让历史 run 的 facts 与新代码对不上。
+- 这三条 fact **只在判定 BETTER 时写**，因为只有那一支会 commit 进交付分支。判 SAME / WORSE 的补丁随后就被 rollback 丢掉了，它从未存在过；非交付轮次改写 `trace.fact("signals_discarded", {三类各自的列表})`，这个 key **不进** `eval/runner._SIGNAL_KEYS`，不参与任何指标。否则「第 1 轮删了公开符号被回滚、第 2 轮干净地修好」会被记成 `fix_hits=1` 且 `signals≥1`——而那恰好是下面说的规格套利指纹，于是指纹是假的，方向还偏向爱试错的模型。`signals_discarded` 的 value 与交付侧同尺（三类各自的列表），存个数会让 facts.jsonl 里两个不同量纲的数字并排出现。
 - 报告新增一节「⚠️ 值得多看一眼」，仅在有信号时出现；同时把「合并：`git merge …`」那行前面加一句提示
-- `TaskResult` 增加 `signals: int`（信号条数合计），对比表增加「可疑信号」列
+- `TaskResult` 增加 `signals: int`（按上面那三个 key 的 **fact 条数**记，即「类」数），对比表增加「可疑信号」列
 
 **这一列怎么读**（写进文档）：修复成功率高、可疑信号也高——那是规格套利的指纹。单看任何一列都得不出这个结论。
 

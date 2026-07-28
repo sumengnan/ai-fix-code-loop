@@ -110,6 +110,24 @@ def test_commit_stages_new_file_when_listed(buggy_repo):
         assert "helper.py" in tracked
 
 
+def test_file_at_head_reads_the_committed_version(buggy_repo, fixed_source):
+    """改动还没提交时，旧内容只能从 HEAD 拿 —— 信号在 commit 之前计算。"""
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        (wt.path / "calc.py").write_text(fixed_source, encoding="utf-8")
+        head = wt.file_at_head("calc.py")
+        assert head is not None
+        assert "a - b" in head          # HEAD 版本
+        assert head != fixed_source     # 工作区版本不该混进来
+
+
+def test_file_at_head_returns_none_for_new_file(buggy_repo):
+    """补丁新建的文件在 HEAD 里不存在 —— 返回 None，signals 才不会误报删除。"""
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        (wt.path / "helper.py").write_text("def h():\n    return 1\n",
+                                           encoding="utf-8")
+        assert wt.file_at_head("helper.py") is None
+
+
 def test_commit_with_empty_paths_is_noop(buggy_repo, fixed_source):
     """没有明确改过的文件就不该产生提交。"""
     with Worktree(buggy_repo, run_id="abc123") as wt:
@@ -117,3 +135,87 @@ def test_commit_with_empty_paths_is_noop(buggy_repo, fixed_source):
         (wt.path / "calc.py").write_text(fixed_source, encoding="utf-8")
         wt.commit("fix: x", paths=[])
         assert _git(wt.path, "rev-parse", "HEAD").strip() == before
+
+
+def test_commit_raises_when_a_path_matches_nothing(buggy_repo):
+    """`git add -- <匹配不到的路径>` 之后 commit 会失败 —— 不许静默。
+
+    这是「不崩溃、不报错、测试全绿，只有承诺是假的」那个形状：add 匹配不到
+    任何文件（历史上 touched 记的是 diff 头上带前缀的 `a/calc.py`），commit
+    因无内容以 1 退出，而报告照写「修复 1/1」并给出 `git merge` —— 交付分支
+    上一个提交都没有。
+    """
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        before = _git(wt.path, "rev-parse", "HEAD").strip()
+        with pytest.raises(RuntimeError):
+            wt.commit("fix: x", paths=["a/calc.py"])
+        assert _git(wt.path, "rev-parse", "HEAD").strip() == before
+
+
+def test_commit_raises_when_only_some_paths_match(buggy_repo, fixed_source):
+    """一条路径匹配不到就整体失败 —— 半个交付比没有交付更难发现。"""
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        (wt.path / "calc.py").write_text(fixed_source, encoding="utf-8")
+        with pytest.raises(RuntimeError):
+            wt.commit("fix: x", paths=["calc.py", "b/nope.py"])
+
+
+def test_commit_is_quiet_when_the_files_equal_head(buggy_repo):
+    """区分度：路径都在、内容与 HEAD 逐字相同 —— 这是合法的「无事可提交」。
+
+    一个「commit 非 0 就抛」的实现会把这一条也判成失败。两者的分界在**暂存
+    结果**：add 报错说明路径本身有问题，add 成功却什么都没暂存说明文件真的
+    没变。
+    """
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        before = _git(wt.path, "rev-parse", "HEAD").strip()
+        wt.commit("fix: x", paths=["calc.py"])      # 一个字节都没改
+        assert _git(wt.path, "rev-parse", "HEAD").strip() == before
+
+
+def test_commit_returns_true_only_when_a_commit_was_really_produced(
+        buggy_repo, fixed_source):
+    """返回值就是「交付分支上到底多没多一个提交」—— 判定侧唯一能信的答案。"""
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        before = _git(wt.path, "rev-parse", "HEAD").strip()
+        (wt.path / "calc.py").write_text(fixed_source, encoding="utf-8")
+        assert wt.commit("fix: x", paths=["calc.py"]) is True
+        assert _git(wt.path, "rev-parse", "HEAD").strip() != before
+
+
+def test_commit_returns_false_when_the_files_equal_head(buggy_repo):
+    """补丁被自己的反向补丁抵消：路径都在、内容与 HEAD 逐字相同。
+
+    这不是错误（所以不抛），但它**没有交付**，调用方必须能分辨 ——
+    否则报告照写「已修复」，而交付分支上一个提交都没有。
+    """
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        assert wt.commit("fix: x", paths=["calc.py"]) is False
+
+
+def test_commit_returns_false_with_empty_paths(buggy_repo):
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        assert wt.commit("fix: x", paths=[]) is False
+
+
+def test_commit_returns_true_for_a_new_untracked_file(buggy_repo):
+    """新建文件也是**真的交付了** —— 区分度：`git diff` 看不见未跟踪文件。
+
+    拿 `git diff` 当「有没有改动」的判据，这一条会返回 False：模型新建一个
+    源文件是完全合法的修复，却被判成「什么都没做」而降级、回滚。那比现在的
+    洞更糟 —— 现在只是多报一次修复，那样是把真修复扔掉。
+    """
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        (wt.path / "helper.py").write_text("def h():\n    return 1\n",
+                                           encoding="utf-8")
+        assert wt.has_changes() is False        # git diff 眼里「什么都没变」
+        assert wt.commit("feat: helper", paths=["helper.py"]) is True
+        assert "helper.py" in _git(wt.path, "ls-tree", "-r", "--name-only",
+                                   "HEAD")
+
+
+def test_commit_reports_the_offending_path(buggy_repo):
+    """报错里必须带上那条路径，否则人拿到的是一句无从下手的「提交失败」。"""
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        with pytest.raises(RuntimeError, match="a/calc.py"):
+            wt.commit("fix: x", paths=["a/calc.py"])

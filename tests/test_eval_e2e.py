@@ -107,5 +107,14 @@ async def test_two_labels_render_side_by_side(history_repo, tmp_path):
     # 注意：不能写 `"0%" in row` —— 它是 "100%" 的子串，那样的断言恒为真。
     def _cells(r):
         return [c.strip() for c in r.strip("|").split("|")]
-    assert _cells(rows[0])[3] == "100%", rows[0]
-    assert _cells(rows[1])[3] == "0%", rows[1]
+    # 按**列名**取列，不按下标。M4 里这张表插过两次新列（「来源」「可疑信号」），
+    # 每插一次都让写死下标的断言错位一次 —— 而第二次错位**照样是绿的**：下标 3
+    # 从「修复成功率」滑到了「定位准确率」，那一列两行都是 100%，恰好把「不修的」
+    # 那行本该断言 0% 的事实盖住了。按列名取，以后插列不必再改这里。
+    header = _cells(next(ln for ln in md.splitlines()
+                         if ln.startswith("| 模型")))
+    col = next(i for i, h in enumerate(header) if h.startswith("修复成功率"))
+    # 整格相等，连样本量与区间一起钉住：1/1 的 100% 和 12/20 的 60% 不该长得
+    # 一样，这正是给这两列加分数与 Wilson 区间的理由。
+    assert _cells(rows[0])[col] == "100% (1/1, 95%CI 21%–100%)", rows[0]
+    assert _cells(rows[1])[col] == "0% (0/1, 95%CI 0%–79%)", rows[1]

@@ -9,11 +9,12 @@ import asyncio
 import hashlib
 import json
 import re
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from ..cli import run_once
 from ..config import AifixConfig
+from ..signals import same_file
 from .task import Task, TaskResult
 from .workspace import prepare_task_repo
 
@@ -57,17 +58,30 @@ def first_attempt_suspect(facts: list[dict[str, Any]]) -> str | None:
                 None)
 
 
-def _path_parts(path: str) -> tuple[str, ...]:
-    """把路径规整成 POSIX 分段序列，供后缀匹配用。
+_SIGNAL_KEYS = frozenset({"removed_public_symbol", "new_module_state",
+                          "files_outside_suspect"})
 
-    仓库里的路径都是 git 产出的 POSIX 形式，但模型给出的 suspect_file 可能带
-    `./` 前缀或 `\\` 分隔符（尤其是习惯 Windows 风格的模型）。先统一分隔符、
-    去掉前导 `./`，再切分，两侧才能在同一套坐标系里比较。
+
+def count_signals(facts: list[dict[str, Any]]) -> int:
+    """「可疑信号」这一列：按 fact 条数记，不按 value 展开。
+
+    verify_node 对三类信号**各写一条** fact，value 是那一类的整个列表。于是
+    每个交付的补丁至多贡献 3 条，单位是「类」不是「个」——删 10 个公开符号
+    和删 1 个都记 1，规模留在 value 与报告里。这不是省事：按个数展开的话，
+    在一个文件里删 10 个符号的模型记 10、把改动摊到 20 个文件却一个符号没删
+    的模型记 1，跨模型比这一列就不是同一把尺。
+
+    `signals_discarded` 刻意不在名单里：那是判 SAME / WORSE 后被 rollback 丢
+    弃的尝试留下的，只有诊断价值。把它算进来，「第 1 轮删了公开符号被回滚、
+    第 2 轮干净地修好」就会被记成 fix_hits=1 且 signals≥1 —— 而
+    `eval/score.py` 把这个组合定义为规格套利的指纹，指纹会变成假的，方向还
+    偏向爱试错的模型。
+
+    这一列的三条已知偏差见 `eval/score.py` 的模块 docstring：对诊断解析失败
+    的模型系统性偏低、只统计交付的补丁、单位是「类」不是「个」（后两条就是
+    上面这两段说的事，第一条只在 score.py 那边写全）。
     """
-    normalized = path.replace("\\", "/")
-    if normalized.startswith("./"):
-        normalized = normalized[2:]
-    return PurePosixPath(normalized).parts
+    return sum(1 for f in facts if f.get("key") in _SIGNAL_KEYS)
 
 
 def locate_hit(suspect: str | None, gold_files: list[str]) -> bool:
@@ -96,24 +110,13 @@ def locate_hit(suspect: str | None, gold_files: list[str]) -> bool:
     「蒙对文件名」的运气稀释，跨模型对比就失去区分度了。只报裸文件名（不
     带任何目录）的情况之所以命中，是因为它本身就是「分段序列长度为 1 的
     后缀」，符合同一条规则，不是放宽出的特例。
+
+    分段后缀匹配本身在 `aifix.signals.same_file` —— 补丁合理性信号里的
+    `files_outside_suspect` 问的是同一个问题「模型说的那个文件和我手上这
+    个是不是同一个」。两边各留一份实现会各自漂移，届时同一对路径可能在定
+    位准确率里算命中、在越界信号里算越界。
     """
-    if not suspect:
-        return False
-    suspect_parts = _path_parts(suspect)
-    if not suspect_parts:
-        return False
-    for gold in gold_files:
-        if not gold:
-            continue
-        gold_parts = _path_parts(gold)
-        if not gold_parts:
-            continue
-        shorter, longer = ((suspect_parts, gold_parts)
-                           if len(suspect_parts) <= len(gold_parts)
-                           else (gold_parts, suspect_parts))
-        if longer[len(longer) - len(shorter):] == shorter:
-            return True
-    return False
+    return any(same_file(suspect, gold) for gold in gold_files)
 
 
 async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
@@ -121,9 +124,13 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
                    fixer_client: Any = None) -> TaskResult:
     run_id = _safe_id(task.task_id)
     dest = Path(workdir) / run_id
+    # origin 必须带上：这条 blank 是「baseline 未复现」分支的落点，若省
+    # 略 origin 会退回 TaskResult 的默认值 mined，把变异任务的评测故障
+    # 误记成挖掘任务的，恰好抵消掉按来源分行统计的意义。
     blank = TaskResult(task_id=task.task_id, model=model, locate_hit=False,
                        suspect_file=None, verdict="same", attempts=0,
-                       tokens=0, cost_usd=0.0, violations=0)
+                       tokens=0, cost_usd=0.0, violations=0,
+                       origin=task.origin)
 
     prepare_task_repo(task, dest)
     state = await run_once(dest, config, run_id=run_id,
@@ -140,6 +147,7 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
     facts = _read_facts(dest, run_id)
     suspect = first_attempt_suspect(facts)
     violations = sum(1 for f in facts if f.get("key") == "violation")
+    signals = count_signals(facts)
     row = next((r for r in state["results"]
                 if r["test_id"] == task.target_test), None)
 
@@ -160,7 +168,9 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
                   else max(state.get("attempt", 0) - 1, 0)),
         tokens=state["spent_tokens"], cost_usd=state["spent_usd"],
         violations=violations,
+        signals=signals,
         abort_reason=(row or {}).get("abort_reason") or state.get("abort"),
+        origin=task.origin,
     )
     if state.get("abort_kind") == "wall":
         # 墙钟预算是评测调度器的属性，不是模型的属性：--parallel 8 时几个
@@ -178,10 +188,14 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
 _SKIPPED = "整批预算耗尽，未运行"
 
 
-def _blank(task_id: str, model: str, error: str) -> TaskResult:
+def _blank(task_id: str, model: str, error: str, origin: str) -> TaskResult:
+    # origin 没有默认值：跳过 / 异常两条路径各自持有对应的 task，写死
+    # 一个默认值等于给「忘记传」留了退路——退路的另一头正是本函数存在的
+    # 理由（被跳过/出错的变异任务落回默认 mined，统计上被并进挖掘任务）。
     return TaskResult(task_id=task_id, model=model, locate_hit=False,
                       suspect_file=None, verdict="same", attempts=0,
-                      tokens=0, cost_usd=0.0, violations=0, error=error)
+                      tokens=0, cost_usd=0.0, violations=0, error=error,
+                      origin=origin)
 
 
 async def run_suite(tasks: list[Task], config: AifixConfig, model: str,
@@ -221,21 +235,28 @@ async def run_suite(tasks: list[Task], config: AifixConfig, model: str,
         nonlocal spent
         async with sem:
             if total_usd is not None:
+                skipped = False
                 async with lock:
                     # 读 left、算 cap、预留进 spent 必须在同一把锁内一次
                     # 完成，中间不能释放锁 —— 否则另一个并发槽位会插进
-                    # 来读到预留之前的旧 spent，竞态原样存在。
+                    # 来读到预留之前的旧 spent，竞态原样存在。锁内只判定
+                    # 是否跳过，不做任何回调 —— on_done 是用户提供的 I/O
+                    # 回调（CLI 里是 print），锁内调用会把整批调度阻塞在
+                    # 一次 I/O 上，且与正常/异常两条路径的回调时机不一致。
                     left = total_usd - spent
                     if left <= 0:
-                        # 记成 error 而不是失败的 verdict：这是评测的调度
-                        # 决策，不是被测系统的成绩。混进比率分母会让修复
-                        # 成功率凭空变低 —— 被测系统替调度背锅。
-                        r = _blank(t.task_id, model, _SKIPPED)
-                        if on_done:
-                            on_done(r)
-                        return r
-                    cap = min(config.budget_usd, left)
-                    spent += cap
+                        skipped = True
+                    else:
+                        cap = min(config.budget_usd, left)
+                        spent += cap
+                if skipped:
+                    # 记成 error 而不是失败的 verdict：这是评测的调度
+                    # 决策，不是被测系统的成绩。混进比率分母会让修复
+                    # 成功率凭空变低 —— 被测系统替调度背锅。
+                    r = _blank(t.task_id, model, _SKIPPED, origin=t.origin)
+                    if on_done:
+                        on_done(r)
+                    return r
                 task_config = config.model_copy(
                     update={"budget_usd": cap})
             else:
@@ -246,7 +267,7 @@ async def run_suite(tasks: list[Task], config: AifixConfig, model: str,
                                    detector_client=detector_client,
                                    fixer_client=fixer_client)
             except Exception as e:      # 一个任务炸掉不能带走整个 suite
-                r = _blank(t.task_id, model, repr(e))
+                r = _blank(t.task_id, model, repr(e), origin=t.origin)
             if cap is not None:
                 # 回填预留与实际花销的差额。异常路径 r.cost_usd 是
                 # 0.0，回填 0.0 - cap 会把预留原样退回，是对的 ——

@@ -24,6 +24,13 @@ class Task(BaseModel):
     target_test: str             # 期望被修绿的那一个用例
     gold_files: list[str]        # commit 里改动的源码文件 —— ground truth
     adapter: str = "pytest"
+    # C 类（人造变异）任务：施加在 base_commit 之上的 unified diff。
+    # 不在源仓库里建提交 —— 那会污染用户的仓库；补丁随任务集走，
+    # 任务集是一份自包含的 jsonl
+    mutation_diff: str | None = None
+    # mined（从 git history 挖）| mutated（人造变异）。两者分布不同，
+    # 成功率不能平均成一个数字，见 score.summarize_by_origin
+    origin: str = "mined"
 
 
 class TaskResult(BaseModel):
@@ -40,6 +47,11 @@ class TaskResult(BaseModel):
     # 任务本身跑挂了（克隆失败、baseline 没复现……）。与「没修好」是两回事：
     # 前者是评测的问题，后者是被测系统的成绩，混在一起会污染成功率。
     error: str | None = None
+    # mined | mutated，跟随对应 Task.origin 走，供 score.summarize_by_origin
+    # 分开统计
+    origin: str = "mined"
+    # 补丁合理性静态信号的条数（见 aifix.signals）。不改判定，只标注
+    signals: int = 0
 
 
 M = TypeVar("M", bound=BaseModel)

@@ -79,3 +79,41 @@ def test_render_report_keeps_delivered_work_when_aborted_midrun():
     assert "1 / 2" in md, "已修好的那个必须出现在报告里"
     assert "`a`" in md
     assert "git merge aifix/r1" in md, "分支上有成果就要给出合并命令"
+
+
+def test_render_report_survives_a_legacy_checkpoint_signals_dict():
+    """`state["signals"]` 从 dict 换成 list 之后，旧 checkpoint 还是 dict。
+
+    `list({"removed_public_symbols": [...]})` 得到的是一串字符串键，
+    `entry.get(k)` 当场 AttributeError —— 从旧 checkpoint 恢复的 run 会在
+    渲染报告这一步炸掉，此时所有修复都已经提交进交付分支了。产品入口走
+    run_once 不读 checkpoint，现实中打不到，但一道形状检查很便宜。
+    """
+    md = render_report({
+        "run_id": "r1", "branch": "aifix/r1", "adapter_name": "pytest",
+        "baseline_ids": ["a"], "spent_usd": 0.0, "spent_tokens": 0,
+        "abort": None,
+        "results": [{"test_id": "a", "verdict": "better", "attempts": 1,
+                     "abort_reason": None}],
+        # 旧 checkpoint 里 signals 是 dict，被 list() 一取就只剩键名
+        "signals": list({"removed_public_symbols": ["mul"],
+                         "new_module_state": [], "files_outside_suspect": []}),
+    })
+    assert "1 / 1" in md
+    # 形状不对的条目跳过，而不是把键名当成信号渲染出来
+    assert "值得多看一眼" not in md
+
+
+def test_render_report_still_renders_well_formed_signal_entries():
+    """区分度：形状检查不能顺手把正常的信号条目也跳掉。"""
+    md = render_report({
+        "run_id": "r1", "branch": "aifix/r1", "adapter_name": "pytest",
+        "baseline_ids": ["a"], "spent_usd": 0.0, "spent_tokens": 0,
+        "abort": None,
+        "results": [{"test_id": "a", "verdict": "better", "attempts": 1,
+                     "abort_reason": None}],
+        "signals": [{"test_id": "a", "removed_public_symbols": ["mul"],
+                     "new_module_state": [], "files_outside_suspect": []}],
+    })
+    assert "值得多看一眼" in md
+    assert "`mul`" in md
