@@ -46,6 +46,24 @@ class RunBudget:
             return left
         return max(left // remaining_failures, self.FLOOR_TOKENS)
 
+    def remaining_usd(self) -> float:
+        return max(self._total_usd - self.spent_usd, 0.0)
+
+    def usd_for_failure(self, remaining_failures: int) -> float:
+        """分给下一个 failure 的美元额度。
+
+        与 token 的 for_failure 同形状：动态分配而非固定切分，前面省下的
+        自动流给后面难的。
+
+        但**刻意没有下限**。token 那边设 FLOOR_TOKENS 是「再紧也要给一次
+        有意义尝试的余地」；美元这边额度耗尽时若还给一个下限，闸就失效了
+        —— 而「额度耗尽还在花」正是这个设计要挡住的事。
+        """
+        left = self.remaining_usd()
+        if remaining_failures <= 0:
+            return left
+        return left / remaining_failures
+
     def exhaustion(self) -> tuple[str, str] | None:
         """超限返回 (种类, 原因)，未超返回 None。种类取值 tokens / usd / wall。
 
