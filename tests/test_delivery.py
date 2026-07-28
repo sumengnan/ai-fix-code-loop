@@ -135,3 +135,46 @@ def test_commit_with_empty_paths_is_noop(buggy_repo, fixed_source):
         (wt.path / "calc.py").write_text(fixed_source, encoding="utf-8")
         wt.commit("fix: x", paths=[])
         assert _git(wt.path, "rev-parse", "HEAD").strip() == before
+
+
+def test_commit_raises_when_a_path_matches_nothing(buggy_repo):
+    """`git add -- <匹配不到的路径>` 之后 commit 会失败 —— 不许静默。
+
+    这是「不崩溃、不报错、测试全绿，只有承诺是假的」那个形状：add 匹配不到
+    任何文件（历史上 touched 记的是 diff 头上带前缀的 `a/calc.py`），commit
+    因无内容以 1 退出，而报告照写「修复 1/1」并给出 `git merge` —— 交付分支
+    上一个提交都没有。
+    """
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        before = _git(wt.path, "rev-parse", "HEAD").strip()
+        with pytest.raises(RuntimeError):
+            wt.commit("fix: x", paths=["a/calc.py"])
+        assert _git(wt.path, "rev-parse", "HEAD").strip() == before
+
+
+def test_commit_raises_when_only_some_paths_match(buggy_repo, fixed_source):
+    """一条路径匹配不到就整体失败 —— 半个交付比没有交付更难发现。"""
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        (wt.path / "calc.py").write_text(fixed_source, encoding="utf-8")
+        with pytest.raises(RuntimeError):
+            wt.commit("fix: x", paths=["calc.py", "b/nope.py"])
+
+
+def test_commit_is_quiet_when_the_files_equal_head(buggy_repo):
+    """区分度：路径都在、内容与 HEAD 逐字相同 —— 这是合法的「无事可提交」。
+
+    一个「commit 非 0 就抛」的实现会把这一条也判成失败。两者的分界在**暂存
+    结果**：add 报错说明路径本身有问题，add 成功却什么都没暂存说明文件真的
+    没变。
+    """
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        before = _git(wt.path, "rev-parse", "HEAD").strip()
+        wt.commit("fix: x", paths=["calc.py"])      # 一个字节都没改
+        assert _git(wt.path, "rev-parse", "HEAD").strip() == before
+
+
+def test_commit_reports_the_offending_path(buggy_repo):
+    """报错里必须带上那条路径，否则人拿到的是一句无从下手的「提交失败」。"""
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        with pytest.raises(RuntimeError, match="a/calc.py"):
+            wt.commit("fix: x", paths=["a/calc.py"])
