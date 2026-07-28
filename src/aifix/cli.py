@@ -40,10 +40,19 @@ def _backfill_in_flight_result(state: AifixState) -> None:
         return
     if any(r.get("test_id") == current for r in state["results"]):
         return
+    # attempt == 1 表示这个 failure 刚从队列 pop 出来、detect/fix/verify 一次
+    # 都没跑 —— 主循环是「先 pop 下一个、再查预算」的顺序，所以中止完全可能
+    # 落在这个空档里。只有 verify_node 的非终局分支才会把 attempt 推到 >= 2。
+    # 不挡住的话，下面会拿**上一个** failure 的 verdict 给它记一笔：上一个判
+    # BETTER 时，这个一个字节没改、花了 $0 的 failure 会被记成「已修复」。
+    # 后果有两层——报告谎报修复数；eval 的 run_task 按 test_id 取到这一行，
+    # 评测的修复成功率也跟着虚高。
+    if state.get("attempt", 0) < 2:
+        return
     verdict = state.get("verdict") or "same"
     # verify_node 的非终局分支把 attempt 递增为下一轮编号，真实跑过的
-    # 轮数是 attempt - 1；能走到这里说明至少完整跑过一轮，兜底为 1
-    attempts = max(state.get("attempt", 1) - 1, 1)
+    # 轮数是 attempt - 1；上面的闸已保证 attempt >= 2，无需再兜底
+    attempts = state["attempt"] - 1
     state["results"].append({
         "test_id": current, "verdict": verdict,
         "attempts": attempts, "abort_reason": state.get("abort"),
