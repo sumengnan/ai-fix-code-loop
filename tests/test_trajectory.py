@@ -1,0 +1,325 @@
+"""跨 run 轨迹库的验收：真产物进去，可聚合的表出来。
+
+除两条标了「构造目录」的用例外，所有 `.aifix/runs/*` 都是脚本化假客户端
+**真跑** `run_once` 落下来的产物。手写 facts.jsonl 只能证明我们对自己的
+理解自洽 —— 它对不上真实产物时，测试全绿而功能是坏的。
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import shutil
+import sqlite3
+import subprocess
+from pathlib import Path
+
+import pytest
+from harness.llm.base import StreamChunk, ToolCallDelta
+from harness.usage import Usage
+
+from aifix import trajectory
+from aifix.cli import run_once
+from aifix.config import AifixConfig
+
+# calc.py 里多一个 mul：让「补丁删掉公开符号」这条信号有机会真的被触发，
+# 而不是靠手写一条 removed_public_symbol 的 fact 假装它发生过。
+_BUGGY = '''def add(a, b):
+    return a - b        # bug: 应为 a + b
+
+
+def mul(a, b):
+    return a * b
+'''
+
+_TEST = '''from calc import add
+
+
+def test_add():
+    assert add(2, 3) == 5
+
+
+def test_identity():
+    assert add(0, 0) == 0
+'''
+
+# 修好 add 的同时删掉无测试覆盖的 mul —— verify 判 BETTER，
+# 于是 removed_public_symbol 这条 fact 才会写进 facts.jsonl。
+_PATCH_DROPS_MUL = """--- a/calc.py
++++ b/calc.py
+@@ -1,6 +1,2 @@
+ def add(a, b):
+-    return a - b        # bug: 应为 a + b
+-
+-
+-def mul(a, b):
+-    return a * b
++    return a + b
+"""
+
+_DIAG = json.dumps({
+    "suspect_file": "calc.py", "suspect_lines": [1, 2],
+    "root_cause": "减号应为加号", "fix_strategy": "改回 a + b",
+    "confidence": "high",
+})
+
+
+def _text(t):
+    return [StreamChunk(type="text", text=t),
+            StreamChunk(type="done", usage=Usage(10, 5, 15))]
+
+
+def _tool(name, args):
+    return [StreamChunk(type="tool_call", tool_call_delta=ToolCallDelta(
+                index=0, id="c1", name=name, arguments=args)),
+            StreamChunk(type="done", usage=Usage(10, 5, 15))]
+
+
+class _Scripted:
+    def __init__(self, turns):
+        self._turns, self._i = list(turns), 0
+
+    async def stream(self, messages, tools):
+        turn = self._turns[min(self._i, len(self._turns) - 1)]
+        self._i += 1
+        for c in turn:
+            yield c
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+
+def _make_repo(root: Path) -> Path:
+    repo = root / "proj"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "calc.py").write_text(_BUGGY, encoding="utf-8")
+    (repo / "tests" / "test_calc.py").write_text(_TEST, encoding="utf-8")
+    (repo / "pytest.ini").write_text(
+        "[pytest]\npythonpath = .\n", encoding="utf-8")
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
+    return repo
+
+
+async def _three_runs(repo: Path) -> None:
+    """三次形状不同的真 run：修好并留下信号 / 撞空补丁守卫 / 撞超大补丁守卫。"""
+    await run_once(repo, AifixConfig(), run_id="r_fix",
+                   detector_client=_Scripted([_text(_DIAG)]),
+                   fixer_client=_Scripted([
+                       _tool("apply_patch",
+                             json.dumps({"diff": _PATCH_DROPS_MUL})),
+                       _text("已修复")]))
+    # 模型一字未改 → empty_diff 守卫；默认配置下每个 attempt 撞 2 次、共 3 轮
+    await run_once(repo, AifixConfig(), run_id="r_guard",
+                   detector_client=_Scripted([_text(_DIAG)]),
+                   fixer_client=_Scripted([_text("我什么都不做")]))
+    # 把上限压到 1 行，同一个补丁改撞 huge_diff；只给 1 个 attempt，
+    # 让两种守卫的次数**不相等** —— 相等的话排序断言恒真
+    await run_once(repo, AifixConfig(max_diff_lines=1, max_attempts=1),
+                   run_id="r_huge",
+                   detector_client=_Scripted([_text(_DIAG)]),
+                   fixer_client=_Scripted([
+                       _tool("apply_patch",
+                             json.dumps({"diff": _PATCH_DROPS_MUL})),
+                       _text("已修复")]))
+
+
+@pytest.fixture(scope="module")
+def real_runs(tmp_path_factory) -> Path:
+    """真跑三次 run_once，产出真实的 `.aifix/runs/*`（整个模块只跑一次）。"""
+    repo = _make_repo(tmp_path_factory.mktemp("traj"))
+    asyncio.run(_three_runs(repo))
+    return repo / ".aifix" / "runs"
+
+
+@pytest.fixture
+def repo(tmp_path: Path, real_runs: Path) -> Path:
+    """每个用例一份独立仓库：db 落在仓库里，共用会让用例之间隔空传状态。"""
+    dst = tmp_path / "repo"
+    (dst / ".aifix").mkdir(parents=True)
+    shutil.copytree(real_runs, dst / ".aifix" / "runs")
+    return dst
+
+
+def _db(repo: Path) -> sqlite3.Connection:
+    return sqlite3.connect(repo / ".aifix" / "trajectory.db")
+
+
+def _one(repo: Path, sql: str, *args):
+    with _db(repo) as con:
+        return con.execute(sql, args).fetchone()[0]
+
+
+# ---------- 核心：幂等 ----------
+
+def test_同一批_run_灌两次_facts_行数不变(repo: Path) -> None:
+    """第二次灌进去翻倍不报错、不崩溃，只让此后所有聚合数字翻倍。"""
+    assert trajectory.ingest(repo) == 3
+    first_facts = _one(repo, "SELECT count(*) FROM facts")
+    first_runs = _one(repo, "SELECT count(*) FROM runs")
+    # 真产物里 facts 有几十条；为 0 的话下面「不变」是恒真的
+    assert first_facts > 10
+
+    # 返回值是**本次处理**的 run 数，重复灌仍是 3（不是新增数）
+    assert trajectory.ingest(repo) == 3
+    assert _one(repo, "SELECT count(*) FROM facts") == first_facts
+    assert _one(repo, "SELECT count(*) FROM runs") == first_runs == 3
+
+
+def test_重灌只影响被重灌的_run(repo: Path) -> None:
+    """先删后插的删除范围必须限定在这个 run_id 上，不能把别的 run 一起抹掉。"""
+    trajectory.ingest(repo)
+    before = _one(repo, "SELECT count(*) FROM facts WHERE run_id='r_guard'")
+    assert before > 0
+
+    # 只留一个 run 目录再灌一次：另外两个 run 的行必须原样还在
+    shutil.rmtree(repo / ".aifix" / "runs" / "r_fix")
+    shutil.rmtree(repo / ".aifix" / "runs" / "r_huge")
+    assert trajectory.ingest(repo) == 1
+    assert _one(repo, "SELECT count(*) FROM facts WHERE run_id='r_guard'") \
+        == before
+    assert _one(repo, "SELECT count(*) FROM runs") == 3
+
+
+# ---------- 真产物里的字段 ----------
+
+def test_run_级事实的_failure_与_attempt_是_NULL_不是空串(repo: Path) -> None:
+    """SQL 里 NULL 和空串不是一回事，聚合时会咬人。"""
+    trajectory.ingest(repo)
+    with _db(repo) as con:
+        assert con.execute(
+            "SELECT failure, attempt FROM facts "
+            "WHERE run_id='r_fix' AND key='baseline_failures'").fetchall() \
+            == [(None, None)]
+        # 对照组：failure 级的事实必须真的带着 failure / attempt，
+        # 否则上面那条断言在「所有列全空」的实现下也是绿的
+        assert con.execute(
+            "SELECT failure, attempt FROM facts "
+            "WHERE run_id='r_fix' AND key='verdict'").fetchall() \
+            == [("tests/test_calc.py::test_add", 1)]
+        assert con.execute(
+            "SELECT count(*) FROM facts WHERE failure = ''").fetchone()[0] == 0
+
+
+def test_value_一律存成_JSON_文本(repo: Path) -> None:
+    trajectory.ingest(repo)
+    with _db(repo) as con:
+        touched = con.execute(
+            "SELECT value FROM facts "
+            "WHERE run_id='r_fix' AND key='touched'").fetchone()[0]
+        # str(list) 会得到 "['calc.py']"，单引号解不回来
+        assert touched == '["calc.py"]'
+        assert json.loads(touched) == ["calc.py"]
+        # 标量也走 JSON：字符串带引号、布尔是 true 不是 True
+        assert con.execute(
+            "SELECT value FROM facts "
+            "WHERE run_id='r_fix' AND key='verdict'").fetchone()[0] == '"better"'
+        assert json.loads(con.execute(
+            "SELECT value FROM facts "
+            "WHERE run_id='r_guard' AND key='rollback'").fetchone()[0]) is True
+
+
+def test_没配价格表时_spent_usd_存_NULL_而不是零(repo: Path) -> None:
+    """花了 token 却记 $0.00 是这个项目栽过两次的假数字。"""
+    trajectory.ingest(repo)
+    with _db(repo) as con:
+        tokens, usd = con.execute(
+            "SELECT spent_tokens, spent_usd FROM runs "
+            "WHERE run_id='r_fix'").fetchone()
+    assert tokens == 45          # 3 次假调用 × 15 token
+    assert usd is None
+
+
+def test_runs_行的字段取自真实产物(repo: Path) -> None:
+    trajectory.ingest(repo)
+    with _db(repo) as con:
+        con.row_factory = sqlite3.Row
+        fix = con.execute(
+            "SELECT * FROM runs WHERE run_id='r_fix'").fetchone()
+        guard = con.execute(
+            "SELECT * FROM runs WHERE run_id='r_guard'").fetchone()
+    assert fix["adapter"] == "pytest"
+    assert fix["branch"] == "aifix/r_fix"
+    assert fix["baseline_failures"] == 1
+    assert fix["fixed"] == 1
+    assert fix["abort"] is None and fix["abort_kind"] is None
+    # 同一批产物里没修好的那个必须是 0 —— 不加这条，一个「fixed 恒等于
+    # baseline_failures」的实现也能让上面全绿
+    assert guard["fixed"] == 0
+    assert fix["started_at"] and fix["started_at"] > "2020"
+
+
+# ---------- 聚合 ----------
+
+def test_query_stats_按_adapter_聚合_run_数与修复数(repo: Path) -> None:
+    trajectory.ingest(repo)
+    stats = trajectory.query_stats(repo)
+    assert stats["by_adapter"] == {"pytest": {"runs": 3, "fixed": 1}}
+
+
+def test_query_stats_守卫触发次数按种类降序(repo: Path) -> None:
+    trajectory.ingest(repo)
+    hits = trajectory.query_stats(repo)["guard_hits"]
+    # 数字来自真产物：r_guard 每个 attempt 撞 2 次 empty_diff、共 3 个 attempt
+    # = 6；r_huge 第一轮撞 huge_diff 被回滚，脚本化模型后两轮只说话不改文件，
+    # 于是又补上 2 次 empty_diff（8 = 6 + 2，1 = huge_diff）。
+    # 种类名必须是解过 JSON 的 empty_diff，不是带引号的 '"empty_diff"'
+    assert hits == [("empty_diff", 8), ("huge_diff", 1)]
+
+
+def test_query_stats_可疑信号最多的_run(repo: Path) -> None:
+    trajectory.ingest(repo)
+    top = trajectory.query_stats(repo)["signal_runs"]
+    # 只有 r_fix 判了 BETTER 并删掉了 mul；撞守卫的两个 run 一条信号也没有，
+    # 不能出现在这张榜上（出现即说明把被回滚的补丁也算进去了）
+    assert top == [("r_fix", 1)]
+
+
+def test_信号_key_与_eval_侧的定义不漂移() -> None:
+    """两份各自漂移的话，同一批 facts 在两处会得出不同的信号数。"""
+    from aifix.eval.runner import _SIGNAL_KEYS
+
+    assert trajectory.SIGNAL_KEYS == _SIGNAL_KEYS
+
+
+def test_facts_key_建了索引(repo: Path) -> None:
+    trajectory.ingest(repo)
+    with _db(repo) as con:
+        names = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "facts_key" in names
+
+
+# ---------- 构造目录（不依赖真产物的两条） ----------
+
+def test_坏行不拖累同一个仓库的其它_run(tmp_path: Path) -> None:
+    """构造目录：真产物不会半行截断，但被 kill 的 run 会。
+
+    一行坏行让整仓历史都灌不进去，是把诊断工具变成第二个故障点。
+    """
+    runs = tmp_path / ".aifix" / "runs"
+    (runs / "ok").mkdir(parents=True)
+    (runs / "broken").mkdir(parents=True)
+    (runs / "ok" / "facts.jsonl").write_text(
+        '{"run_id": "ok", "key": "verdict", "value": "better"}\n',
+        encoding="utf-8")
+    (runs / "broken" / "facts.jsonl").write_text(
+        '{"run_id": "broken", "key": "verdict", "value": "same"}\n'
+        '{"run_id": "broken", "key": "diff_l\n',
+        encoding="utf-8")
+
+    assert trajectory.ingest(tmp_path) == 2
+    with _db(tmp_path) as con:
+        assert con.execute(
+            "SELECT run_id, key FROM facts ORDER BY run_id").fetchall() \
+            == [("broken", "verdict"), ("ok", "verdict")]
+
+
+def test_没有产物目录时灌库不报错(tmp_path: Path) -> None:
+    """构造目录：新仓库还没跑过 run。"""
+    assert trajectory.ingest(tmp_path) == 0
+    assert trajectory.query_stats(tmp_path) == {
+        "by_adapter": {}, "guard_hits": [], "signal_runs": []}
