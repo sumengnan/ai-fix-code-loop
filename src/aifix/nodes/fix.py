@@ -56,9 +56,13 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
     raw = state.get("diagnosis")
     diagnosis = Diagnosis.model_validate(raw) if raw else None
 
-    # 优先用本轮分配到的额度；未分配（如单测直接调用）时退回全局剩余
-    remaining = state.get("failure_token_budget") or max(
-        cfg.budget_tokens - state["spent_tokens"], 10_000)
+    # 优先用本轮分配到的额度；未分配（如单测直接调用）时退回全局剩余。
+    # 当前 RunBudget.for_failure 有 FLOOR_TOKENS 下限，永远取不到 0，`or` 逻
+    # 辑无害。改成 is None 判定是为了不给后人留一个「看起来能用 `or`」的坏样板
+    # —— 同类的美元闸已改成严格的 is None 判定（见下方），形状要一致。
+    failure_token = state.get("failure_token_budget")
+    remaining = (max(cfg.budget_tokens - state["spent_tokens"], 10_000)
+                 if failure_token is None else failure_token)
     # 本轮 failure 分到的美元额度。**只有 None**（未分配）才表示不设美元闸、
     # 退回 token 闸；0.0 表示「额度已经扣光」，是一个要拦死的真实取值。
     # 必须用 is None 判，不能写 `state.get(...) or None`：`0.0 or None` 求值
