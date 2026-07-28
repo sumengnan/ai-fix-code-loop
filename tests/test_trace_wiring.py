@@ -144,3 +144,74 @@ async def test_detect_without_trace_still_works(buggy_repo):
         st = _state(buggy_repo, wt, None, "")
         out = await detect_node(st, client=_Scripted([_text(_DIAG)]))
         assert out["diagnosis"]["suspect_file"] == "calc.py"
+
+
+async def test_fix_records_violations(buggy_repo, tmp_path):
+    """模型想改测试文件 —— 被工具挡下，且必须留下可统计的痕迹。"""
+    from harness.llm.base import ToolCallDelta
+
+    from aifix.nodes.fix import fix_node
+
+    bad = """--- a/tests/test_calc.py
++++ b/tests/test_calc.py
+@@ -3,4 +3,4 @@
+ def test_add():
+-    assert add(2, 3) == 5
++    assert True
+"""
+    good = """--- a/calc.py
++++ b/calc.py
+@@ -1,2 +1,2 @@
+ def add(a, b):
+-    return a - b        # bug: 应为 a + b
++    return a + b
+"""
+
+    def _tool(name, args):
+        return [StreamChunk(type="tool_call", tool_call_delta=ToolCallDelta(
+                    index=0, id="c1", name=name, arguments=args)),
+                StreamChunk(type="done", usage=Usage(10, 5, 15))]
+
+    with Worktree(buggy_repo, run_id="r1") as wt:
+        trace = RunTrace(tmp_path, run_id="r1")
+        st = _state(buggy_repo, wt, trace, "")
+        st["baseline_ids"] = [_TID]
+        client = _Scripted([_tool("apply_patch", json.dumps({"diff": bad})),
+                            _tool("apply_patch", json.dumps({"diff": good})),
+                            _text("改源码了")])
+        await fix_node(st, client=client)
+        trace.close()
+
+    facts = _facts(tmp_path)
+    viol = [f for f in facts if f["key"] == "violation"]
+    assert [v["value"] for v in viol] == ["test_edit"]
+
+
+async def test_fix_records_no_violation_when_clean(buggy_repo, tmp_path):
+    from harness.llm.base import ToolCallDelta
+
+    from aifix.nodes.fix import fix_node
+
+    good = """--- a/calc.py
++++ b/calc.py
+@@ -1,2 +1,2 @@
+ def add(a, b):
+-    return a - b        # bug: 应为 a + b
++    return a + b
+"""
+
+    def _tool(name, args):
+        return [StreamChunk(type="tool_call", tool_call_delta=ToolCallDelta(
+                    index=0, id="c1", name=name, arguments=args)),
+                StreamChunk(type="done", usage=Usage(10, 5, 15))]
+
+    with Worktree(buggy_repo, run_id="r1") as wt:
+        trace = RunTrace(tmp_path, run_id="r1")
+        st = _state(buggy_repo, wt, trace, "")
+        st["baseline_ids"] = [_TID]
+        client = _Scripted([_tool("apply_patch", json.dumps({"diff": good})),
+                            _text("已修复")])
+        await fix_node(st, client=client)
+        trace.close()
+
+    assert [f for f in _facts(tmp_path) if f["key"] == "violation"] == []
