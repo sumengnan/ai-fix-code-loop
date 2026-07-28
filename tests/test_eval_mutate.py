@@ -523,3 +523,31 @@ async def test_seed_makes_the_selection_reproducible(tmp_path):
     c = await mutate_tasks(str(repo), PytestAdapter(), max_tasks=1, seed=0,
                            workdir=tmp_path / "w3")
     assert [t.task_id for t in c] != [t.task_id for t in a]
+
+
+async def test_duplicate_ids_carry_the_verified_tasks_out(tmp_path, monkeypatch):
+    """撞车仍然是错误，但已经验证出来的任务不能跟着一起丢掉。
+
+    验证一个候选要真跑一遍测试；一轮变异跑掉半小时是常事。裸 RuntimeError
+    穿出去的话 `_cmd_mutate` 的 write_jsonl 根本不会执行 —— 半小时的成果
+    一个任务都不落盘，屏幕上只有一段 Python 调用栈。
+    """
+    from aifix.eval import mutate as mutate_mod
+    from aifix.eval.mutate import DuplicateTaskIds
+
+    real = mutate_mod.mutations
+
+    def twice(source: str):
+        first = list(real(source))[:1]
+        return iter(first * 2)
+
+    monkeypatch.setattr(mutate_mod, "mutations", twice)
+    repo = _make_green_repo(tmp_path)
+    with pytest.raises(DuplicateTaskIds) as exc:
+        await mutate_tasks(str(repo), PytestAdapter(), max_tasks=5,
+                           workdir=tmp_path / "w")
+    assert isinstance(exc.value, RuntimeError), "调用方按 RuntimeError 接也不能漏"
+    assert exc.value.tasks, "已经验证出来的任务必须跟着异常出来"
+    assert exc.value.duplicates
+    # 报错正文里要点名是哪几个 id，否则人不知道该去看哪一处变异
+    assert exc.value.duplicates[0] in str(exc.value)

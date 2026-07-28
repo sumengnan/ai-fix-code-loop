@@ -66,6 +66,26 @@ _BOOL_OPS: dict[type, tuple[str, str]] = {
 }
 
 
+class DuplicateTaskIds(RuntimeError):
+    """出口自检没过：产出的 task_id 有撞车。**带着已验证的任务一起抛。**
+
+    继承 RuntimeError 而不是自立门户：`mutate_tasks` 原本就抛 RuntimeError，
+    按那个类型接的调用方不该因为多了一个字段就漏接。
+
+    为什么要把 tasks 挂在异常上：验证一个候选要真跑一遍测试，一轮变异跑掉半
+    小时是常事。裸抛的话 `_cmd_mutate` 的 write_jsonl 根本执行不到，半小时的
+    成果一个任务都不落盘。但**也不能就地去重放行** —— 撞车的任务集在评测里
+    会静默退化成「评测故障」，那正是这道自检存在的理由。所以由调用方决定把
+    它们捞到哪，捞出来的那份必须与「可以直接拿去 eval 的任务集」分开放。
+    """
+
+    def __init__(self, message: str, tasks: list["Task"],
+                 duplicates: list[str]) -> None:
+        super().__init__(message)
+        self.tasks = tasks
+        self.duplicates = duplicates
+
+
 @dataclass(frozen=True)
 class Mutation:
     source: str          # 变异后的完整文件内容
@@ -513,8 +533,9 @@ async def mutate_tasks(repo: str, adapter: PytestAdapter, max_tasks: int = 10,
     ids = [t.task_id for t in tasks]
     if len(set(ids)) != len(ids):
         dup = sorted({i for i in ids if ids.count(i) > 1})
-        raise RuntimeError(
+        raise DuplicateTaskIds(
             f"变异产出了重复的 task_id：{'、'.join(dup)}。"
             "评测时它们会撞进同一个工作目录，第二个任务直接失败并被记成"
-            "评测故障 —— 这是 bug，不是可以放行的任务集")
+            "评测故障 —— 这是 bug，不是可以放行的任务集",
+            tasks=tasks, duplicates=dup)
     return tasks

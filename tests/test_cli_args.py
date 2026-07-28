@@ -226,3 +226,41 @@ def test_mutate_defaults():
     assert a.scope == "smart"
     assert a.seed == 0
     assert a.out == "evals/tasks-mutants.jsonl"
+
+
+def test_cmd_mutate_salvages_tasks_and_fails_with_a_readable_message(
+        tmp_path, monkeypatch, capsys):
+    """撞车时：人话 + 已验证的任务落盘 + 主输出保持不存在。
+
+    落到 args.out 的话，用户下一步 `aifix eval` 会拿到一个撞车的任务集 ——
+    正是这道自检要挡的事。所以旁落一份 .partial，主输出一个字节都不写。
+    """
+    from aifix import cli as cli_mod
+    from aifix.eval.mutate import DuplicateTaskIds
+    from aifix.eval.task import Task
+
+    salvaged = [Task(task_id="p@mut::calc.py:1::x::t", repo=str(tmp_path),
+                     commit="a" * 40, base_commit="a" * 40, test_files=[],
+                     target_test="t", gold_files=["calc.py"],
+                     adapter="pytest", origin="mutated")]
+
+    async def boom(*a, **kw):
+        raise DuplicateTaskIds("变异产出了重复的 task_id：dup-1",
+                               tasks=salvaged, duplicates=["dup-1"])
+
+    monkeypatch.setattr("aifix.eval.mutate.mutate_tasks", boom)
+    out = tmp_path / "tasks.jsonl"
+    args = cli_mod.build_parser().parse_args(
+        ["mutate", str(tmp_path), "--out", str(out)])
+
+    with pytest.raises(SystemExit) as exc:
+        cli_mod._cmd_mutate(args)
+
+    msg = str(exc.value)
+    assert "dup-1" in msg, "人话里要点名撞车的 id"
+    assert "Traceback" not in msg
+    partial = tmp_path / "tasks.jsonl.partial"
+    assert partial.is_file(), "已验证的任务必须落盘，不能白丢"
+    assert "p@mut::calc.py:1::x::t" in partial.read_text(encoding="utf-8")
+    assert str(partial) in msg, "要告诉用户捞出来的那份在哪"
+    assert not out.exists(), "撞车的任务集绝不能落在用户会拿去 eval 的路径上"

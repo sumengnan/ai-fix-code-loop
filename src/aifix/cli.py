@@ -311,7 +311,7 @@ def _cmd_mine(args) -> None:
 def _cmd_mutate(args) -> None:
     # 延迟导入：eval 子包依赖 cli 模块（run_once），提到模块顶部会形成循环导入
     from .adapters.pytest_adapter import PytestAdapter
-    from .eval.mutate import mutate_tasks
+    from .eval.mutate import DuplicateTaskIds, mutate_tasks
     from .eval.task import write_jsonl
 
     def progress(rel_path: str, n: int, error: str | None = None) -> None:
@@ -320,10 +320,27 @@ def _cmd_mutate(args) -> None:
         else:
             print(f"  {rel_path}：{n} 个可用任务", flush=True)
 
-    tasks = asyncio.run(mutate_tasks(
-        str(Path(args.repo).resolve()), PytestAdapter(),
-        max_tasks=args.max_tasks, max_new_failures=args.max_new_failures,
-        scope=args.scope, seed=args.seed, on_progress=progress))
+    try:
+        tasks = asyncio.run(mutate_tasks(
+            str(Path(args.repo).resolve()), PytestAdapter(),
+            max_tasks=args.max_tasks, max_new_failures=args.max_new_failures,
+            scope=args.scope, seed=args.seed, on_progress=progress))
+    except DuplicateTaskIds as e:
+        # 撞车仍然是错误：撞车的任务集在评测里会静默退化成「评测故障」。
+        # 但验证一个候选要真跑一遍测试，一轮变异跑掉半小时是常事 —— 让异常
+        # 裸穿出去，下面的 write_jsonl 执行不到，半小时的成果一个不落盘，
+        # 屏幕上还只有一段调用栈。
+        #
+        # 捞出来的那份**绝不能落在 args.out**：用户下一步就是
+        # `aifix eval --tasks <out>`，那正好是这道自检要挡的事。旁落
+        # `.partial` 并在报错里指路，是让人能接着救、又不会误用。
+        partial = Path(str(args.out) + ".partial")
+        write_jsonl(partial, e.tasks)
+        raise SystemExit(
+            f"变异中止：{e}\n"
+            f"  已验证的 {len(e.tasks)} 个任务捞到了 {partial}"
+            "（**不是**可用的任务集，去重或修掉撞车之后才能拿去 eval）\n"
+            f"  {args.out} 一个字节都没写。")
     write_jsonl(Path(args.out), tasks)
     print(f"产出 {len(tasks)} 个冒烟任务 → {args.out}")
 
