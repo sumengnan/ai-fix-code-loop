@@ -98,3 +98,36 @@ def test_tiny_budget_is_not_rounded_to_zero_in_message():
     msg = b.exhausted()
     assert "0.001" in msg, msg
     assert "/ $0.00 " not in msg and not msg.endswith("/ $0.00")
+
+
+def test_usd_allocates_by_remaining_failures():
+    b = RunBudget(total_tokens=100_000, total_usd=2.0, total_seconds=600)
+    assert abs(b.usd_for_failure(remaining_failures=4) - 0.5) < 1e-9
+    b.charge(tokens=0, usd=0.5)
+    assert abs(b.usd_for_failure(remaining_failures=3) - 0.5) < 1e-9
+
+
+def test_usd_saved_flows_to_later_failures():
+    """与 token 同形状：前面省下的自动流给后面难的。"""
+    b = RunBudget(total_tokens=100_000, total_usd=2.0, total_seconds=600)
+    b.charge(tokens=0, usd=0.1)
+    assert abs(b.usd_for_failure(remaining_failures=1) - 1.9) < 1e-9
+
+
+def test_usd_has_no_floor():
+    """token 有下限（再紧也要给一次有意义尝试），美元没有 —— 给下限
+    就等于让闸失效，而那正是要挡住的事。"""
+    b = RunBudget(total_tokens=100_000, total_usd=2.0, total_seconds=600)
+    b.charge(tokens=0, usd=2.0)
+    assert b.usd_for_failure(remaining_failures=1) == 0.0
+
+
+def test_usd_zero_remaining_failures_returns_all():
+    b = RunBudget(total_tokens=100_000, total_usd=2.0, total_seconds=600)
+    assert abs(b.usd_for_failure(remaining_failures=0) - 2.0) < 1e-9
+
+
+def test_remaining_usd_never_negative():
+    b = RunBudget(total_tokens=100_000, total_usd=1.0, total_seconds=600)
+    b.charge(tokens=0, usd=1.5)
+    assert b.remaining_usd() == 0.0

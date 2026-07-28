@@ -65,3 +65,83 @@ async def test_events_are_retained_for_tracing():
     ]))
     assert len(out.events) == 2
     assert isinstance(out.events[0], RunStarted)
+
+
+async def test_cost_cap_stops_consuming():
+    """越线后停止消费 —— 这是整个成本闸的地基。"""
+    closed = []
+
+    async def stream():
+        try:
+            yield ModelUsage(usage=Usage(10, 5, 15), cost_usd=0.4,
+                              attempts=1, latency_ms=1.0, model="m")
+            yield TextDelta(text="第一段")
+            yield ModelUsage(usage=Usage(10, 5, 15), cost_usd=0.4,
+                              attempts=1, latency_ms=1.0, model="m")
+            yield TextDelta(text="第二段")
+            yield ModelUsage(usage=Usage(10, 5, 15), cost_usd=0.4,
+                              attempts=1, latency_ms=1.0, model="m")
+            yield TextDelta(text="第三段")
+        finally:
+            closed.append(True)
+
+    out = await consume(stream(), cost_cap=0.5)
+    assert out.cost_capped is True
+    assert abs(out.cost_usd - 0.8) < 1e-9, "第二次 usage 越线，第三次不该发生"
+    assert out.text == "第一段", "越线后的文本不该再被消费"
+    assert closed == [True], "必须显式 aclose，不能把生成器留给 GC"
+
+
+async def test_cost_cap_overshoot_is_one_model_call():
+    """契约：越线后不再发起新调用，而不是「不超过一分钱」。
+
+    断言的是「多花了正好一次调用」——直接断言 cost <= cap 会是假的，
+    而写一个假的断言比不写更糟。
+    """
+    async def stream():
+        yield ModelUsage(usage=Usage(10, 5, 15), cost_usd=0.49,
+                          attempts=1, latency_ms=1.0, model="m")
+        yield ModelUsage(usage=Usage(10, 5, 15), cost_usd=0.49,
+                          attempts=1, latency_ms=1.0, model="m")
+        yield ModelUsage(usage=Usage(10, 5, 15), cost_usd=0.49,
+                          attempts=1, latency_ms=1.0, model="m")
+
+    out = await consume(stream(), cost_cap=0.5)
+    assert abs(out.cost_usd - 0.98) < 1e-9      # 0.49 未越线，0.98 越线即停
+    assert out.cost_capped is True
+
+
+async def test_no_cap_consumes_everything():
+    async def stream():
+        yield ModelUsage(usage=Usage(10, 5, 15), cost_usd=5.0,
+                          attempts=1, latency_ms=1.0, model="m")
+        yield TextDelta(text="尾巴")
+
+    out = await consume(stream())
+    assert out.cost_capped is False
+    assert out.text == "尾巴"
+
+
+async def test_cap_not_reached_leaves_flag_false():
+    async def stream():
+        yield ModelUsage(usage=Usage(10, 5, 15), cost_usd=0.1,
+                          attempts=1, latency_ms=1.0, model="m")
+        yield TextDelta(text="没超")
+
+    out = await consume(stream(), cost_cap=0.5)
+    assert out.cost_capped is False
+    assert abs(out.cost_usd - 0.1) < 1e-9
+    assert out.text == "没超"
+
+
+async def test_cost_cap_keeps_text_already_received():
+    """熔断不该丢掉已经拿到手的输出 —— detect 可能已经吐完 JSON 了。"""
+    async def stream():
+        yield TextDelta(text='{"suspect_file": "a.py"}')
+        yield ModelUsage(usage=Usage(10, 5, 15), cost_usd=9.9,
+                          attempts=1, latency_ms=1.0, model="m")
+        yield TextDelta(text="后面的")
+
+    out = await consume(stream(), cost_cap=0.5)
+    assert out.text == '{"suspect_file": "a.py"}'
+    assert out.error is None, "主动截断不是运行出错，不能污染 error"

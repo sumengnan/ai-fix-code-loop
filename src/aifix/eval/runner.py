@@ -151,10 +151,11 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
         locate_hit=locate_hit(suspect, task.gold_files),
         suspect_file=suspect,
         verdict=row["verdict"] if row else "same",
-        # 没有 results 行 = 中止发生在两轮之间（verify_node 只在 better 或
-        # attempt≥max_attempts 时才写行）。这时 state["attempt"] 停在「下一轮
-        # 的编号」，真实跑过的轮数是它减一。落成 0 会把「平均尝试」系统性
-        # 拉低，而这个任务明明真跑过。
+        # 有 results 行意味着中止发生在「verify 判定后」（better 或
+        # attempt≥max_attempts 时写行）；**没有行恰恰说明这个 failure 压根
+        # 没轮到**（在队列里但预算先耗尽、或被 only_test 过滤掉）。本分支加了
+        # 「中止时补录在飞的 failure」之后，两轮之间的中止也恒有 results 行。
+        # 回落到 0 恰好表达「没轮到」的含义，与「平均尝试」的计数基数一致。
         attempts=(row["attempts"] if row
                   else max(state.get("attempt", 0) - 1, 0)),
         tokens=state["spent_tokens"], cost_usd=state["spent_usd"],
@@ -174,25 +175,84 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
     return result
 
 
+_SKIPPED = "整批预算耗尽，未运行"
+
+
+def _blank(task_id: str, model: str, error: str) -> TaskResult:
+    return TaskResult(task_id=task_id, model=model, locate_hit=False,
+                      suspect_file=None, verdict="same", attempts=0,
+                      tokens=0, cost_usd=0.0, violations=0, error=error)
+
+
 async def run_suite(tasks: list[Task], config: AifixConfig, model: str,
                     workdir: Path, parallel: int = 4,
                     detector_client: Any = None,
                     fixer_client: Any = None,
-                    on_done=None) -> list[TaskResult]:
-    """并行跑整个任务集。返回顺序与传入顺序一致。"""
+                    on_done=None,
+                    total_usd: float | None = None) -> list[TaskResult]:
+    """并行跑整个任务集。返回顺序与传入顺序一致。
+
+    total_usd：整批的美元上限。检查发生在**派发之前**，已经在跑的任务
+    放它们跑完 —— 它们的结果是有效数据，中途掐掉等于白花已经花掉的钱。
+
+    `spent` 记的不是「已经花掉」而是「已经发出去的最大可能花销」：算出
+    `cap` 的同一把锁内立即把 `cap` 预留进 `spent`，任务跑完后再回填差额
+    `cost_usd - cap`。若只在任务跑完后才累加（预留之前的写法），
+    parallel=N 时 N 个并发槽位会在派发前全部读到同一个旧 `spent`，各自
+    以为还有整批上限那么多额度可花 —— 实测 `total_usd=1.0`、每任务花
+    `1.0`、4 个任务：parallel=1 正确地只花 $1.0，parallel=4 却花掉
+    $4.0，4 倍超支，且 parallel=4 正是 `aifix eval` 的默认并发度。预留
+    之后，整批的超支只可能来自「每个在跑的任务超出它自己那份额度的
+    量」，而单任务的超出量由 `consume()` 的契约兜住（至多一次模型调
+    用）。因此整批超支上界 = 并发数 × 一次模型调用的成本。
+
+    这个上界有一个前提：**任务要么正常跑完、要么在没花钱之前就炸**。
+    下面的异常路径按成本 0 全额退回预留（`r.cost_usd` 是 0.0，回填
+    `0.0 - cap`）；若某个任务是花过钱之后才抛，那笔已经花掉的钱在
+    `spent` 里就消失了，后续任务会拿着「以为还剩」的额度继续派发，整批
+    实际花销可以超出上界，超出量正是丢掉的那部分。要收紧就得让
+    `run_task` 在异常里也把已花销带回来，那是另一件事。
+    """
     sem = asyncio.Semaphore(parallel)
+    spent = 0.0
+    lock = asyncio.Lock()
 
     async def one(t: Task) -> TaskResult:
+        nonlocal spent
         async with sem:
+            if total_usd is not None:
+                async with lock:
+                    # 读 left、算 cap、预留进 spent 必须在同一把锁内一次
+                    # 完成，中间不能释放锁 —— 否则另一个并发槽位会插进
+                    # 来读到预留之前的旧 spent，竞态原样存在。
+                    left = total_usd - spent
+                    if left <= 0:
+                        # 记成 error 而不是失败的 verdict：这是评测的调度
+                        # 决策，不是被测系统的成绩。混进比率分母会让修复
+                        # 成功率凭空变低 —— 被测系统替调度背锅。
+                        r = _blank(t.task_id, model, _SKIPPED)
+                        if on_done:
+                            on_done(r)
+                        return r
+                    cap = min(config.budget_usd, left)
+                    spent += cap
+                task_config = config.model_copy(
+                    update={"budget_usd": cap})
+            else:
+                task_config = config
+                cap = None
             try:
-                r = await run_task(t, config, model, workdir,
+                r = await run_task(t, task_config, model, workdir,
                                    detector_client=detector_client,
                                    fixer_client=fixer_client)
             except Exception as e:      # 一个任务炸掉不能带走整个 suite
-                r = TaskResult(task_id=t.task_id, model=model,
-                               locate_hit=False, suspect_file=None,
-                               verdict="same", attempts=0, tokens=0,
-                               cost_usd=0.0, violations=0, error=repr(e))
+                r = _blank(t.task_id, model, repr(e))
+            if cap is not None:
+                # 回填预留与实际花销的差额。异常路径 r.cost_usd 是
+                # 0.0，回填 0.0 - cap 会把预留原样退回，是对的 ——
+                # 否则预留会永久占住额度，把后续任务全部饿死。
+                async with lock:
+                    spent += r.cost_usd - cap
             if on_done:
                 on_done(r)
             return r

@@ -35,7 +35,13 @@ class AifixState(TypedDict, total=False):
     flaky_filtered: list[str]
     confirmed_regressions: list[str]
     consecutive_failures: int
-    failure_token_budget: int
+    failure_token_budget: int | None
+    # 本轮 failure 分到的美元额度。**只有 cli.run_once 会填**：build_graph()
+    # 那条路径没有 RunBudget，整条美元闸不存在，这个字段一直是 None。
+    # None 与 0.0 语义不同——None 是「不设美元闸」，0.0 是「额度已扣光，
+    # 一次调用都不许发起」，见 fix_node 里的 is None 判定。
+    failure_usd_budget: float | None
+    cost_capped: bool
 
     spent_usd: float
     spent_tokens: int
@@ -63,7 +69,8 @@ def new_state(repo: Path, config: AifixConfig, run_id: str) -> AifixState:
         diagnosis=None, verdict=None,
         touched=[], guard_hits=[], diff_lines=0, abort_reason=None,
         flaky_filtered=[], confirmed_regressions=[], consecutive_failures=0,
-        failure_token_budget=0,
+        failure_token_budget=None,
+        failure_usd_budget=None, cost_capped=False,
         spent_usd=0.0, spent_tokens=0,
         results=[], abort=None, abort_kind=None,
     )

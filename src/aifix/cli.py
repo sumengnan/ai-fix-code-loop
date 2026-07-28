@@ -22,6 +22,43 @@ from .nodes.verify import verify_node
 from .trace import RunTrace
 
 
+def _backfill_in_flight_result(state: AifixState) -> None:
+    """预算耗尽 / 熔断中止时，把手上正在处理的 failure 补录进 results。
+
+    verify_node 只在两种终局分支写 results 行：判定为 BETTER，或
+    attempt 已到 max_attempts。若某一轮没修好，verify_node 只会把
+    attempt 递增为「下一轮的编号」然后返回，不落任何记录——这本是
+    对的（它还要继续重试）。但如果主循环恰好在下一轮开头发现预算
+    耗尽或连续失败熔断而直接 break，这个 failure 就再也没有机会
+    走到 verify_node 的任何一个终局分支，于是从 results 里彻底消失。
+    这个用例真的跑过、真的花了钱、真的没修好——报告却显示「压根
+    没轮到它」，用户没法区分这两种情况，而后者恰恰是「没记录」
+    应该表达的含义。所以中止发生时要在这里把它补上。
+    """
+    current = state.get("current")
+    if not current:
+        return
+    if any(r.get("test_id") == current for r in state["results"]):
+        return
+    # attempt == 1 表示这个 failure 刚从队列 pop 出来、detect/fix/verify 一次
+    # 都没跑 —— 主循环是「先 pop 下一个、再查预算」的顺序，所以中止完全可能
+    # 落在这个空档里。只有 verify_node 的非终局分支才会把 attempt 推到 >= 2。
+    # 不挡住的话，下面会拿**上一个** failure 的 verdict 给它记一笔：上一个判
+    # BETTER 时，这个一个字节没改、花了 $0 的 failure 会被记成「已修复」。
+    # 后果有两层——报告谎报修复数；eval 的 run_task 按 test_id 取到这一行，
+    # 评测的修复成功率也跟着虚高。
+    if state.get("attempt", 0) < 2:
+        return
+    verdict = state.get("verdict") or "same"
+    # verify_node 的非终局分支把 attempt 递增为下一轮编号，真实跑过的
+    # 轮数是 attempt - 1；上面的闸已保证 attempt >= 2，无需再兜底
+    attempts = state["attempt"] - 1
+    state["results"].append({
+        "test_id": current, "verdict": verdict,
+        "attempts": attempts, "abort_reason": state.get("abort"),
+    })
+
+
 async def run_once(repo: Path, config: AifixConfig, run_id: str,
                    detector_client: Any = None,
                    fixer_client: Any = None,
@@ -29,8 +66,14 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                    dry_run: bool = False) -> AifixState:
     """按状态图的语义顺序执行一次完整 run。
 
-    M1 直接手工驱动节点，语义与 build_graph() 的图完全一致——把
+    M1 直接手工驱动节点，节点顺序与路由和 build_graph() 的图一致——把
     LangGraph 的 checkpointer 接进来是 M2 的事（需要先有 trace 落盘）。
+
+    **但两条路径不再等价：预算只在这里**。RunBudget、`failure_token_budget`
+    与 `failure_usd_budget` 的分配、以及「越线即中止」的检查全部写在这个
+    函数里；build_graph() 那条路径没有 RunBudget，`failure_usd_budget`
+    一直是 None，整条美元闸不存在。产品入口走的是 run_once，图那条路径
+    目前只用于结构验证，别拿它去验证任何与花钱有关的保证。
     """
     state = new_state(repo, config, run_id=run_id)
     state.update(preflight_node(state))
@@ -76,22 +119,41 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                     state["abort_kind"], state["abort"] = spent
                     trace.fact("abort", state["abort"])
                     trace.fact("abort_kind", state["abort_kind"])
+                    _backfill_in_flight_result(state)
                     break
                 # 剩余 failure 数 = 队列里的 + 手上这个
+                remaining_failures = len(state["queue"]) + 1
                 state["failure_token_budget"] = budget.for_failure(
-                    len(state["queue"]) + 1)
+                    remaining_failures)
                 before = state["spent_tokens"], state["spent_usd"]
                 with trace.failure_span(state["current"]), \
                         trace.attempt_span(state["attempt"]):
                     state.update(await detect_node(state, client=detector_client))
-                    state.update(await fix_node(state, client=fixer_client))
+                    # detect 不接美元闸是计划登记过的有意偏差，但它花掉的钱
+                    # 必须**在这里立刻结算**：否则下面算给 fix 的额度是按
+                    # 「detect 还没花钱」算出来的，fix 会在可能已经越线的
+                    # 状态下发起新调用，「越线之后不再发起新的模型调用」这句
+                    # 话就不成立 —— 实测 budget_usd=20、单次调用 $15、单
+                    # failure 会花掉 $45，超支 1.67 次调用而不是一次。
                     budget.charge(state["spent_tokens"] - before[0],
                                   state["spent_usd"] - before[1])
+                    mid = state["spent_tokens"], state["spent_usd"]
+                    # 额度必须在 detect 结算之后才算，取的是扣掉 detect 之后
+                    # 的剩余。算出 0.0 是正常结果（detect 恰好花光），fix_node
+                    # 按 is None 判定，会把它当成扣光的闸而不是「没设闸」。
+                    state["failure_usd_budget"] = budget.usd_for_failure(
+                        remaining_failures)
+                    state.update(await fix_node(state, client=fixer_client))
+                    # 两笔 charge 相加恰好是 after_fix - before：不重复计入，
+                    # 也不遗漏。verify_node 零 LLM，不产生花销。
+                    budget.charge(state["spent_tokens"] - mid[0],
+                                  state["spent_usd"] - mid[1])
                     state.update(await verify_node(state))
                 tripped = check_circuit_breaker(state)
                 if tripped:
                     state["abort"] = tripped
                     trace.fact("abort", tripped)
+                    _backfill_in_flight_result(state)
                     break
 
         state.update(report_node(state))
@@ -114,6 +176,33 @@ def _safe_label(label: str) -> str:
     return _LABEL_UNSAFE.sub("_", label).strip("_") or "未命名"
 
 
+def require_price_map_for_usd_budget(config: AifixConfig,
+                                     also_explicit: bool = False) -> None:
+    """显式要求了美元上限却没有价格表 —— 当场拒绝。
+
+    also_explicit：给 `eval --budget-total` 用。那个上限不进配置对象
+    （它是这一次调用的调度约束，不是项目配置），所以 model_fields_set
+    看不见它，得由调用方把「用户确实要求了美元闸」这件事带进来。
+
+    不配价格表时 effective_cost 恒为 0，美元闸永远不会触发：用户设了上限，
+    系统欣然接受，然后一分钱不拦。与其给一个假的保证，不如现在就停。
+
+    「显式」由 pydantic 的 model_fields_set 判定，默认值不在其中；CLI 的
+    --budget 走 model_copy(update=...)，同样会被记住，所以一处判定管住
+    环境变量、构造参数、命令行三条来源。
+    """
+    explicit = also_explicit or "budget_usd" in config.model_fields_set
+    if not explicit or config.price_map:
+        return
+    raise SystemExit(
+        "拒绝启动：设置了美元预算上限，但没有配置价格表，这个上限不会生效。\n"
+        "  没有 price_map 时成本恒为 0，闸永远不触发 —— 与其给一个假的保证，"
+        "不如现在就停。\n"
+        "  修法一：配置价格表（每千 token 的 [输入价, 输出价]）\n"
+        "    export AIFIX_PRICE_MAP='{\"deepseek-v4-pro\": [0.003, 0.006]}'\n"
+        "  修法二：去掉美元上限，改用 AIFIX_BUDGET_TOKENS 限制 token")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aifix")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -122,7 +211,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--test", default=None,
                      help="只修这一个失败用例（test_id）")
     run.add_argument("--budget", type=float, default=None,
-                     help="本次 run 的美元预算上限")
+                     help="本次 run 的美元上限。语义是「越线之后不再发起新的"
+                          "模型调用」——成本只有在调用返回后才知道，所以最后"
+                          "那一次必然已经花掉。需要配置 AIFIX_PRICE_MAP")
     run.add_argument("--dry-run", action="store_true",
                      help="只跑 preflight + baseline，报告有多少活")
 
@@ -140,6 +231,12 @@ def build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--label", default=None,
                     help="这一轮的模型标签，默认取 fixer 的 model")
     ev.add_argument("--out", default=None)
+    ev.add_argument("--budget-per-task", type=float, default=None,
+                    help="每个任务的美元上限")
+    ev.add_argument("--budget-total", type=float, default=None,
+                    help="整批的美元上限。检查发生在派发时按并发上限预留额度，"
+                         "所以整批超支上界 = 并发数 × 一次模型调用的成本，"
+                         "而不是随任务数线性放大")
 
     rep = sub.add_parser("eval-report", help="把若干轮结果渲染成对比表")
     rep.add_argument("results", nargs="+")
@@ -162,6 +259,7 @@ def _cmd_run(args) -> None:
     config = AifixConfig()
     if args.budget is not None:
         config = config.model_copy(update={"budget_usd": args.budget})
+    require_price_map_for_usd_budget(config)
     state = asyncio.run(run_once(
         Path(args.repo).resolve(), config, run_id=uuid.uuid4().hex[:8],
         only_test=args.test, dry_run=args.dry_run))
@@ -195,6 +293,11 @@ def _cmd_eval(args) -> None:
     from .eval.task import Task, TaskResult, read_jsonl, write_jsonl
 
     config = AifixConfig()
+    if args.budget_per_task is not None:
+        config = config.model_copy(
+            update={"budget_usd": args.budget_per_task})
+    require_price_map_for_usd_budget(
+        config, also_explicit=args.budget_total is not None)
     label = args.label or config.fixer.model or "未命名"
     tasks = read_jsonl(Path(args.tasks), Task)
     workdir = Path(tempfile.mkdtemp(prefix="aifix-eval-"))
@@ -205,7 +308,8 @@ def _cmd_eval(args) -> None:
 
     print(f"{len(tasks)} 个任务 · {label} · 并行 {args.parallel}")
     results = asyncio.run(run_suite(tasks, config, label, workdir,
-                                    parallel=args.parallel, on_done=done))
+                                    parallel=args.parallel, on_done=done,
+                                    total_usd=args.budget_total))
     out = Path(args.out or f"evals/results-{_safe_label(label)}.jsonl")
     write_jsonl(out, results)
     print()
