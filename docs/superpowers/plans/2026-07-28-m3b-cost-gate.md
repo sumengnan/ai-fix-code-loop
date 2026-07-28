@@ -25,6 +25,34 @@
 
 理由：detect 是单步、无工具、已被 `detector_max_tokens = 20_000` 硬限住的一次调用，钱不在那里烧；给它再叠一层美元闸只增加接线面，不增加安全性。`fix_node` 才是唯一可能跑几十步、反复重试的地方。
 
+## 事后更正（实现完成后实测发现，计划正文**故意保持原样**）
+
+下面两条陈述在计划里是错的。**正文一个字都没改**：它们不是笔误，而是缺陷的来源——执行者逐字照抄了带缺陷的参考实现，然后照抄了为它配套的错误上界。悄悄改掉原话，等于销毁「计划本身会错、而照抄计划的执行者不会发现」这条证据。原处只加了 `<!-- 已证伪，见文首「事后更正」 -->` 行内注释。
+
+### 更正 1：整批闸的超支上界不是「并发数 - 1 个任务」
+
+**被证伪的原话**（四处，均在「阶段 4：整批评测的总闸」里：`run_suite` 的 docstring、它的 commit message、`--budget-total` 的 help 文本、以及那一条的 commit message；原处已标 `<!-- 已证伪 -->`）：
+
+> 检查发生在**派发之前**，已经在跑的任务放它们跑完 …… 因此超支上界是「并发数 − 1 个任务」的成本。
+
+**证伪它的实测**：`total_usd=1.0`、每任务 `budget_usd=1.0`、4 个任务、`parallel=4` → 花掉 `$4.00`，4 个任务全部跑满，一个都没被跳过。整批上限形同虚设。
+
+**根因**：这句话描述的是一个**它自己的参考实现并不具备**的性质。计划给出的 `one()` 只在任务**跑完之后**才 `spent += r.cost_usd`；`parallel=N` 时 N 个并发槽位在派发前全部读到同一个旧 `spent`，各自以为还有整批上限那么多额度可花。「检查发生在派发之前」推不出任何上界——真正推得出上界的是「**在派发时就把额度预留掉**」，而参考实现里没有这一步。已在 `6118865` 修正：算出 `cap` 的同一把锁内立即 `spent += cap`，任务跑完再回填 `r.cost_usd - cap`。
+
+**正确说法及其成立条件**：预留之后，整批的超支只可能来自「每个在跑的任务超出它自己那份额度的量」，而单任务的超出量由 `consume()` 的契约兜住（至多一次模型调用）。因此**整批超支上界 = 并发数 × 一次模型调用的成本**。成立条件有两条：派发时预留额度；任务要么正常跑完、要么在没花钱之前就炸（异常路径按成本 0 全额退回预留，花过钱才炸的话那笔钱会在 `spent` 里消失）。
+
+顺带一提旧说法的量纲也不对：它把上界记在「任务」这个单位上，于是 `parallel=1` 时预测超支为 **0**——而单个 run 本来就可能超出一次模型调用。上界的单位从来就该是模型调用，不是任务。
+
+### 更正 2：单 run 的超支上界，在 detect 未结算时同样不成立
+
+**被证伪的原话**：规格 §3 与 `run --budget` 的 `--help` 都写着「越线之后不再发起新的模型调用」，据此推出单 run 的超支上界是一次模型调用。
+
+**证伪它的实测**：`budget_usd=20`、单次调用 `$15`、单 failure → 花掉 **`$45`**，超支 1.67 次调用。
+
+**根因**：主循环顶部确认未越线 → `usd_for_failure` 按**当时**的剩余算出额度 → `detect_node` 不带 `cost_cap` 跑掉一次调用 → `fix_node` 拿到的 `round_cap` 就是那个额度，**没扣掉 detect 刚花的钱** → fix 在可能已经越线的状态下发起新调用。「detect 不接美元闸」这条偏差本身保持不变（见上一节），不成立的是**基于它推出的那句上界**。
+
+**修法**：把美元额度的分配挪到 detect 之后，并在中间结算 detect 的花费——`budget.charge(detect 的花销)` → `usd_for_failure()` → `fix_node` → `budget.charge(fix 的花销)`，两笔相加恰好是本轮实际花费。额度因此可能算出 `0.0`，这是正常结果而非边界情况，所以 `fix_node` 里读额度必须用 `is None` 判定：旧写法 `state.get(...) or None` 会把 `0.0` 求值成 `None`，等于在闸最该拦住的那一刻完全不拦。
+
 ## 文件结构
 
 **修改**
@@ -918,6 +946,7 @@ uv run pytest tests/test_eval_runner.py -q -k suite_budget
 
 把 `src/aifix/eval/runner.py` 的 `run_suite` 替换为：
 
+<!-- 已证伪，见文首「事后更正」 -->
 ```python
 _SKIPPED = "整批预算耗尽，未运行"
 
@@ -995,6 +1024,7 @@ uv run pytest -q
 
 - [ ] **步骤 6：Commit**
 
+<!-- 已证伪，见文首「事后更正」 -->
 ```bash
 git add src/aifix/eval/runner.py tests/test_eval_runner.py
 git commit -m "feat(eval): 整批评测的美元总闸
@@ -1081,6 +1111,7 @@ uv run pytest tests/test_cli_args.py -q -k "eval_budget or contract or overshoot
 
 在 `eval` 子命令中补两个参数：
 
+<!-- 已证伪，见文首「事后更正」 -->
 ```python
     ev.add_argument("--budget-per-task", type=float, default=None,
                     help="每个任务的美元上限")
@@ -1120,6 +1151,7 @@ uv run pytest -q
 
 - [ ] **步骤 6：Commit**
 
+<!-- 已证伪，见文首「事后更正」 -->
 ```bash
 git add src/aifix/cli.py tests/test_cli_args.py
 git commit -m "feat(cli): eval 的两级预算参数，并把契约写进 --help
