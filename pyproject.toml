@@ -5,8 +5,12 @@ description = "测试失败驱动的自我改进 agentic loop"
 requires-python = ">=3.11"
 dependencies = [
     # 0.0.2 起提供 aifix 依赖的两处能力：LocalSandbox 接管既有目录、
-    # AgentLoop.run 接收初始消息。不要降到 0.0.1。
-    "ai-harness-framework>=0.0.2",
+    # AgentLoop.run 接收初始消息。
+    # 0.0.3 起 run()/resume() 被 aclose() 时会终结内层生成器 —— 成本闸越线
+    # 中止时正是这么关流的，0.0.2 上那一关关不到内层，ExitStack（还原打转
+    # 纠偏的采样升温）与三层 span 要等事件循环回收才清理，时机不确定。
+    # 不要降到 0.0.2 以下。
+    "ai-harness-framework>=0.0.3",
     # eval 的数据模型（Task / TaskResult / Summary）直接 import pydantic。
     # 它此前只是靠 ai-harness-framework 传递进来的隐式依赖 —— 公开的数据
     # 模型层不能依赖别人的依赖树。

@@ -4,7 +4,7 @@ requires-python = ">=3.11"
 
 [[package]]
 name = "ai-harness-framework"
-version = "0.0.2"
+version = "0.0.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "openai" },
@@ -12,9 +12,9 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/00/4b/393d22c61e55a608cd5a849ca7497cb865b21826000eb40d8e57e14fe38e/ai_harness_framework-0.0.2.tar.gz", hash = "sha256:f44547aeb9600f94f11e06874b12cf481bcd99c6d75c9d81004ca75d5b0ea5f3", size = 291259, upload-time = "2026-07-27T09:03:47.391Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0e/92/c1788b364039e5ef4af5c2fe027625c0c9e7bdcf601b490a82d2d3dbda9d/ai_harness_framework-0.0.3.tar.gz", hash = "sha256:47b83f009e82087d391fd2aa87a1b4dec4aa6f2f7fd684e6b9b728386070d35d", size = 295203, upload-time = "2026-07-28T09:35:18.042Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3d/ef/67645d606362f4a3fec57c4b6807cb646955ef2e79e23b8f0fbf4544e77d/ai_harness_framework-0.0.2-py3-none-any.whl", hash = "sha256:82233646450c869fe817ea33014f3fbac3ae18f89e129d0a2ba2c37e33974bb9", size = 138231, upload-time = "2026-07-27T09:03:45.683Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/b0/e62f9e02fd54bb0523389c5fd267fe9983ca710835c07e7361816f7b8c7a/ai_harness_framework-0.0.3-py3-none-any.whl", hash = "sha256:460cc503aeab6b302cbc51d40e870bd490249b496d6bd7b550d5a354d5d84934", size = 139758, upload-time = "2026-07-28T09:35:16.753Z" },
 ]
 
 [[package]]
@@ -36,7 +36,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ai-harness-framework", specifier = ">=0.0.2" },
+    { name = "ai-harness-framework", specifier = ">=0.0.3" },
     { name = "langgraph", specifier = ">=1.2" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3.1" },
     { name = "pydantic", specifier = ">=2.7" },
