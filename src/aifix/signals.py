@@ -60,6 +60,31 @@ def same_file(a: str | None, b: str | None) -> bool:
     return longer[len(longer) - len(shorter):] == shorter
 
 
+def under_dirs(path: str, dirs: list[str]) -> bool:
+    """path 是否落在 dirs 里某个目录之下：按路径**分段**比前缀。
+
+    这一份判定同时服务 `tools/patch.py` 的「不许改测试文件」守卫与
+    `eval/mine.split_paths` 的「测试侧 / 源文件」拆分。两处问的是同一个问题
+    「这个文件在不在测试目录里」，实现必须只有一份 —— 复制出来的两份会各自
+    漂移：本分支之前 mine 已经升级成分段前缀，patch.py 还停在 `parts[0] in
+    test_dirs`，而 M5 的 MavenAdapter 用的是标准布局 `src/test/java/...`，
+    test_dirs 会是 `["src/test"]`。首段是 `src`，守卫直接放行，这个项目最核
+    心的一道守卫静默失效。
+
+    为什么必须按分段比、不能用裸 `startswith`：`"testdata/x.py".startswith(
+    "test")` 是 True，但 `testdata` 不是 `test` 目录。
+
+    空字符串一律跳过：它的分段序列是 ()，是任何路径的前缀，会让守卫拦下
+    一切改动 —— 配置里多一个空项就把整个系统变成只读的。
+    """
+    p = _path_parts(path)
+    for d in dirs:
+        prefix = _path_parts(d)
+        if prefix and p[:len(prefix)] == prefix:
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class PatchSignals:
     removed_public_symbols: list[str]
@@ -148,7 +173,17 @@ def module_state(source: str) -> set[str]:
 
 def analyze(files: dict[str, tuple[str | None, str | None]],
             suspect: str | None) -> PatchSignals:
-    """files: 路径 → (旧内容, 新内容)。None 表示该侧不存在（新增 / 删除）。"""
+    """files: 路径 → (旧内容, 新内容)。None 表示该侧不存在（新增 / 删除）。
+
+    已知偏差：`files_outside_suspect` 依赖 suspect 存在，而 suspect 来自
+    Detector 的 JSON 诊断 —— detect_node 在 JSON 解析失败时把 diagnosis 置
+    None，这里就没有参照系，这一列恒为空。于是**一个 JSON 输出不合规的模型，
+    无论把改动摊到多少个文件，这一列都是 0**。不能靠伪造一个 suspect 来补：
+    没有诊断就真的没有「之外」。读这一列时必须同时看
+    `diagnosis_parse_failed`，跨模型对比的口径见 `eval/score.py` 的模块
+    docstring。这与 `locate_hit` 曾经被「模型的路径书写风格」量走是同一类
+    偏差，那次的教训写在 `eval/runner.locate_hit` 里。
+    """
     removed: set[str] = set()
     new_state: set[str] = set()
 
@@ -165,7 +200,14 @@ def analyze(files: dict[str, tuple[str | None, str | None]],
 
     # suspect 为 None 时没有「之外」可言 —— 没有诊断就没有参照系，把整个
     # 改动都标出来等于这一列恒亮，人会立刻学会无视它。
-    outside = ([p for p in files if not same_file(p, suspect)]
+    #
+    # `old != new` 不能省：files 的键来自 ApplyPatchTool 累加的 touched，它
+    # 只在 huge_diff 时整体清空。模型对 utils.py 打了补丁又打了反向补丁
+    # （git diff 归零，撞上 empty_diff 守卫），重试里改对了 calc.py —— 此时
+    # utils.py 与 HEAD 逐字相同却仍在 touched 里。只看键会把它报成「改动落
+    # 在嫌疑文件之外」，人按图索骥去看一个空 diff，这一列就废了。
+    outside = ([p for p, (old, new) in files.items()
+                if old != new and not same_file(p, suspect)]
                if suspect else [])
 
     # 三个列表都排序：报告与 facts 会消费它们，集合的迭代顺序不可复现，

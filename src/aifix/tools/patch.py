@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 from harness.sandbox.base import Sandbox, SandboxError, resolve_in_workspace
 from harness.tools.base import Tool, ToolError
 
+from ..signals import under_dirs
+
 # 取 diff 里的目标路径：`--- a/x.py` / `+++ b/x.py`，忽略 /dev/null
 _TARGET = re.compile(r"^(?:---|\+\+\+)\s+(?:[ab]/)?(?P<path>\S+)", re.M)
 
@@ -49,7 +51,10 @@ class ApplyPatchTool(Tool):
             parts = PurePosixPath(p).parts
             if ".git" in parts:
                 raise ToolError(f"拒绝修改 .git 目录下的文件：{p}")
-            if parts and parts[0] in self._test_dirs:
+            # 分段前缀，不是首段：Maven 标准布局的 test_dirs 是
+            # `["src/test"]`，只看首段会把 `src/test/java/...` 当成源文件放
+            # 行。判定与 eval/mine.split_paths 共用 signals.under_dirs。
+            if under_dirs(p, self._test_dirs):
                 raise ToolError(
                     f"拒绝修改测试文件：{p}。"
                     "请修改源码使测试通过，而不是修改测试本身。")

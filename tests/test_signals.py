@@ -1,4 +1,5 @@
-from aifix.signals import analyze, module_state, public_symbols, same_file
+from aifix.signals import (analyze, module_state, public_symbols, same_file,
+                           under_dirs)
 
 _OLD = '''
 def add(a, b):
@@ -170,3 +171,52 @@ def test_same_file_is_the_shared_suffix_match():
     assert not same_file("other/mine.py", "src/aifix/eval/mine.py")
     assert not same_file("xmine.py", "src/aifix/eval/mine.py")
     assert not same_file("", "src/aifix/eval/mine.py")
+
+
+def test_unchanged_file_is_not_reported_as_outside_the_suspect():
+    """内容没变的文件不算「改动落在嫌疑文件之外」。
+
+    touched 由 ApplyPatchTool 累加，只在 huge_diff 时整体清空。真实触发路径：
+    模型对 utils.py 打了补丁又打了反向补丁（git diff 归零，撞上 empty_diff
+    守卫），重试里改对了 calc.py —— utils.py 与 HEAD 逐字相同却会被报成越界，
+    人按图索骥去看一个空 diff，这一列的可信度就没了。
+    """
+    s = analyze({"calc.py": ("x = 1\n", "x = 2\n"),
+                 "utils.py": ("y = 1\n", "y = 1\n")}, suspect="calc.py")
+    assert s.files_outside_suspect == []
+
+
+def test_deleted_file_still_counts_as_outside_the_suspect():
+    """「内容真的变了」必须含删除：None 与原内容不同，是最该被看见的改动。"""
+    s = analyze({"calc.py": ("x = 1\n", "x = 2\n"),
+                 "utils.py": ("y = 1\n", None)}, suspect="calc.py")
+    assert s.files_outside_suspect == ["utils.py"]
+
+
+# —— 测试目录判定：patch.py 的守卫与 mine.split_paths 共用这一份 ——
+
+def test_under_dirs_matches_nested_prefix():
+    """Maven 标准布局 `src/test/java/...`：判据必须是分段前缀，不是首段。"""
+    assert under_dirs("src/test/java/demo/CalcTest.java", ["src/test"])
+    assert under_dirs("tests/test_calc.py", ["tests"])
+
+
+def test_under_dirs_rejects_partial_segment_match():
+    """`src/testdata/x.py` 不在 `src/test` 目录下 —— 裸 startswith 会误判。"""
+    assert not under_dirs("src/testdata/x.py", ["src/test"])
+    assert not under_dirs("testdata/x.py", ["tests"])
+
+
+def test_under_dirs_does_not_match_a_sibling_tree():
+    assert not under_dirs("src/main/java/demo/Calc.java", ["src/test"])
+
+
+def test_under_dirs_ignores_empty_prefix():
+    """空字符串的分段序列是 ()，是任何路径的前缀 —— 会让守卫拦下一切。"""
+    assert not under_dirs("src/main/Calc.java", [""])
+
+
+def test_under_dirs_normalizes_separators_and_leading_dot():
+    assert under_dirs("./src/test/java/X.java", ["src/test"])
+    assert under_dirs("src\\test\\java\\X.java", ["src/test"])
+    assert under_dirs("src/test/java/X.java", ["src/test/"])
