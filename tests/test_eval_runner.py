@@ -51,11 +51,11 @@ def _fixer():
                       _text("已修复")])
 
 
-def _task(h) -> Task:
+def _task(h, origin: str = "mined") -> Task:
     return Task(task_id="hist@t1::test_add", repo=str(h["path"]),
                 commit=h["commit"], base_commit=h["base"],
                 test_files=h["test_files"], target_test=h["target"],
-                gold_files=h["gold_files"])
+                gold_files=h["gold_files"], origin=origin)
 
 
 async def test_successful_task_scores_better_and_locate_hit(
@@ -93,6 +93,29 @@ async def test_baseline_not_reproduced_is_an_error_not_a_failure(
                        fixer_client=_fixer())
     assert r.error is not None
     assert "复现" in r.error
+
+
+async def test_run_task_result_carries_task_origin(history_repo, tmp_path):
+    """origin 要跟着 task 走，不能被写死成 mined —— 否则变异任务的统计
+    会被并进挖掘任务里，抵消掉「按来源分行」的意义。"""
+    t = _task(history_repo, origin="mutated")
+    r = await run_task(t, AifixConfig(), "假模型", tmp_path / "w",
+                       detector_client=_Scripted([_text(_DIAG)]),
+                       fixer_client=_fixer())
+    assert r.origin == "mutated"
+
+
+async def test_baseline_not_reproduced_keeps_task_origin(
+        history_repo, tmp_path):
+    """baseline 未复现那条 blank 结果也要带上 origin —— 这条路径用的是
+    run_task 里的局部 blank，不是模块级 _blank，同样不能漏。"""
+    t = _task(history_repo, origin="mutated").model_copy(
+        update={"target_test": "tests/test_calc.py::根本不存在"})
+    r = await run_task(t, AifixConfig(), "假模型", tmp_path / "w",
+                       detector_client=_Scripted([_text(_DIAG)]),
+                       fixer_client=_fixer())
+    assert r.error is not None
+    assert r.origin == "mutated"
 
 
 def test_suspect_is_taken_from_the_first_attempt():
@@ -252,11 +275,11 @@ def test_locate_hit_rejects_naive_string_endswith_false_positive():
     assert not locate_hit("xmine.py", ["src/aifix/eval/mine.py"])
 
 
-def _bare_task(tid: str) -> Task:
+def _bare_task(tid: str, origin: str = "mined") -> Task:
     """只为调度逻辑服务的任务壳 —— 字段不会被 fake 的 run_task 读到。"""
     return Task(task_id=tid, repo="/tmp/x", commit="c", base_commit="b",
                 test_files=["tests/t.py"], target_test="tests/t.py::x",
-                gold_files=["a.py"])
+                gold_files=["a.py"], origin=origin)
 
 
 def _fake_run_task(seen: list, caps: list, cost: float):
@@ -396,6 +419,37 @@ async def test_on_done_is_never_called_while_holding_the_lock(
     assert len(locked_at_call) == 3, "三个任务都应该各触发一次 on_done"
     assert not any(locked_at_call), (
         f"on_done 在锁仍被持有时被调用了：{locked_at_call}")
+
+
+async def test_skipped_tasks_keep_their_origin(monkeypatch, tmp_path):
+    """跳过分支走的是模块级 _blank，必须把 task.origin 带上 —— 否则被
+    跳过的变异任务会静默落回默认值 mined，正好是本任务要防的事。"""
+    import aifix.eval.runner as R
+
+    monkeypatch.setattr(R, "run_task", _fake_run_task([], [], cost=1.0))
+    tasks = [_bare_task("t0", origin="mutated"),
+            _bare_task("t1", origin="mutated")]
+    # total_usd=0.0：派发前 left <= 0，两个任务都直接进跳过分支，
+    # 不必依赖 run_task 的桩真的跑起来。
+    rs = await R.run_suite(tasks, AifixConfig(budget_usd=5.0), "假模型",
+                           tmp_path, parallel=1, total_usd=0.0)
+    assert all("未运行" in (r.error or "") for r in rs)
+    assert all(r.origin == "mutated" for r in rs), (
+        f"跳过的结果没有带上任务的 origin：{[r.origin for r in rs]}")
+
+
+async def test_exception_path_keeps_task_origin(monkeypatch, tmp_path):
+    """run_task 炸掉时走的也是模块级 _blank，同样必须带上 origin。"""
+    import aifix.eval.runner as R
+
+    async def boom(task, config, model, workdir, **kw):
+        raise RuntimeError("炸了")
+
+    monkeypatch.setattr(R, "run_task", boom)
+    rs = await R.run_suite([_bare_task("t0", origin="mutated")],
+                           AifixConfig(), "假模型", tmp_path, parallel=1)
+    assert rs[0].error is not None
+    assert rs[0].origin == "mutated"
 
 
 async def test_no_suite_budget_leaves_config_untouched(monkeypatch, tmp_path):

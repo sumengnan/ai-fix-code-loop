@@ -1,4 +1,4 @@
-from aifix.eval.score import render_table, summarize
+from aifix.eval.score import render_table, summarize, summarize_by_origin
 from aifix.eval.task import TaskResult
 
 
@@ -122,7 +122,8 @@ def test_table_marks_error_count():
     s = summarize([_r(), _r(error="炸了")])
     row = render_table([s]).strip().splitlines()[-1]
     cells = [c.strip() for c in row.strip("|").split("|")]
-    assert cells[1] == "1", f"有效任务数应为 1：{row}"
+    # 列序：模型、来源、任务数、……——「来源」插在模型和任务数之间。
+    assert cells[2] == "1", f"有效任务数应为 1：{row}"
     assert cells[-1] == "1", f"评测故障数应为 1：{row}"
 
 
@@ -140,3 +141,50 @@ def test_table_renders_avg_tokens_column():
     row = md.strip().splitlines()[-1]
     cells = [c.strip() for c in row.strip("|").split("|")]
     assert "12,345" in cells, f"表头与数据列错位了：{row}"
+
+
+def test_mixed_origins_are_not_averaged_into_one_number():
+    """挖掘与变异分布不同，成功率平均成一个数字是错的。"""
+    rs = [_r(origin="mined", verdict="better"),
+          _r(origin="mined", verdict="same"),
+          _r(origin="mutated", verdict="better"),
+          _r(origin="mutated", verdict="better")]
+    summaries = summarize_by_origin(rs)
+    assert [s.origin for s in summaries] == ["mined", "mutated"]
+    assert summaries[0].fix_hits == 1 and summaries[0].tasks == 2
+    assert summaries[1].fix_hits == 2 and summaries[1].tasks == 2
+
+
+def test_origin_order_follows_first_appearance_not_alphabetical():
+    """按字典序会把 mutated 排到 mined 前面 —— 顺序要跟任务集文件里出现
+    的先后走，读起来才跟任务集本身一致。"""
+    rs = [_r(origin="mutated", verdict="better"),
+          _r(origin="mined", verdict="better")]
+    summaries = summarize_by_origin(rs)
+    assert [s.origin for s in summaries] == ["mutated", "mined"]
+
+
+def test_single_origin_stays_one_row():
+    rs = [_r(origin="mined", verdict="better")]
+    assert len(summarize_by_origin(rs)) == 1
+
+
+def test_summarize_by_origin_empty_list_returns_empty():
+    """空列表不该冒出一行空 Summary —— render_table 对空列表就该只有表
+    头，那才是对的。"""
+    assert summarize_by_origin([]) == []
+
+
+def test_render_table_origin_column_shows_literal_value():
+    """来源列直接用 jsonl 里的字面值（mined/mutated），不翻译成中文——
+    翻译了反而和任务集文件对不上。"""
+    md = render_table(summarize_by_origin([_r(origin="mutated")]))
+    assert "来源" in md
+    assert "| mutated |" in md
+
+
+def test_render_table_dash_for_empty_origin():
+    """summarize() 不传 origin 时留空，表格里不能渲染出一个假来源。"""
+    s = summarize([_r()])
+    md = render_table([s])
+    assert "| — |" in md

@@ -16,6 +16,10 @@ from .task import TaskResult
 
 class Summary(BaseModel):
     model: str
+    # mined | mutated | ""。空串表示「没有按来源拆」——summarize() 的老
+    # 调用方（一次汇总所有结果）不关心来源，render_table 就该显示「—」
+    # 而不是瞎编一个值。summarize_by_origin() 会把这里填成真实来源。
+    origin: str = ""
     tasks: int                  # 有效任务数（不含出错的）
     locate_hits: int            # 分子。光有比率渲染不出 (12/20)
     fix_hits: int
@@ -30,21 +34,21 @@ class Summary(BaseModel):
     errors: int
 
 
-def summarize(results: list[TaskResult]) -> Summary:
+def summarize(results: list[TaskResult], origin: str = "") -> Summary:
     model = results[0].model if results else ""
     # 出错的任务不进分母：那是评测自己的故障，不该拉低被测系统的成绩
     valid = [r for r in results if r.error is None]
     n = len(valid)
     if n == 0:
-        return Summary(model=model, tasks=0, locate_hits=0, fix_hits=0,
-                       locate_rate=0.0, fix_rate=0.0,
+        return Summary(model=model, origin=origin, tasks=0, locate_hits=0,
+                       fix_hits=0, locate_rate=0.0, fix_rate=0.0,
                        avg_cost_usd=0.0, avg_tokens=0.0, avg_attempts=0.0,
                        violations=sum(r.violations for r in results),
                        errors=len(results) - n)
     locate_hits = sum(r.locate_hit for r in valid)
     fix_hits = sum(r.verdict == "better" for r in valid)
     return Summary(
-        model=model, tasks=n,
+        model=model, origin=origin, tasks=n,
         locate_hits=locate_hits, fix_hits=fix_hits,
         locate_rate=locate_hits / n,
         fix_rate=fix_hits / n,
@@ -54,6 +58,26 @@ def summarize(results: list[TaskResult]) -> Summary:
         violations=sum(r.violations for r in valid),
         errors=len(results) - n,
     )
+
+
+def summarize_by_origin(results: list[TaskResult]) -> list[Summary]:
+    """按来源（mined/mutated）拆开算，不能平均成一个数字。
+
+    挖掘任务的分布是真实 bug 的分布，人造变异任务是单点、确定、可任意
+    规模但分布不同——把两者的修复成功率合并成一个数字，等于拿两个不同
+    量纲的东西求平均，数字本身就是错的。
+
+    顺序按首次出现，不按字典序：字典序会把 mutated 排到 mined 前面，
+    跟任务集 jsonl 里的实际顺序对不上，读起来还得先在心里倒一遍序。
+    """
+    order: list[str] = []
+    groups: dict[str, list[TaskResult]] = {}
+    for r in results:
+        if r.origin not in groups:
+            order.append(r.origin)
+            groups[r.origin] = []
+        groups[r.origin].append(r)
+    return [summarize(groups[o], origin=o) for o in order]
 
 
 def _cost_cell(s: Summary) -> str:
@@ -90,13 +114,18 @@ def _rate_cell(hits: int, n: int) -> str:
 
 def render_table(summaries: list[Summary]) -> str:
     lines = [
-        "| 模型 | 任务数 | 定位准确率（分数, 95%CI） | 修复成功率（分数, 95%CI）"
+        "| 模型 | 来源 | 任务数 | 定位准确率（分数, 95%CI） | 修复成功率（分数, 95%CI）"
         " | 平均成本 | 平均 tokens | 平均尝试 | 越界尝试 | 评测故障 |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for s in summaries:
+        # 值直接用 mined/mutated 原文：它们也是任务集 jsonl 里的字面值，
+        # 翻译成中文反而和任务集文件对不上。origin 为空表示没有按来源
+        # 拆（老的 summarize() 单行汇总），显示「—」而不是瞎编一个来源。
+        origin_cell = s.origin if s.origin else "—"
         lines.append(
-            f"| {s.model} | {s.tasks} | {_rate_cell(s.locate_hits, s.tasks)}"
+            f"| {s.model} | {origin_cell} | {s.tasks}"
+            f" | {_rate_cell(s.locate_hits, s.tasks)}"
             f" | {_rate_cell(s.fix_hits, s.tasks)}"
             f" | {_cost_cell(s)} | {s.avg_tokens:,.0f} | {s.avg_attempts:.1f}"
             f" | {s.violations} | {s.errors} |")

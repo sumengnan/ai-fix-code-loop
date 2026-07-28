@@ -98,9 +98,13 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
                    fixer_client: Any = None) -> TaskResult:
     run_id = _safe_id(task.task_id)
     dest = Path(workdir) / run_id
+    # origin 必须带上：这条 blank 是「baseline 未复现」分支的落点，若省
+    # 略 origin 会退回 TaskResult 的默认值 mined，把变异任务的评测故障
+    # 误记成挖掘任务的，恰好抵消掉按来源分行统计的意义。
     blank = TaskResult(task_id=task.task_id, model=model, locate_hit=False,
                        suspect_file=None, verdict="same", attempts=0,
-                       tokens=0, cost_usd=0.0, violations=0)
+                       tokens=0, cost_usd=0.0, violations=0,
+                       origin=task.origin)
 
     prepare_task_repo(task, dest)
     state = await run_once(dest, config, run_id=run_id,
@@ -138,6 +142,7 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
         tokens=state["spent_tokens"], cost_usd=state["spent_usd"],
         violations=violations,
         abort_reason=(row or {}).get("abort_reason") or state.get("abort"),
+        origin=task.origin,
     )
     if state.get("abort_kind") == "wall":
         # 墙钟预算是评测调度器的属性，不是模型的属性：--parallel 8 时几个
@@ -155,10 +160,14 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
 _SKIPPED = "整批预算耗尽，未运行"
 
 
-def _blank(task_id: str, model: str, error: str) -> TaskResult:
+def _blank(task_id: str, model: str, error: str, origin: str) -> TaskResult:
+    # origin 没有默认值：跳过 / 异常两条路径各自持有对应的 task，写死
+    # 一个默认值等于给「忘记传」留了退路——退路的另一头正是本函数存在的
+    # 理由（被跳过/出错的变异任务落回默认 mined，统计上被并进挖掘任务）。
     return TaskResult(task_id=task_id, model=model, locate_hit=False,
                       suspect_file=None, verdict="same", attempts=0,
-                      tokens=0, cost_usd=0.0, violations=0, error=error)
+                      tokens=0, cost_usd=0.0, violations=0, error=error,
+                      origin=origin)
 
 
 async def run_suite(tasks: list[Task], config: AifixConfig, model: str,
@@ -216,7 +225,7 @@ async def run_suite(tasks: list[Task], config: AifixConfig, model: str,
                     # 记成 error 而不是失败的 verdict：这是评测的调度
                     # 决策，不是被测系统的成绩。混进比率分母会让修复
                     # 成功率凭空变低 —— 被测系统替调度背锅。
-                    r = _blank(t.task_id, model, _SKIPPED)
+                    r = _blank(t.task_id, model, _SKIPPED, origin=t.origin)
                     if on_done:
                         on_done(r)
                     return r
@@ -230,7 +239,7 @@ async def run_suite(tasks: list[Task], config: AifixConfig, model: str,
                                    detector_client=detector_client,
                                    fixer_client=fixer_client)
             except Exception as e:      # 一个任务炸掉不能带走整个 suite
-                r = _blank(t.task_id, model, repr(e))
+                r = _blank(t.task_id, model, repr(e), origin=t.origin)
             if cap is not None:
                 # 回填预留与实际花销的差额。异常路径 r.cost_usd 是
                 # 0.0，回填 0.0 - cap 会把预留原样退回，是对的 ——

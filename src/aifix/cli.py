@@ -289,7 +289,7 @@ def _cmd_mine(args) -> None:
 def _cmd_eval(args) -> None:
     # 延迟导入：理由同上
     from .eval.runner import run_suite
-    from .eval.score import render_table, summarize
+    from .eval.score import render_table, summarize_by_origin
     from .eval.task import Task, TaskResult, read_jsonl, write_jsonl
 
     config = AifixConfig()
@@ -313,16 +313,21 @@ def _cmd_eval(args) -> None:
     out = Path(args.out or f"evals/results-{_safe_label(label)}.jsonl")
     write_jsonl(out, results)
     print()
-    print(render_table([summarize(results)]))
+    # 一份任务集可能混了挖掘（mined）与人造变异（mutated）两种来源，
+    # 分布不同，成功率平均成一个数字会失真——按来源拆成多行。
+    print(render_table(summarize_by_origin(results)))
     print(f"明细 → {out}")
     shutil.rmtree(workdir, ignore_errors=True)
 
 
 def _cmd_eval_report(args) -> None:
     # 延迟导入：理由同上
-    from .eval.score import render_table, summarize
+    from .eval.score import render_table, summarize_by_origin
     from .eval.task import TaskResult, read_jsonl
 
-    summaries = [summarize(read_jsonl(Path(p), TaskResult))
-                 for p in args.results]
+    summaries: list = []
+    for p in args.results:
+        # 同一个结果文件也可能混了两种来源，逐份拆开后再拼到一起，
+        # 不能像老版本那样每份文件只出一行汇总。
+        summaries.extend(summarize_by_origin(read_jsonl(Path(p), TaskResult)))
     print(render_table(summaries))
