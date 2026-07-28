@@ -12,8 +12,15 @@ from typing import Any
 
 from harness.events import RunError, ToolFinished, ToolStarted
 
-# 这三条串都由我们自己产生（patch.py / sandbox.base / agent_loop.py），
-# 不是对第三方输出的猜测。
+# 三条匹配串的来源不一样，这一点很要紧：
+#   拒绝修改测试文件 —— 本仓库 src/aifix/tools/patch.py，改动在我们手上。
+#   路径逃逸       —— 第三方依赖 harness/sandbox/base.py。
+#   检测到疑似循环  —— 第三方依赖 harness/loop/agent_loop.py。
+# 后两条来自 ai-harness-framework，而 pyproject 只写了 >=0.0.2、没锁上界：
+# 上游改一次措辞（或把中文换成英文），path_escape 与 loop_abort 两类统计
+# 就会永久归零 —— 不报错、不崩溃，只是那两列从此恒为 0，而规格说这一列
+# 「正是 harness 存在的理由」。tests/test_violations.py 里有两个哨兵测试
+# 直接对着上游的真实产物断言，上游一改措辞就会红。
 _TEST_EDIT = "拒绝修改测试文件"
 _PATH_ESCAPE = "路径逃逸"
 _LOOP = "检测到疑似循环"
