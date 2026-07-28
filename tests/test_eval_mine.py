@@ -440,6 +440,42 @@ def test_file_went_green_is_false_when_some_case_still_fails():
     assert _file_went_green("tests/test_x.py", ok) is True
 
 
+async def test_empty_scope_returns_before_materializing(history_repo, tmp_path,
+                                                        monkeypatch):
+    """没有可跑的 .py 测试时，不该先克隆一次再返回 []。
+
+    「只改了 tests/data/*.json 夹具 + 源码」的 commit 过得了 is_candidate
+    （夹具进 test_files），但 scope 是空的 —— materialize 里那次
+    `git clone --local` 纯属白跑。
+    """
+    import aifix.eval.mine as mine
+
+    repo = history_repo["path"]
+    base = _rev(repo, "HEAD")
+    (repo / "tests" / "data").mkdir(parents=True, exist_ok=True)
+    (repo / "tests" / "data" / "golden.json").write_text("{}\n",
+                                                         encoding="utf-8")
+    (repo / "calc.py").write_text(
+        "def add(a, b):\n    return a + b  # 顺手改一行\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    _commit(repo, "chore: 加一份夹具，顺手动一下源码")
+    commit = _rev(repo, "HEAD")
+
+    real = mine.materialize
+    calls: list[tuple] = []
+
+    def spy(*a, **kw):
+        calls.append(a)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(mine, "materialize", spy)
+    got = await verify_commit(str(repo), commit, base,
+                              ["tests/data/golden.json"], PytestAdapter(),
+                              tmp_path / "v")
+    assert got == []
+    assert calls == [], "scope 为空时不该 materialize（里面含一次 git clone）"
+
+
 def _commit(repo, msg: str) -> None:
     subprocess.run(["git", "-c", "user.email=t@example.com",
                     "-c", "user.name=t", "commit", "-q", "-m", msg],

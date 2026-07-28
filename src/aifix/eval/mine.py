@@ -141,6 +141,14 @@ async def verify_commit(repo: str, commit: str, base_commit: str,
     误读成模型不行** —— 先去源仓库确认那几个 target_test 在 C 处单跑与
     全量下的结果是否一致。
     """
+    # test_files 含测试目录下的非 .py 夹具（见 split_paths），它们能被
+    # materialize 嫁接，但不能出现在 pytest 命令行上。这一步要排在
+    # materialize **之前**：只改了夹具 + 源码的 commit（夹具进 test_files，
+    # 所以过得了 is_candidate）在这里 scope 为空，跑不出任何结论，先克隆一次
+    # 再返回 [] 是白花一次 `git clone --local`
+    scope = [p for p in test_files if PurePosixPath(p).suffix == ".py"]
+    if not scope:
+        return []
     workdir = Path(workdir)
     shutil.rmtree(workdir, ignore_errors=True)
     materialize(repo, base_commit, commit, test_files, workdir)
@@ -149,11 +157,6 @@ async def verify_commit(repo: str, commit: str, base_commit: str,
     # 那个提交 —— 阶段 4 要回到这里，所以现在就记下来
     staged_head = _git(workdir, "rev-parse", "HEAD").strip()
 
-    # test_files 含测试目录下的非 .py 夹具（见 split_paths），它们能被
-    # materialize 嫁接，但不能出现在 pytest 命令行上
-    scope = [p for p in test_files if PurePosixPath(p).suffix == ".py"]
-    if not scope:
-        return []
     red = await run_scoped(workdir, adapter, scope, require_report=True)
     if not red.ids:
         return []
