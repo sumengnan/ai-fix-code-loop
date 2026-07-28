@@ -56,10 +56,18 @@ def test_new_file_is_not_a_removal():
     assert s.removed_public_symbols == []
 
 
-def test_syntax_error_does_not_raise():
-    """补丁把文件写坏了 —— 测试自然会红，信号模块不该跟着崩。"""
+def test_syntax_error_side_is_treated_as_an_empty_symbol_set():
+    """补丁把文件写坏了 —— 信号模块不该跟着崩，且要有确定的行为。
+
+    _parse 对解析失败返回 None，该侧当空集合处理。于是新版解析不出任何符号
+    时，旧版的每个公开符号都算「被删掉」——`f` 必须报出来。不测这一条只写
+    `count >= 0` 是恒真断言：count 是三个 len() 之和，数学上不可能为负，
+    实现整个删空了它也照样绿。
+    """
     s = analyze({"a.py": ("def f(): pass\n", "def f( :\n")}, suspect=None)
-    assert s.count >= 0     # 只要不抛
+    assert s.removed_public_symbols == ["f"]
+    assert s.new_module_state == []
+    assert s.count == 1
 
 
 # —— 以下是简报之外补的边界，每一条都对应一个会让信号失真的具体场景 ——
@@ -90,6 +98,21 @@ def test_module_state_only_counts_mutable_containers():
            "PAIR = (1, 2)\n")
     # 不可变右值必须排除，否则每个常量赋值都会报，信号就没意义了。
     assert module_state(src) == {"CACHE", "SEEN", "ITEMS", "BUF"}
+
+
+def test_module_state_excludes_immutable_builtin_calls():
+    """`frozenset()` / `tuple()` 是不可变容器，不是「把纯函数改成有状态的」指纹。
+
+    module_state 认 `dict()` 这类调用（与字面量等价），判据是调用的函数名 ——
+    名单一旦放宽到「看起来像容器构造」，每个 `EMPTY = frozenset()` 常量都会
+    亮红灯，信号就被淹掉了。既有测试只覆盖了元组**字面量** `(1, 2)`，
+    调用形式这条路没人钉过。
+    """
+    src = ("FROZEN = frozenset()\n"
+           "EMPTY = tuple()\n"
+           "TEXT = str()\n"
+           "CACHE = dict()\n")
+    assert module_state(src) == {"CACHE"}
 
 
 def test_module_state_already_present_is_not_new():
