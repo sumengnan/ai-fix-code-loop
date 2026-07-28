@@ -90,7 +90,12 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
         locate_hit=suspect in task.gold_files if suspect else False,
         suspect_file=suspect,
         verdict=row["verdict"] if row else "same",
-        attempts=row["attempts"] if row else 0,
+        # 没有 results 行 = 中止发生在两轮之间（verify_node 只在 better 或
+        # attempt≥max_attempts 时才写行）。这时 state["attempt"] 停在「下一轮
+        # 的编号」，真实跑过的轮数是它减一。落成 0 会把「平均尝试」系统性
+        # 拉低，而这个任务明明真跑过。
+        attempts=(row["attempts"] if row
+                  else max(state.get("attempt", 0) - 1, 0)),
         tokens=state["spent_tokens"], cost_usd=state["spent_usd"],
         violations=violations,
         abort_reason=(row or {}).get("abort_reason") or state.get("abort"),

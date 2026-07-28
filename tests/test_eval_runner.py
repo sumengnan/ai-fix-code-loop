@@ -118,6 +118,43 @@ def test_facts_without_attempt_are_ignored():
         [{"key": "suspect_file", "value": "calc.py"}]) is None
 
 
+def _fake_run_once(monkeypatch, target: str, **over):
+    """把 run_once 换成一个只返回既定 state 的桩。
+
+    预算中止发生在「attempt 1 没修好、还没进 attempt 2」的空档，真实闭环
+    要烧掉预算才能复现 —— 桩掉 run_once 是唯一划算的构造方式。
+    """
+    import aifix.eval.runner as runner
+
+    state = {"baseline_ids": [target], "results": [], "attempt": 2,
+             "spent_tokens": 1234, "spent_usd": 0.0, "abort": None,
+             "abort_kind": None}
+    state.update(over)
+
+    async def fake(*a, **kw):
+        return state
+
+    monkeypatch.setattr(runner, "run_once", fake)
+    return state
+
+
+async def test_budget_abort_keeps_the_attempts_actually_made(
+        history_repo, tmp_path, monkeypatch):
+    """预算中止时任务明明真跑过一轮，attempts 不能记成 0。
+
+    verify_node 只在 verdict=better 或 attempt≥max_attempts 时才写
+    results；attempt 1 没修好、随后预算耗尽 break，results 仍是空的 ——
+    落成 0 会把「平均尝试」系统性拉低。
+    """
+    t = _task(history_repo)
+    _fake_run_once(monkeypatch, t.target_test,
+                   abort="token 预算耗尽：50000 / 50000", abort_kind="tokens")
+    r = await run_task(t, AifixConfig(), "假模型", tmp_path / "w")
+    assert r.attempts == 1
+    assert r.verdict == "same"
+    assert r.error is None, "token 预算是模型的属性，没在预算内修好是真实成绩"
+
+
 async def test_suite_isolates_failures(history_repo, tmp_path):
     """一个任务炸掉不能带走整个 suite。"""
     ok = _task(history_repo)
