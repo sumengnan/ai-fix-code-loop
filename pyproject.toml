@@ -7,6 +7,10 @@ dependencies = [
     # 0.0.2 起提供 aifix 依赖的两处能力：LocalSandbox 接管既有目录、
     # AgentLoop.run 接收初始消息。不要降到 0.0.1。
     "ai-harness-framework>=0.0.2",
+    # eval 的数据模型（Task / TaskResult / Summary）直接 import pydantic。
+    # 它此前只是靠 ai-harness-framework 传递进来的隐式依赖 —— 公开的数据
+    # 模型层不能依赖别人的依赖树。
+    "pydantic>=2.7",
     "langgraph>=1.2",
     "langgraph-checkpoint-sqlite>=3.1",
 ]
