@@ -22,6 +22,34 @@ from .nodes.verify import verify_node
 from .trace import RunTrace
 
 
+def _backfill_in_flight_result(state: AifixState) -> None:
+    """预算耗尽 / 熔断中止时，把手上正在处理的 failure 补录进 results。
+
+    verify_node 只在两种终局分支写 results 行：判定为 BETTER，或
+    attempt 已到 max_attempts。若某一轮没修好，verify_node 只会把
+    attempt 递增为「下一轮的编号」然后返回，不落任何记录——这本是
+    对的（它还要继续重试）。但如果主循环恰好在下一轮开头发现预算
+    耗尽或连续失败熔断而直接 break，这个 failure 就再也没有机会
+    走到 verify_node 的任何一个终局分支，于是从 results 里彻底消失。
+    这个用例真的跑过、真的花了钱、真的没修好——报告却显示「压根
+    没轮到它」，用户没法区分这两种情况，而后者恰恰是「没记录」
+    应该表达的含义。所以中止发生时要在这里把它补上。
+    """
+    current = state.get("current")
+    if not current:
+        return
+    if any(r.get("test_id") == current for r in state["results"]):
+        return
+    verdict = state.get("verdict") or "same"
+    # verify_node 的非终局分支把 attempt 递增为下一轮编号，真实跑过的
+    # 轮数是 attempt - 1；能走到这里说明至少完整跑过一轮，兜底为 1
+    attempts = max(state.get("attempt", 1) - 1, 1)
+    state["results"].append({
+        "test_id": current, "verdict": verdict,
+        "attempts": attempts, "abort_reason": state.get("abort"),
+    })
+
+
 async def run_once(repo: Path, config: AifixConfig, run_id: str,
                    detector_client: Any = None,
                    fixer_client: Any = None,
@@ -76,6 +104,7 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                     state["abort_kind"], state["abort"] = spent
                     trace.fact("abort", state["abort"])
                     trace.fact("abort_kind", state["abort_kind"])
+                    _backfill_in_flight_result(state)
                     break
                 # 剩余 failure 数 = 队列里的 + 手上这个
                 state["failure_token_budget"] = budget.for_failure(
@@ -94,6 +123,7 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                 if tripped:
                     state["abort"] = tripped
                     trace.fact("abort", tripped)
+                    _backfill_in_flight_result(state)
                     break
 
         state.update(report_node(state))
