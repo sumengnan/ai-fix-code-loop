@@ -6,8 +6,10 @@
 和 mined 那一类从 git history 里挖出来的真实红转绿 commit，难度不在一个量级。
 两类任务的成绩必须分开报（见 task.Task.origin）。
 
-本模块只负责**产出变异**：给一份源码，吐出一串「只动一处」的候选。验证变异是否
-真的把测试弄红、以及落成 Task，是任务集构建那一层的事，不在这里。
+模块分两层。下半层 `mutations(source)` 是纯函数：给一份源码，吐出一串「只动
+一处」的候选，不碰磁盘也不跑测试。上半层 `mutate_tasks` 才去克隆仓库、逐个施加
+候选、跑测试、把真的弄红了的那些落成 Task。**一个变异不算任务，一个被验证过
+确实红了的变异才算** —— 「生成了 N 条记录」证明不了任何事。
 
 ## 为什么是文本替换而不是 ast.unparse
 
@@ -33,8 +35,18 @@
 from __future__ import annotations
 
 import ast
+import random
+import shutil
+import subprocess
 from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from typing import Iterator
+
+from ..adapters.pytest_adapter import PytestAdapter
+from ..nodes.baseline import run_full_suite, run_scoped
+from .mine import split_paths
+from .task import Task
+from .workspace import materialize
 
 # 算子表。value 是 (原文, 变成什么)，原文用来在两个操作数之间定位。
 _CMP_OPS: dict[type, tuple[str, str]] = {
@@ -212,3 +224,156 @@ def mutations(source: str) -> Iterator[Mutation]:
             # 但结果不对的程序，不是一份编译不过的文件
             continue
         yield Mutation(source=mutated, lineno=lineno, description=description)
+
+
+# ---------------------------------------------------------------- 任务产出层
+
+def _git(cwd: str | Path, *args: str) -> str:
+    res = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
+                         text=True)
+    if res.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} 失败：{res.stderr.strip()}")
+    return res.stdout
+
+
+def _test_index(ran: frozenset[str]) -> dict[str, list[str]]:
+    """从一次全量的 ran 集合建「测试文件 → 用例」索引。
+
+    不另外解析 XML：全绿时 failures 是空的，ran 里是形如
+    `tests/test_x.py::test_a` 的 id，按 `::` 前缀分组就是索引。收集失败发出的
+    文件级 id（不带 `::`）在这里恰好自成一组，键仍是文件路径，行为一致。
+    """
+    index: dict[str, list[str]] = {}
+    for test_id in sorted(ran):
+        index.setdefault(test_id.split("::", 1)[0], []).append(test_id)
+    return index
+
+
+def _scope_for(rel: str, index: dict[str, list[str]],
+               scope: str) -> list[str] | None:
+    """这个源文件的变异要跑哪些测试；None 表示跑全量。
+
+    `smart` 按**词干**匹配：源文件 `src/aifix/eval/mine.py` 的 stem 是 `mine`，
+    候选是文件名里含 `mine` 的测试文件（`tests/test_eval_mine.py`）。这是个
+    命名约定上的启发式，**会漏** —— 被变异的文件其实由别处的测试覆盖时匹配
+    不到，返回空列表，调用方跳过这个文件。
+
+    **漏是安全的**：少一个候选而已，不会产出假任务。反过来（跑得太窄，把
+    「其实没弄红任何测试」的变异当成弄红了）才会造出无人能通过的任务，而
+    那不可能发生：判据是「跑到的这些测试里有没有新红」，跑不到就没有新红。
+    """
+    if scope == "full":
+        return None
+    if scope != "smart":
+        raise ValueError(f"未知的测试范围 {scope!r}，只支持 smart / full")
+    stem = PurePosixPath(rel).stem
+    return [f for f in sorted(index) if stem in PurePosixPath(f).name]
+
+
+async def _run(tree: Path, adapter: PytestAdapter,
+               scope_files: list[str] | None):
+    if scope_files is None:
+        return await run_full_suite(tree, adapter, require_report=True)
+    return await run_scoped(tree, adapter, scope_files, require_report=True)
+
+
+async def mutate_tasks(repo: str, adapter: PytestAdapter, max_tasks: int = 10,
+                       max_new_failures: int = 5, scope: str = "smart",
+                       seed: int = 0, workdir: Path | None = None,
+                       on_progress=None) -> list[Task]:
+    """在一个全绿仓库上生成人造变异任务（C 类）。
+
+    HEAD 必须全绿，否则直接抛：在一个本来就红的仓库上做变异，分不清红是变异
+    造成的还是本来就有的 —— 「新失败」这个判据是拿变异后的失败集合直接当答案
+    的，基线不干净它就没有意义。
+
+    收下一个变异的条件是新失败数落在 `[1, max_new_failures]`：一个都没红说明
+    这个变异没被任何测试覆盖到，不构成任务；红了一大片的变异太显眼（模型看
+    一眼失败面就知道要往哪改），也违反「单点缺陷」这个前提 —— ground truth
+    只有一个文件，却弄红了半个套件，那更像是接口契约被改了。
+
+    on_progress(rel_path, n, error)：沿用 mine_tasks 的约定，n≥0 是这个源文件
+    产出的任务数（0 是正常结果：没有候选、或候选全被丢弃、或 smart 范围没
+    匹配到测试文件）。
+    """
+    workdir = Path(workdir or Path(repo) / ".aifix" / "mutate")
+    shutil.rmtree(workdir, ignore_errors=True)
+    workdir.mkdir(parents=True, exist_ok=True)
+    name = Path(repo).name
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    tree = workdir / "tree"
+    tasks: list[Task] = []
+
+    try:
+        # 变异只落在这份克隆里，源仓库一个字节都不动 —— 产出的 Task 带的是
+        # unified diff，materialize 时才现场施加
+        materialize(repo, head, head, [], tree)
+        green = await run_full_suite(tree, adapter, require_report=True)
+        if green.ids:
+            raise RuntimeError(
+                f"仓库 HEAD（{head[:8]}）不是全绿，无法做变异："
+                f"{len(green.ids)} 个用例已经在红"
+                f"（{'、'.join(sorted(green.ids)[:3])}）。"
+                "基线不干净时，变异后的新失败分不清是变异造成的还是本来就有的")
+        if not green.ran:
+            # 报告存在但一个用例都没跑到（收集整轮中止）。这不是「全绿」，
+            # 而是压根没跑 —— 放行的话下面每个变异的 scoped 也跑不到东西，
+            # 整轮静默产出 0 个任务，与「这些变异都没弄红测试」无法区分
+            raise RuntimeError(
+                f"仓库 HEAD（{head[:8]}）的全量一个用例都没跑到"
+                f"（worktree={tree}），本次结果不可信")
+        index = _test_index(green.ran)
+
+        paths = [p for p in _git(tree, "ls-files", "--", "*.py").split("\n")
+                 if p.strip()]
+        _tests, sources = split_paths(paths, adapter.test_dirs())
+        # seed 决定文件顺序与每个文件内候选的顺序：max_tasks 一截断，取到哪
+        # 几个变异就全看这个顺序，不定死就没有可复现的任务集可言
+        rng = random.Random(seed)
+        rng.shuffle(sources)
+
+        for rel in sources:
+            if len(tasks) >= max_tasks:
+                break
+            scope_files = _scope_for(rel, index, scope)
+            if scope_files is not None and not scope_files:
+                if on_progress:
+                    on_progress(rel, 0, None)
+                continue
+            path = tree / rel
+            original = path.read_text(encoding="utf-8")
+            candidates = list(mutations(original))
+            rng.shuffle(candidates)
+            n = 0
+            for m in candidates:
+                if len(tasks) >= max_tasks:
+                    break
+                path.write_text(m.source, encoding="utf-8")
+                try:
+                    fs = await _run(tree, adapter, scope_files)
+                    # 趁变异还在工作区里取 diff。每个 Mutation.source 都是从
+                    # 原文整体重算的，所以工作区里永远只有一处改动
+                    diff = _git(tree, "diff", "--", rel)
+                except RuntimeError:
+                    # 报告缺失 / git 失败：这一个候选作废，不带走整轮变异
+                    continue
+                finally:
+                    # 还原必须无条件执行 —— 上一个变异留在工作区里，下一个
+                    # 候选的「新失败」就分不清是谁造成的了
+                    path.write_text(original, encoding="utf-8")
+                new = sorted(fs.ids)
+                if not (1 <= len(new) <= max_new_failures) or not diff.strip():
+                    continue
+                target = new[0]
+                tasks.append(Task(
+                    task_id=f"{name}@mut::{rel}:{m.lineno}::{target}",
+                    repo=str(Path(repo).resolve()), commit=head,
+                    base_commit=head, test_files=[], target_test=target,
+                    gold_files=[rel], adapter=adapter.name,
+                    origin="mutated", mutation_diff=diff))
+                n += 1
+            if on_progress:
+                on_progress(rel, n, None)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    return tasks

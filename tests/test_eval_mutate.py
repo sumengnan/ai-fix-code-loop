@@ -127,3 +127,169 @@ def test_mutation_is_frozen():
 
 def test_syntactically_broken_source_yields_nothing():
     assert list(mutations("def f(:\n")) == []
+
+
+import subprocess
+
+import pytest
+
+from aifix.adapters.pytest_adapter import PytestAdapter
+from aifix.eval.mutate import mutate_tasks
+from aifix.eval.workspace import prepare_task_repo
+from aifix.nodes.baseline import run_full_suite
+
+_PYTEST_INI = "[pytest]\npythonpath = .\n"
+
+# 全绿夹具。calc.py 上恰好三个变异候选，每个只弄红一个用例：
+#   `+` → `-`   → test_add 红
+#   `>` → `>=`  → test_is_big 红（is_big(10) 变 True）
+#   `10` → `11` → test_is_big 红（is_big(11) 变 False）
+# 用例只有两个 —— 「产出的任务真的红」那条测试要为每个任务真跑一次全量，
+# 套件大一点这个测试就慢得没法进 CI
+_GREEN_SRC = '''def add(a, b):
+    return a + b
+
+
+def is_big(n):
+    return n > 10
+'''
+
+_GREEN_TEST = '''from calc import add, is_big
+
+
+def test_add():
+    assert add(2, 3) == 5
+
+
+def test_is_big():
+    assert is_big(11) is True
+    assert is_big(10) is False
+'''
+
+
+def _init_repo(repo: Path, files: dict[str, str]) -> Path:
+    for rel, text in files.items():
+        p = repo / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.email=t@example.com",
+                    "-c", "user.name=t", "commit", "-q", "-m", "init"],
+                   cwd=repo, check=True)
+    return repo
+
+
+def _make_green_repo(tmp_path: Path) -> Path:
+    return _init_repo(tmp_path / "green", {
+        "pytest.ini": _PYTEST_INI,
+        "calc.py": _GREEN_SRC,
+        "tests/test_calc.py": _GREEN_TEST,
+    })
+
+
+def _make_red_repo(tmp_path: Path) -> Path:
+    return _init_repo(tmp_path / "red", {
+        "pytest.ini": _PYTEST_INI,
+        "calc.py": "def add(a, b):\n    return a - b\n",
+        "tests/test_calc.py": (
+            "from calc import add\n\n\n"
+            "def test_add():\n"
+            "    assert add(2, 3) == 5\n"),
+    })
+
+
+def _make_fragile_repo(tmp_path: Path) -> Path:
+    """唯一的变异候选（`+` → `-`）会同时弄红三个用例。"""
+    return _init_repo(tmp_path / "fragile", {
+        "pytest.ini": _PYTEST_INI,
+        "calc.py": "def add(a, b):\n    return a + b\n",
+        "tests/test_calc.py": (
+            "from calc import add\n\n\n"
+            "def test_one():\n"
+            "    assert add(1, 1) == 2\n\n\n"
+            "def test_two():\n"
+            "    assert add(2, 3) == 5\n\n\n"
+            "def test_three():\n"
+            "    assert add(4, 5) == 9\n"),
+    })
+
+
+def _make_misnamed_repo(tmp_path: Path) -> Path:
+    """源文件 gauge.py 由 tests/test_calc.py 覆盖 —— 词干对不上。"""
+    return _init_repo(tmp_path / "misnamed", {
+        "pytest.ini": _PYTEST_INI,
+        "gauge.py": "def double(x):\n    return x * 2\n",
+        "tests/test_calc.py": (
+            "from gauge import double\n\n\n"
+            "def test_double():\n"
+            "    assert double(3) == 6\n"),
+    })
+
+
+async def test_generated_task_is_actually_red(tmp_path):
+    """产出的任务必须**真的红** —— 断言「生成了 N 条记录」证明不了任何事。"""
+    repo = _make_green_repo(tmp_path)
+    tasks = await mutate_tasks(str(repo), PytestAdapter(), max_tasks=2,
+                               workdir=tmp_path / "w")
+    assert len(tasks) == 2, f"应产出 2 个任务，实际 {len(tasks)}"
+    for i, t in enumerate(tasks):
+        assert t.origin == "mutated" and t.mutation_diff
+        assert t.gold_files == ["calc.py"]
+        assert t.commit == t.base_commit and t.test_files == []
+        # task_id 会被 runner._safe_id 洗成分支名与目录名
+        assert t.task_id.startswith("green@mut::calc.py:")
+        assert "\n" not in t.task_id and '"' not in t.task_id
+        dest = tmp_path / "check" / f"t{i}"
+        prepare_task_repo(t, dest)
+        fs = await run_full_suite(dest, PytestAdapter(), require_report=True)
+        assert t.target_test in fs.ids, \
+            f"任务不红：{t.target_test} 不在 {sorted(fs.ids)}"
+        # 单点缺陷：变异只该弄红这一个用例，其余照常跑过
+        assert fs.ids == {t.target_test}, f"红了不止一个：{sorted(fs.ids)}"
+
+
+async def test_refuses_a_repo_that_is_already_red(tmp_path):
+    """本来就红的仓库上做变异，分不清红是变异造成的还是本来就有的。"""
+    repo = _make_red_repo(tmp_path)
+    with pytest.raises(RuntimeError, match="不是全绿"):
+        await mutate_tasks(str(repo), PytestAdapter(), max_tasks=1,
+                           workdir=tmp_path / "w")
+
+
+async def test_drops_mutations_that_break_too_much(tmp_path):
+    """把套件炸掉一半的变异不是好任务 —— 它太显眼，且违反单点缺陷前提。"""
+    repo = _make_fragile_repo(tmp_path)
+    strict = await mutate_tasks(str(repo), PytestAdapter(), max_tasks=5,
+                                max_new_failures=1, workdir=tmp_path / "w1")
+    assert strict == [], "一个变异弄红 3 个用例，max_new_failures=1 时必须丢弃"
+    # 另一侧要有区分度：放宽阈值后同一个变异必须被收下，否则「恒返回空」
+    # 也能让上面那条通过
+    loose = await mutate_tasks(str(repo), PytestAdapter(), max_tasks=5,
+                               max_new_failures=3, workdir=tmp_path / "w2")
+    assert len(loose) == 1
+    assert loose[0].gold_files == ["calc.py"]
+
+
+async def test_smart_scope_skips_files_no_test_file_is_named_after(tmp_path):
+    """词干匹配不到就跳过 —— 漏是安全的，产假任务不是。"""
+    repo = _make_misnamed_repo(tmp_path)
+    smart = await mutate_tasks(str(repo), PytestAdapter(), max_tasks=5,
+                               workdir=tmp_path / "w1")
+    assert smart == [], "gauge.py 没有同名测试文件，smart 范围下不该产出任务"
+    # full 范围能捞回来 —— 证明「smart 跳过」是范围策略造成的，不是
+    # 这个仓库压根产不出任务
+    full = await mutate_tasks(str(repo), PytestAdapter(), max_tasks=5,
+                              scope="full", workdir=tmp_path / "w2")
+    assert [t.gold_files for t in full] == [["gauge.py"]] * len(full)
+    assert len(full) >= 1, "full 范围下 gauge.py 的变异必须能被验出来"
+
+
+async def test_seed_makes_the_selection_reproducible(tmp_path):
+    """同一个 seed 两次跑出同一批任务，换 seed 才允许不同。"""
+    repo = _make_green_repo(tmp_path)
+    a = await mutate_tasks(str(repo), PytestAdapter(), max_tasks=1, seed=3,
+                           workdir=tmp_path / "w1")
+    b = await mutate_tasks(str(repo), PytestAdapter(), max_tasks=1, seed=3,
+                           workdir=tmp_path / "w2")
+    assert [t.task_id for t in a] == [t.task_id for t in b] != []
