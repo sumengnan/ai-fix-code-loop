@@ -9,11 +9,12 @@ import asyncio
 import hashlib
 import json
 import re
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from ..cli import run_once
 from ..config import AifixConfig
+from ..signals import same_file
 from .task import Task, TaskResult
 from .workspace import prepare_task_repo
 
@@ -57,19 +58,6 @@ def first_attempt_suspect(facts: list[dict[str, Any]]) -> str | None:
                 None)
 
 
-def _path_parts(path: str) -> tuple[str, ...]:
-    """把路径规整成 POSIX 分段序列，供后缀匹配用。
-
-    仓库里的路径都是 git 产出的 POSIX 形式，但模型给出的 suspect_file 可能带
-    `./` 前缀或 `\\` 分隔符（尤其是习惯 Windows 风格的模型）。先统一分隔符、
-    去掉前导 `./`，再切分，两侧才能在同一套坐标系里比较。
-    """
-    normalized = path.replace("\\", "/")
-    if normalized.startswith("./"):
-        normalized = normalized[2:]
-    return PurePosixPath(normalized).parts
-
-
 def locate_hit(suspect: str | None, gold_files: list[str]) -> bool:
     """判定 suspect_file 是否定位到了 gold_files 里的某个文件。
 
@@ -96,24 +84,13 @@ def locate_hit(suspect: str | None, gold_files: list[str]) -> bool:
     「蒙对文件名」的运气稀释，跨模型对比就失去区分度了。只报裸文件名（不
     带任何目录）的情况之所以命中，是因为它本身就是「分段序列长度为 1 的
     后缀」，符合同一条规则，不是放宽出的特例。
+
+    分段后缀匹配本身在 `aifix.signals.same_file` —— 补丁合理性信号里的
+    `files_outside_suspect` 问的是同一个问题「模型说的那个文件和我手上这
+    个是不是同一个」。两边各留一份实现会各自漂移，届时同一对路径可能在定
+    位准确率里算命中、在越界信号里算越界。
     """
-    if not suspect:
-        return False
-    suspect_parts = _path_parts(suspect)
-    if not suspect_parts:
-        return False
-    for gold in gold_files:
-        if not gold:
-            continue
-        gold_parts = _path_parts(gold)
-        if not gold_parts:
-            continue
-        shorter, longer = ((suspect_parts, gold_parts)
-                           if len(suspect_parts) <= len(gold_parts)
-                           else (gold_parts, suspect_parts))
-        if longer[len(longer) - len(shorter):] == shorter:
-            return True
-    return False
+    return any(same_file(suspect, gold) for gold in gold_files)
 
 
 async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
