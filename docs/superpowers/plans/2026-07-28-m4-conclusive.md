@@ -896,9 +896,9 @@ async def mutate_tasks(repo: str, adapter, max_tasks: int = 10,
 ```python
 def test_mutate_subcommand_exists_and_states_its_positioning():
     """帮助文本必须说清这是冒烟集不是基准 —— 否则这些数字会被当成结论。"""
-    text = _strip(_sub_help("mutate"))     # 剥 ANSI + 删全部空白，见既有 helper
-    assert _strip("冒烟集") in text
-    assert _strip("不是基准") in text
+    text = _sub_help("mutate")     # 既有 helper，已剥 ANSI 且删掉全部空白
+    assert "冒烟集" in text
+    assert "不是基准" in text
 
 
 def test_mutate_flags():
@@ -907,7 +907,7 @@ def test_mutate_flags():
     assert args.max_tasks == 3 and args.scope == "full"
 ```
 
-**注意**：`_sub_help` 的断言必须走既有的「剥 ANSI + 删全部空白」归一化。中文帮助文本没有词间空格，`textwrap` 在任意位置硬断，任何保留空白的比对都会随终端宽度飘（M3b 里 `COLUMNS=45` 当场红过）。若 `tests/test_cli_args.py` 里已有这个 helper，**复用它**。
+**注意**：`tests/test_cli_args.py:163` 已有 `_sub_help(name)`，它内部就做了「剥 ANSI + 删掉全部空白」（`"".join(_ANSI.sub("", ...).split())`）。**直接复用，不要另造归一化**。中文帮助文本没有词间空格，`textwrap` 在任意位置硬断，任何保留空白的比对都会随终端宽度飘——M3b 里 `COLUMNS=45` 当场红过一次。
 
 - [ ] **步骤 2：跑测试确认失败**
 
