@@ -5,14 +5,19 @@ from typing import Any
 
 from harness.sandbox.local import LocalSandbox
 
+from ..adapters.base import ProjectAdapter
 from ..adapters.junit import parse_junit
+from ..adapters.maven_adapter import MavenAdapter
 from ..adapters.pytest_adapter import PytestAdapter
 from ..graph import AifixState
 
-_ADAPTERS = {"pytest": PytestAdapter}
+_ADAPTERS: dict[str, type[ProjectAdapter]] = {
+    "pytest": PytestAdapter, "maven": MavenAdapter}
 
 
-def adapter_for(name: str) -> PytestAdapter:
+# 返回类型是协议而不是某个具体适配器：注册表里现在有两个实现，写死其中
+# 一个会让另一个在类型上「碰巧也能用」。
+def adapter_for(name: str) -> ProjectAdapter:
     return _ADAPTERS[name]()
 
 
