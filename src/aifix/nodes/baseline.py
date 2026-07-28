@@ -11,14 +11,27 @@ from ..adapters.maven_adapter import MavenAdapter
 from ..adapters.pytest_adapter import PytestAdapter
 from ..graph import AifixState
 
-_ADAPTERS: dict[str, type[ProjectAdapter]] = {
-    "pytest": PytestAdapter, "maven": MavenAdapter}
+# 全项目唯一的适配器注册表。preflight_node 按插入顺序逐个 detect()，
+# adapter_for 按名字取，两种用法共用这一份数据 —— 曾经
+# preflight 另存一份 `ADAPTERS = [PytestAdapter]`，而 adapter_name 由**它**
+# 决定：MavenAdapter 在这边登记好了，Maven 工程走到 preflight 照样 abort，
+# 加了等于没加，且两处都不会报错。
+#
+# **dict 的插入顺序就是探测顺序，改动顺序等于改变探测语义。**
+# Maven 在前：MavenAdapter.detect 要求根目录有 pom.xml，是一个具体且几乎
+# 不会误判的信号；PytestAdapter.detect 极宽松 —— pyproject.toml 或 tests/
+# 存在就认领，而 Java 工程的工具链里带 Python 脚本（发版、代码生成、CI 胶水）
+# 是常事。反过来排的后果不是报错而是静默：Maven 工程被判成 pytest 工程，
+# baseline 跑 pytest 命令收不到任何用例，报告写「0 个失败」。
+# 通则：detect 越具体的排越前，兜底式的排最后。
+ADAPTERS: dict[str, type[ProjectAdapter]] = {
+    "maven": MavenAdapter, "pytest": PytestAdapter}
 
 
 # 返回类型是协议而不是某个具体适配器：注册表里现在有两个实现，写死其中
 # 一个会让另一个在类型上「碰巧也能用」。
 def adapter_for(name: str) -> ProjectAdapter:
-    return _ADAPTERS[name]()
+    return ADAPTERS[name]()
 
 
 def _check_report(worktree: Path, paths: list[Path], required: bool) -> None:

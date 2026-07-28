@@ -1,13 +1,49 @@
+import subprocess
 import sys
+import typing
+from pathlib import Path
 
 import pytest
 
+from aifix.adapters.base import ProjectAdapter
+from aifix.adapters.maven_adapter import MavenAdapter
 from aifix.adapters.pytest_adapter import PytestAdapter
 from aifix.config import AifixConfig
 from aifix.delivery import Worktree
 from aifix.graph import AifixState, new_state
-from aifix.nodes.baseline import baseline_node, run_full_suite, run_scoped
+from aifix.nodes.baseline import (adapter_for, baseline_node, run_full_suite,
+                                  run_scoped)
 from aifix.nodes.preflight import preflight_node
+
+
+def _init_git(repo: Path) -> None:
+    for args in (["init", "-q", "-b", "main"],
+                 ["config", "user.email", "t@example.com"],
+                 ["config", "user.name", "t"],
+                 ["add", "-A"], ["commit", "-q", "-m", "init"]):
+        subprocess.run(["git", *args], cwd=repo, check=True,
+                       capture_output=True, text=True)
+
+
+def _maven_project(repo: Path, *, also_python: bool = False) -> Path:
+    """Maven 标准布局的最小工程。preflight 只看 detect()，不跑 mvn。"""
+    (repo / "src/main/java/demo").mkdir(parents=True)
+    (repo / "src/test/java/demo").mkdir(parents=True)
+    (repo / "pom.xml").write_text(
+        "<project><modelVersion>4.0.0</modelVersion></project>\n",
+        encoding="utf-8")
+    (repo / "src/main/java/demo/Calc.java").write_text(
+        "package demo;\npublic class Calc {}\n", encoding="utf-8")
+    (repo / "src/test/java/demo/CalcTest.java").write_text(
+        "package demo;\nclass CalcTest {}\n", encoding="utf-8")
+    if also_python:
+        # Java 工程的工具链里带 Python 脚本是常事（发版、代码生成、CI 胶水），
+        # 而 PytestAdapter.detect 只要看见 pyproject.toml 或 tests/ 就认领。
+        (repo / "tests").mkdir()
+        (repo / "pyproject.toml").write_text("[project]\nname='t'\n",
+                                             encoding="utf-8")
+    _init_git(repo)
+    return repo
 
 
 def test_new_state_defaults(buggy_repo):
@@ -30,6 +66,55 @@ def test_preflight_detects_adapter_and_rejects_dirty(buggy_repo):
     out2 = preflight_node(st2)
     assert out2["abort"] is not None
     assert "工作区不干净" in out2["abort"]
+
+
+def test_preflight_detects_a_maven_project(tmp_path):
+    """新适配器加进注册表却接不上探测，等于没加：Maven 工程会直接 abort。
+
+    preflight 一度有第二份注册表（`ADAPTERS = [PytestAdapter]`），
+    adapter_name 由它决定 —— baseline 那边把 maven 登记好了也没用。
+    """
+    repo = _maven_project(tmp_path / "mvn")
+    out = preflight_node(new_state(repo, AifixConfig(), run_id="r1"))
+    assert out["abort"] is None, out["abort"]
+    assert out["adapter_name"] == "maven"
+
+
+def test_preflight_still_detects_a_pytest_project(buggy_repo):
+    """反向断言：一个「无脑返回 maven」的实现必须过不了这里。"""
+    out = preflight_node(new_state(buggy_repo, AifixConfig(), run_id="r1"))
+    assert out["adapter_name"] == "pytest"
+
+
+def test_maven_wins_over_pytest_when_both_detect(tmp_path):
+    """两个 detect() 同时命中时的顺序是显式决定，不是注册表的书写巧合。
+
+    PytestAdapter.detect 极宽松（pyproject.toml 或 tests/ 存在即认领），
+    MavenAdapter.detect 要求根目录有 pom.xml —— 具体的那个先问。
+    反过来的话，任何带一个 Python 脚本目录的 Java 工程都会被当成 pytest
+    工程：随后 baseline 跑的是 pytest 命令，一个用例都收不到，报告写
+    「0 个失败」，看起来一切正常。
+    """
+    repo = _maven_project(tmp_path / "poly", also_python=True)
+    # 前提：这个仓库确实两个 detect 都命中，否则这条测试什么都没验证
+    assert MavenAdapter.detect(repo) is True
+    assert PytestAdapter.detect(repo) is True
+    out = preflight_node(new_state(repo, AifixConfig(), run_id="r1"))
+    assert out["adapter_name"] == "maven"
+
+
+@pytest.mark.parametrize("kind", ["maven", "pytest"])
+def test_detected_name_is_resolvable_by_adapter_for(tmp_path, buggy_repo, kind):
+    """探测出的名字必须能被 adapter_for 取到 —— 两份注册表就是从这里裂的。
+
+    preflight 按 detect 选、baseline 按名字取，各存一份的话新增适配器时
+    只改一处不会有任何报错：探测得到一个名字，取的时候 KeyError，或者反
+    过来登记了却永远探测不到。
+    """
+    repo = buggy_repo if kind == "pytest" else _maven_project(tmp_path / "m")
+    name = preflight_node(new_state(repo, AifixConfig(), run_id="r1"))["adapter_name"]
+    assert name == kind
+    assert adapter_for(name).name == kind
 
 
 def test_preflight_rejects_unknown_project(tmp_path):
