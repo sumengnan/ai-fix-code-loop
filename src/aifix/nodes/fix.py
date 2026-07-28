@@ -59,8 +59,13 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
     # 优先用本轮分配到的额度；未分配（如单测直接调用）时退回全局剩余
     remaining = state.get("failure_token_budget") or max(
         cfg.budget_tokens - state["spent_tokens"], 10_000)
-    # 本轮 failure 分到的美元额度。0 / 缺席表示不设美元闸（退回 token 闸）。
-    usd_alloc = state.get("failure_usd_budget") or None
+    # 本轮 failure 分到的美元额度。**只有 None**（未分配）才表示不设美元闸、
+    # 退回 token 闸；0.0 表示「额度已经扣光」，是一个要拦死的真实取值。
+    # 必须用 is None 判，不能写 `state.get(...) or None`：`0.0 or None` 求值
+    # 成 None，于是「额度已被扣成 0」会被读成「不设闸」—— 恰好把闸最该拦住
+    # 的那一刻变成完全不拦。额度是按「扣掉 detect 的花费之后的剩余」算的，
+    # 0.0 是常见值而不是理论边界。
+    usd_alloc = state.get("failure_usd_budget")
     cost_capped = False
     touched: set[str] = set()
     guard_hits: list[str] = []
