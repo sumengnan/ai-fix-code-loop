@@ -81,6 +81,82 @@ async def test_mine_skips_root_commit(history_repo, tmp_path):
     assert all(t.base_commit for t in tasks)
 
 
+async def test_no_tasks_when_the_green_run_produces_no_report(
+        history_repo, tmp_path, monkeypatch):
+    """C 处那一跑没写出报告时，绝不能吐出任务。
+
+    900 秒超时、进程被杀、沙箱执行失败都会让报告缺失；此前
+    `green.ids` 会是空集，`red.ids - green.ids` 于是把 base 处所有红的
+    用例全部当成「红转绿」——凭空捏造一整批任务。
+    """
+    import aifix.eval.mine as mine
+
+    real = mine.run_full_suite
+    calls = {"n": 0}
+
+    async def flaky(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] >= 2:                      # 第二次 = C 处那一跑
+            raise RuntimeError("测试未产出报告 .aifix-report.xml")
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(mine, "run_full_suite", flaky)
+    seen = []
+    tasks = await mine_tasks(str(history_repo["path"]), PytestAdapter(),
+                             limit=10, workdir=tmp_path / "m",
+                             on_progress=lambda sha, n, error=None:
+                                 seen.append((n, error)))
+    assert tasks == []
+    assert calls["n"] >= 2, "第二次全量测试没被调用，这个测试没测到东西"
+    # 「验证失败被跳过」必须能与「这个 commit 没有可用用例」区分开
+    assert any(err is not None for _, err in seen)
+
+
+async def test_verify_drops_a_test_that_disappeared_at_the_commit(
+        history_repo, tmp_path):
+    """在 C 处被删掉的用例不是「红转绿」，不能当任务。
+
+    C 删掉一个本来就红的旧测试文件时，它同样不会出现在 C 的失败集合里，
+    `red - green` 却会把它算成修好了 —— 拿它当任务，任何模型都不可能通过。
+    """
+    repo = history_repo["path"]
+    legacy = repo / "tests" / "test_legacy.py"
+
+    # C^：calc.py 重新变回有 bug，且多出一个本来就红的旧测试文件
+    (repo / "calc.py").write_text(
+        "def add(a, b):\n    return a - b\n", encoding="utf-8")
+    legacy.write_text("def test_legacy():\n    assert False\n",
+                      encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    _commit(repo, "break calc, add legacy failing test")
+    base = _rev(repo, "HEAD")
+
+    # C：修好 calc.py，同时把那个旧测试文件整个删掉
+    (repo / "calc.py").write_text(
+        "def add(a, b):\n    return a + b\n", encoding="utf-8")
+    legacy.unlink()
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    _commit(repo, "fix: add 应为加法，并删掉过时的旧测试")
+    commit = _rev(repo, "HEAD")
+
+    got = await verify_commit(str(repo), commit, base,
+                              ["tests/test_calc.py"], PytestAdapter(),
+                              tmp_path / "v")
+    assert got == ["tests/test_calc.py::test_add"], (
+        "在 C 处消失的用例被当成了红转绿")
+
+
+def _commit(repo, msg: str) -> None:
+    subprocess.run(["git", "-c", "user.email=t@example.com",
+                    "-c", "user.name=t", "commit", "-q", "-m", msg],
+                   cwd=repo, check=True)
+
+
+def _rev(repo, ref: str) -> str:
+    return subprocess.run(["git", "rev-parse", ref], cwd=repo, check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
 def test_changed_paths_excludes_deletions(history_repo):
     """git show --name-only 也会列出本次删掉的路径。
 

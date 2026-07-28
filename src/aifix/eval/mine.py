@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path, PurePosixPath
 
 from ..adapters.pytest_adapter import PytestAdapter
-from ..nodes.baseline import run_full_suite
+from ..nodes.baseline import run_full_suite, run_scoped
 from .task import Task
 from .workspace import materialize
 
@@ -82,22 +82,43 @@ async def verify_commit(repo: str, commit: str, base_commit: str,
 
     两次全量测试，很贵 —— 但这是 ground truth 的来源，省不得。
     筛选（split_paths / is_candidate）已经把绝大多数 commit 挡在了外面。
+
+    任何一次测试没能产出报告都抛 RuntimeError（require_report=True）：
+    任务集是要被反复使用的 ground truth，宁可跳过一个 commit，也不能
+    把一批假任务写进去 —— 假任务不会报错，只会让所有模型的修复成功率
+    一起变低，看起来像「模型都不行」。
     """
     workdir = Path(workdir)
     shutil.rmtree(workdir, ignore_errors=True)
     materialize(repo, base_commit, commit, test_files, workdir)
-    red = await run_full_suite(workdir, adapter)
+    red = await run_full_suite(workdir, adapter, require_report=True)
     if not red.ids:
         return []
     _git(workdir, "checkout", "--force", "--quiet", commit)
-    green = await run_full_suite(workdir, adapter)
-    return sorted(red.ids - green.ids)
+    green = await run_full_suite(workdir, adapter, require_report=True)
+    # 交 green.ran 而不是只做差集：一个用例在 C 处被删掉或被跳过时，同样
+    # 不会出现在 green.failures 里，但那不是「红转绿」——拿它当任务，
+    # 任何模型都不可能通过，成功率被白白拉低。
+    cand = (red.ids - green.ids) & green.ran
+    if not cand:
+        return []
+    # 再单跑一遍这几个用例：全量套件里的顺序依赖与状态污染会让「碰巧这一次
+    # 绿了」混进来。这一步很便宜（只跑几个用例），而一个误判会污染此后
+    # 每一轮评测。
+    recheck = await run_scoped(workdir, adapter, sorted(cand),
+                              require_report=True)
+    return sorted(cand - recheck.ids)
 
 
 async def mine_tasks(repo: str, adapter: PytestAdapter, limit: int = 50,
                      max_tasks: int = 10, workdir: Path | None = None,
                      on_progress=None) -> list[Task]:
-    """扫最近 limit 个提交，产出至多 max_tasks 个任务。"""
+    """扫最近 limit 个提交，产出至多 max_tasks 个任务。
+
+    on_progress(sha, n, error)：n≥0 是该 commit 产出的可用用例数；
+    n=-1 且 error 非空表示这个 commit 验证失败被跳过。两者必须能分开 ——
+    「这个 commit 没有可用用例」是正常结果，「验证跑挂了」是要去看的问题。
+    """
     workdir = Path(workdir or Path(repo) / ".aifix" / "mine")
     workdir.mkdir(parents=True, exist_ok=True)
     name = Path(repo).name
@@ -115,10 +136,17 @@ async def mine_tasks(repo: str, adapter: PytestAdapter, limit: int = 50,
             _changed_paths(repo, sha), adapter.test_dirs())
         if not is_candidate(test_files, gold_files):
             continue
-        targets = await verify_commit(repo, sha, base, test_files,
-                                      adapter, workdir / sha[:8])
+        try:
+            targets = await verify_commit(repo, sha, base, test_files,
+                                          adapter, workdir / sha[:8])
+        except RuntimeError as e:
+            # 单个 commit 验证失败（报告缺失、git 操作失败）不该带走整轮挖掘：
+            # `--limit 200` 跑几十分钟，为一个 commit 全盘作废没有道理。
+            if on_progress:
+                on_progress(sha, -1, str(e))
+            continue
         if on_progress:
-            on_progress(sha, len(targets))
+            on_progress(sha, len(targets), None)
         for t in targets:
             if len(tasks) >= max_tasks:
                 break

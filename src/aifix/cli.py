@@ -171,8 +171,12 @@ def _cmd_mine(args) -> None:
     from .eval.mine import mine_tasks
     from .eval.task import write_jsonl
 
-    def progress(sha: str, n: int) -> None:
-        print(f"  {sha[:8]}：{n} 个可用用例", flush=True)
+    def progress(sha: str, n: int, error: str | None = None) -> None:
+        if error is not None:
+            # 与「0 个可用用例」分开显示：前者要去查，后者是正常结果
+            print(f"  {sha[:8]}：验证失败，已跳过 —— {error}", flush=True)
+        else:
+            print(f"  {sha[:8]}：{n} 个可用用例", flush=True)
 
     tasks = asyncio.run(mine_tasks(
         str(Path(args.repo).resolve()), PytestAdapter(),
