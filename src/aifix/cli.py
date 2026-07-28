@@ -247,8 +247,10 @@ def build_parser() -> argparse.ArgumentParser:
     mut.add_argument("--max-tasks", type=int, default=10,
                      help="最多产出多少个任务")
     mut.add_argument("--max-new-failures", type=int, default=5,
-                     help="一个变异最多允许弄红几个用例。超过即丢弃 ——"
-                          "把套件炸掉一半的变异太显眼，也违反单点缺陷前提")
+                     help="一个变异最多允许弄红几个用例，超过即丢弃。"
+                          "注意作用域：--scope smart 下它只约束**词干匹配到的"
+                          "那几个测试文件内**的新失败数，全仓可能红得更多；"
+                          "只有 --scope full 才是全仓口径")
     mut.add_argument("--scope", choices=["smart", "full"], default="smart",
                      help="smart 只跑与被变异文件词干相关的测试文件（快，会漏，"
                           "漏了只是少一个候选，不产生假任务）；full 每个变异跑一次全量")
