@@ -1,5 +1,7 @@
 import subprocess
 
+import pytest
+
 from aifix.eval.task import Task
 from aifix.eval.workspace import materialize, prepare_task_repo
 
@@ -57,3 +59,56 @@ def test_materialize_is_idempotent_on_unchanged_tests(history_repo, tmp_path):
                        h["test_files"], tmp_path / "w")
     assert (dest / "calc.py").is_file()
     assert _git(dest, "status", "--porcelain").strip() == ""
+
+
+def _mutation_repo(tmp_path):
+    """一个只有一个源文件的干净仓库，供人造变异的落地测试使用。"""
+    repo = tmp_path / "src"
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
+    head = _git(repo, "rev-parse", "HEAD").strip()
+
+    # 用一次真实的 git diff 生成补丁：改内容 → diff → 复原工作区，
+    # 这样拿到的补丁是 git apply 认得的真实格式，而不是手写拼凑的。
+    (repo / "mod.py").write_text("def f():\n    return 2\n", encoding="utf-8")
+    diff = _git(repo, "diff")
+    _git(repo, "checkout", "--", "mod.py")
+    return repo, head, diff
+
+
+def test_materialize_applies_the_mutation_and_leaves_a_clean_tree(tmp_path):
+    """变异补丁必须被打上并提交 —— preflight 会拒绝不干净的仓库。"""
+    repo, head, diff = _mutation_repo(tmp_path)
+    dest = tmp_path / "dest"
+
+    materialize(str(repo), head, head, [], dest, mutation_diff=diff)
+
+    # 两条断言都必须有：只看内容会漏掉「改了但没提交」，
+    # 只看干净会漏掉「补丁根本没打上」。
+    assert (dest / "mod.py").read_text(encoding="utf-8").strip().endswith(
+        "return 2")
+    out = _git(dest, "status", "--porcelain")
+    assert out.strip() == "", f"工作区不干净：{out}"
+
+
+def test_materialize_raises_when_mutation_diff_does_not_apply(tmp_path):
+    """打不上的补丁必须抛异常，不能悄悄跳过留下一个假绿任务。"""
+    repo, head, _ = _mutation_repo(tmp_path)
+    bogus_diff = (
+        "diff --git a/mod.py b/mod.py\n"
+        "--- a/mod.py\n"
+        "+++ b/mod.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def f():\n"
+        "-    return 999\n"
+        "+    return 2\n"
+    )
+    dest = tmp_path / "dest"
+
+    with pytest.raises(RuntimeError):
+        materialize(str(repo), head, head, [], dest, mutation_diff=bogus_diff)

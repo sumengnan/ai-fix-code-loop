@@ -52,3 +52,20 @@ def test_adapter_defaults_to_pytest():
 def test_missing_required_field_rejected():
     with pytest.raises(Exception):
         Task(task_id="x")
+
+
+def test_task_defaults_keep_old_jsonl_readable():
+    """老任务集文件没有这两个字段，必须仍能读进来。"""
+    line = ('{"task_id":"t","repo":"/r","commit":"a","base_commit":"b",'
+            '"test_files":[],"target_test":"x","gold_files":["s.py"]}')
+    t = Task.model_validate_json(line)
+    assert t.origin == "mined" and t.mutation_diff is None
+
+
+def test_task_result_defaults_keep_old_jsonl_readable():
+    """TaskResult 同理：老结果文件没有 origin/signals，也要能读进来。"""
+    line = ('{"task_id":"x","model":"m","locate_hit":false,"suspect_file":null,'
+            '"verdict":"same","attempts":1,"tokens":10,"cost_usd":0.1,'
+            '"violations":0}')
+    r = TaskResult.model_validate_json(line)
+    assert r.origin == "mined" and r.signals == 0
