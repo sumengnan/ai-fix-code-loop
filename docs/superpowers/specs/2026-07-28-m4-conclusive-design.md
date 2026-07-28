@@ -100,7 +100,7 @@ tests.test_foo          →  路径 tests/test_foo.py，类 []
 
 **后果**：某个 commit 同时新增了测试所需的非 `.py` 夹具（数据文件、配置片段、快照），该文件不会被 `materialize` 嫁接到任务工作区。任务在 base 侧因缺文件而红、在 C 侧绿，通过全部现有校验进入任务集，但 ground truth 实际不可达——修复模型即便诊断和补丁都对，也可能因为缺夹具而通不过。这不是"捏造任务"（确实是红转绿），是任务质量问题。
 
-**修法**：**测试目录下的**非 `.py` 文件归入 `test_files`，跟着测试一起嫁接。判据沿用现有的 `pp.parts[0] in test_dirs`。
+**修法**：**测试目录下的**非 `.py` 文件归入 `test_files`，跟着测试一起嫁接。判据是**按路径分段的前缀匹配**（`pp.parts[:len(d)] == d`，`d` 是 `test_dirs` 里那一项切成的分段），不是 `pp.parts[0] in test_dirs`：M5 的 MavenAdapter 走 Maven 标准布局 `src/test/java/...`，`test_dirs` 会是 `["src/test"]`，只看第一段拿到的是 `src`，判不出来，整棵 Java 测试树会被当成源文件塞进 `gold_files`。按分段比而不是裸 `startswith`，是因为 `testdata/x.py` 不是 `test` 目录下的文件。对 pytest 的 `["tests", "test"]` 行为完全不变。
 
 非测试目录下的非 `.py` 文件继续忽略——**不进 `gold_files`**。`gold_files` 是 `locate_hit` 的判定依据，衡量的是 Detector 定位**源文件**的能力；把数据文件塞进去会稀释这个指标。
 
@@ -203,7 +203,12 @@ e3a1cfbe tests=[test_cli_args.py]        red=3 green=0 cand=3
 | 算术运算符 | `+`↔`-`，`*`↔`//` |
 | 布尔常量 | `True`↔`False` |
 | 布尔运算符 | `and`↔`or` |
-| 数字常量 | `n` → `n+1` |
+| 整数常量 | `n` → `n+1`（只认 `type(value) is int`） |
+
+整数常量这一条有两处收窄，都写在 `mutate.py` 的模块 docstring 里：
+
+- **只认 `type(value) is int`**，不是"数字"。`bool` 是 `int` 的子类，不排除的话 `True` 会走 `n → n+1` 被改成 `2`；浮点与复数不在算子表里。`True`↔`False` 由上一行的布尔常量那条负责。
+- **只在几处位置上施加**：`Compare` / `BinOp` / `BoolOp` 的操作数，以及 `Return` / `Assign` 的右值。函数默认值（`def f(x=3)`）与 `AnnAssign`（`n: int = 7`）里的常量多半是接口契约，改一处会让一大片测试同时红，落不出"单点"的 ground truth。f-string 内部（整棵 `JoinedStr` 子树）也排除。
 
 每次只施加**一处**变异——多处变异让 ground truth 不再是单点，也不像真实 bug。
 
