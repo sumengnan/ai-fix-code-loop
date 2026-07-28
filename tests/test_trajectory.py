@@ -290,6 +290,32 @@ def test_五列取自_fact_而不是解_report_md(repo: Path) -> None:
     assert guard["fixed"] == 0
 
 
+def test_配了价格表时_spent_usd_是真金额(tmp_path: Path) -> None:
+    """配了价格表就必须落下真实金额 —— 而且同样不靠 report.md。
+
+    没有这一条，一个「spent_usd 永远写 None」的实现也能让上面几条全绿：
+    那批产物恰好都没配价格表，None 是对的答案。
+    """
+    repo = _make_repo(tmp_path / "priced")
+    asyncio.run(run_once(
+        repo, AifixConfig(price_map={"gpt-4o-mini": [1.0, 1.0]}),
+        run_id="r_priced",
+        detector_client=_Scripted([_text(_DIAG)]),
+        fixer_client=_Scripted([
+            _tool("apply_patch", json.dumps({"diff": _PATCH_DROPS_MUL})),
+            _text("已修复")])))
+    (repo / ".aifix" / "runs" / "r_priced" / "report.md").unlink()
+
+    assert trajectory.ingest(repo) == 1
+    with _db(repo) as con:
+        tokens, usd = con.execute(
+            "SELECT spent_tokens, spent_usd FROM runs "
+            "WHERE run_id='r_priced'").fetchone()
+    assert tokens == 45
+    # 每次假调用 10 输入 + 5 输出、每 1k 各 $1.0 = $0.015，三次共 $0.045
+    assert usd == pytest.approx(0.045)
+
+
 def test_没有_fact_的老产物回退解_report_md(tmp_path: Path) -> None:
     """构造目录：M4 之前落下的 run 只有 markdown，正则那条回退必须保留。"""
     d = tmp_path / ".aifix" / "runs" / "old"
