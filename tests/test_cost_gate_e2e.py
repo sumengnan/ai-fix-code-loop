@@ -109,6 +109,35 @@ async def test_budget_abort_still_records_in_flight_failure(buggy_repo):
     assert row["attempts"] >= 1
 
 
+async def test_detect_spend_shrinks_the_budget_fix_gets(buggy_repo):
+    """detect 花掉的钱必须先结算，再算 fix 的额度 —— 否则上界那句话不成立。
+
+    `--help` 与规格都写着「越线之后不再发起新的模型调用」，超支上界是
+    一次模型调用。旧接线里额度是在 detect **之前**按当时剩余算的，detect
+    不带 cost_cap 跑掉一次调用后没有回补，fix 于是在「可能已经越线」的
+    状态下继续开火。
+
+    金额（配 _PRICEY，成本 = 输入 + 输出）：
+      上限 $50；detect $10；fix 两次调用 $15 + $30 = $45。
+      旧接线：额度 = 50 / 1 = $50，$45 < $50 → fix 跑完，不熔断。
+      新接线：额度 = (50 - 10) / 1 = $40，$45 ≥ $40 → 第二次调用后熔断。
+    额度这个具体数字与「熔断有没有发生」这个行为，两条都钉住。
+    """
+    state = await run_once(
+        buggy_repo, AifixConfig(budget_usd=50.0, price_map=_PRICEY),
+        run_id="alloc1",
+        detector_client=_Scripted([_text(_DIAG, usage=_USD10)]),
+        fixer_client=_Scripted([
+            _tool("apply_patch", json.dumps({"diff": _PATCH}), usage=_USD15),
+            _text("已修复", usage=_USD30)]))
+
+    assert state["failure_usd_budget"] == pytest.approx(40.0), (
+        "fix 拿到的额度必须是扣掉 detect 那 $10 之后的 $40，而不是整份 $50")
+    assert state["cost_capped"] is True, (
+        "$45 已经越过 $40 的额度，fix 必须在那一刻熔断；"
+        "若额度仍是 $50 就不会熔断 —— 这条断言区分的正是这两种接线")
+
+
 _TWO_BUGS_SRC = '''def add(a, b):
     return a - b        # bug: 应为 a + b
 
@@ -196,6 +225,12 @@ async def test_abort_does_not_credit_a_failure_that_never_ran(two_bugs_repo):
         fixer_client=fixer)
 
     assert state["abort_kind"] == "usd", "前提没成立：这一轮不是被美元闸掐断的"
+    # RunBudget 记的账必须与 state 记的账逐分对上。detect 与 fix 现在分两笔
+    # charge，重复计入或遗漏都只会体现成一个错的数字、不会报错 —— 这里把
+    # 两本账钉在一起：$10（detect）+ $15 + $30（fix）= $55，一分不多一分不少。
+    assert state["spent_usd"] == pytest.approx(55.0)
+    assert "$55.00 / $50.00" in state["abort"], (
+        f"RunBudget 的账与 state 对不上：{state['abort']}")
     fixed = [r for r in state["results"]
              if r["test_id"] == "tests/test_calc.py::test_add"]
     assert [r["verdict"] for r in fixed] == ["better"], (

@@ -116,17 +116,32 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                     _backfill_in_flight_result(state)
                     break
                 # 剩余 failure 数 = 队列里的 + 手上这个
+                remaining_failures = len(state["queue"]) + 1
                 state["failure_token_budget"] = budget.for_failure(
-                    len(state["queue"]) + 1)
-                state["failure_usd_budget"] = budget.usd_for_failure(
-                    len(state["queue"]) + 1)
+                    remaining_failures)
                 before = state["spent_tokens"], state["spent_usd"]
                 with trace.failure_span(state["current"]), \
                         trace.attempt_span(state["attempt"]):
                     state.update(await detect_node(state, client=detector_client))
-                    state.update(await fix_node(state, client=fixer_client))
+                    # detect 不接美元闸是计划登记过的有意偏差，但它花掉的钱
+                    # 必须**在这里立刻结算**：否则下面算给 fix 的额度是按
+                    # 「detect 还没花钱」算出来的，fix 会在可能已经越线的
+                    # 状态下发起新调用，「越线之后不再发起新的模型调用」这句
+                    # 话就不成立 —— 实测 budget_usd=20、单次调用 $15、单
+                    # failure 会花掉 $45，超支 1.67 次调用而不是一次。
                     budget.charge(state["spent_tokens"] - before[0],
                                   state["spent_usd"] - before[1])
+                    mid = state["spent_tokens"], state["spent_usd"]
+                    # 额度必须在 detect 结算之后才算，取的是扣掉 detect 之后
+                    # 的剩余。算出 0.0 是正常结果（detect 恰好花光），fix_node
+                    # 按 is None 判定，会把它当成扣光的闸而不是「没设闸」。
+                    state["failure_usd_budget"] = budget.usd_for_failure(
+                        remaining_failures)
+                    state.update(await fix_node(state, client=fixer_client))
+                    # 两笔 charge 相加恰好是 after_fix - before：不重复计入，
+                    # 也不遗漏。verify_node 零 LLM，不产生花销。
+                    budget.charge(state["spent_tokens"] - mid[0],
+                                  state["spent_usd"] - mid[1])
                     state.update(await verify_node(state))
                 tripped = check_circuit_breaker(state)
                 if tripped:
