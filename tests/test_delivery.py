@@ -53,7 +53,7 @@ def test_rollback_discards_changes(buggy_repo, fixed_source):
 def test_commit_keeps_changes_and_rollback_after_is_noop(buggy_repo, fixed_source):
     with Worktree(buggy_repo, run_id="abc123") as wt:
         (wt.path / "calc.py").write_text(fixed_source, encoding="utf-8")
-        wt.commit("fix: test_add")
+        wt.commit("fix: test_add", paths=["calc.py"])
         wt.rollback()
         assert "a + b" in (wt.path / "calc.py").read_text(encoding="utf-8")
 
@@ -84,3 +84,36 @@ def test_ensure_clean_still_blocks_tracked_modifications(buggy_repo):
     (buggy_repo / "untracked.txt").write_text("noise", encoding="utf-8")
     with pytest.raises(RuntimeError, match="工作区不干净"):
         ensure_clean(buggy_repo)
+
+
+def test_commit_only_stages_given_paths(buggy_repo, fixed_source):
+    """构建产物不该进交付分支 —— 真实运行中 .pyc 被 git add -A 扫了进去。"""
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        (wt.path / "calc.py").write_text(fixed_source, encoding="utf-8")
+        (wt.path / "junk.log").write_text("构建产物", encoding="utf-8")
+        (wt.path / "__pycache__").mkdir()
+        (wt.path / "__pycache__" / "x.pyc").write_bytes(b"\x00")
+        wt.commit("fix: x", paths=["calc.py"])
+        tracked = _git(wt.path, "ls-tree", "-r", "--name-only", "HEAD")
+        assert "calc.py" in tracked
+        assert "junk.log" not in tracked
+        assert "__pycache__/x.pyc" not in tracked
+
+
+def test_commit_stages_new_file_when_listed(buggy_repo):
+    """agent 新建的源文件必须能提交（它不在已跟踪集合里）。"""
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        (wt.path / "helper.py").write_text("def h():\n    return 1\n",
+                                           encoding="utf-8")
+        wt.commit("feat: helper", paths=["helper.py"])
+        tracked = _git(wt.path, "ls-tree", "-r", "--name-only", "HEAD")
+        assert "helper.py" in tracked
+
+
+def test_commit_with_empty_paths_is_noop(buggy_repo, fixed_source):
+    """没有明确改过的文件就不该产生提交。"""
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        before = _git(wt.path, "rev-parse", "HEAD").strip()
+        (wt.path / "calc.py").write_text(fixed_source, encoding="utf-8")
+        wt.commit("fix: x", paths=[])
+        assert _git(wt.path, "rev-parse", "HEAD").strip() == before

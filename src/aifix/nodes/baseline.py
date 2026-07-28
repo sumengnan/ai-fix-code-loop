@@ -30,6 +30,20 @@ async def run_full_suite(worktree: Path, adapter: PytestAdapter,
         await sb.close()
 
 
+async def run_scoped(worktree: Path, adapter: PytestAdapter,
+                     test_ids: list[str], timeout: float = 300.0):
+    """只跑指定用例并解析报告。供 flaky 确认使用 —— 成本远低于全量。"""
+    report = ".aifix-recheck.xml"
+    sb = LocalSandbox(workspace=str(worktree))
+    await sb.start()
+    try:
+        await sb.exec(adapter.scoped_test_command(test_ids, report), timeout)
+        return parse_junit([worktree / report], adapter.make_test_id)
+    finally:
+        await sb.exec(["rm", "-f", report], 10.0)
+        await sb.close()
+
+
 async def baseline_node(state: AifixState) -> dict[str, Any]:
     """跑一次全量，同时产出 id 列表与 Failure 对象——全量测试很贵，只跑这一次。"""
     adapter = adapter_for(state["adapter_name"])

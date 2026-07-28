@@ -32,13 +32,19 @@ SYSTEM_PROMPT = """你是一个修复代码缺陷的工程师。工作区是一�
 
 
 def build_registry(sandbox: Sandbox, adapter: ProjectAdapter,
-                   known_ids: set[str]) -> ToolRegistry:
-    """Fixer 的能力面：白名单，五个工具，没有 shell。"""
+                   known_ids: set[str],
+                   touched: set[str] | None = None) -> ToolRegistry:
+    """Fixer 的能力面：白名单，五个工具，没有 shell。
+
+    touched：传入一个集合，apply_patch 会把成功改动的路径记进去，
+    供交付阶段精确提交（见 Worktree.commit）。
+    """
     reg = ToolRegistry()
     reg.register(ReadFileTool(sandbox))
     reg.register(ListFilesTool(sandbox))
     reg.register(GrepTool(sandbox))
-    reg.register(ApplyPatchTool(sandbox, test_dirs=adapter.test_dirs()))
+    reg.register(ApplyPatchTool(sandbox, test_dirs=adapter.test_dirs(),
+                                touched=touched))
     reg.register(RunTestsTool(sandbox, adapter, known_ids=known_ids))
     return reg
 

@@ -45,9 +45,21 @@ class AifixConfig(BaseSettings):
     budget_wall_seconds: float = 1800.0
 
     max_attempts: int = 3
+    # 单次修复允许的改动行数上限（+/- 行合计）。超过即判为整文件重写：
+    # 模型放弃理解、直接重写，那种补丁即使测试转绿也不该合。
+    max_diff_lines: int = 300
+    # 守卫触发后额外给模型的重试次数（不计入 max_attempts）
+    fix_guard_retries: int = 2
+    # 连着几个 failure 一个都没修好，大概率不是「这些 bug 恰好都难」，
+    # 而是环境坏了 / prompt 崩了 / 今天这个模型不行。继续跑只是匀速烧钱。
+    consecutive_failure_limit: int = 3
     fixer_max_steps: int = 25
     detector_max_tokens: int = 20_000
     loop_detect_window: int = 3
     tool_result_max_chars: int = 8000
+
+    # 断点续跑：跑到一半崩掉能从上一个节点边界继续。默认关 ——
+    # 它会在产物目录下留一个 sqlite 文件，按需开启。
+    enable_checkpoint: bool = False
 
     allow_test_edits: bool = False

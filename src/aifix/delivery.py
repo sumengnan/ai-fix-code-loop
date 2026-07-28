@@ -63,6 +63,15 @@ class Worktree:
         _git(self.path, "checkout", "--", ".")
         _git(self.path, "clean", "-fd")
 
-    def commit(self, message: str) -> None:
-        _git(self.path, "add", "-A")
+    def commit(self, message: str, paths: list[str]) -> None:
+        """只提交 `paths` 里明确列出的文件。
+
+        绝不用 `git add -A`：worktree 里跑测试会产生未跟踪产物
+        （__pycache__、覆盖率文件、日志……），全扫进去会污染交付分支。
+        paths 来自 ApplyPatchTool 的记账 —— 它是 agent 唯一的修改手段，
+        知道自己动过哪些文件。
+        """
+        if not paths:
+            return
+        _git(self.path, "add", "--", *paths)
         _git(self.path, "commit", "-q", "-m", message)

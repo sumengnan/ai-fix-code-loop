@@ -2314,3 +2314,41 @@ cd /path/to/buggy/project && aifix run --budget 0.01
 | `aifix eval` | 并行跑任务集 + 双档打分 |
 | `aifix replay` | 消费 `events.jsonl` 做逐步重演 |
 | 跨模型对比表 | 定位准确率 / 修复成功率 / 平均成本 / 越界尝试 |
+
+---
+
+## 执行记录（2026-07-27 完成）
+
+**结果：** 12 个任务全部完成，`uv run pytest -q` → **163 passed**。分支 `feat/m2-reliability`，15 个提交。
+
+### 计划本身的三处错误（执行时修正）
+
+| # | 问题 | 后果 | 修正 |
+|---|---|---|---|
+| 1 | 「M1 既有接口」称 `AifixConfig` 已有 `max_diff_lines` / `consecutive_failure_limit`，实际都不存在 | `extra="ignore"` 会静默吞掉未知构造参数，随后在读属性时 `AttributeError` | 任务 4 / 6 各补一个字段 |
+| 2 | 任务 4 的 `client.calls == 1` / `== 2` 断言算错 | `_Scripted` 最后一轮无限重复：tool 轮之后 AgentLoop 会再要一轮，拿到同一个 `apply_patch`，第二次 `git apply --check` 必失败 → 一路循环到 `loop_detect_window` 熔断 | 每个 tool 轮后补一个 text 轮让 loop 正常收尾，断言随之更正 |
+| 3 | 巨型 diff 的 hunk 头声明 402 行、实际 401 行 | `git apply --check` 直接拒收 → 测的其实是空 diff 守卫，而其中一条断言恰好还能通过，掩盖真实缺陷 | 重写为可应用的整文件重写补丁 |
+
+### 真实模型验收发现的三处缺陷（纸面设计 + 159 项测试都没抓到）
+
+1. **中止吞掉已交付的成果。** 预算耗尽时 run 已经修好 `test_add` 并提交到交付分支，报告却只有一行「预算耗尽」——不说修了几个、不给分支名、不给合并命令。M1 时 abort 只可能来自 preflight（那时还没有成果），早返回是对的；M2 新增的预算与熔断两条路径都发生在**有成果之后**。现已改为中止原因置顶为横幅、正文照常渲染。
+2. **`--budget 0.001` 的上限被 `:.2f` 显示成 `$0.00`**，读起来像 bug。新增 `fmt_usd`。
+3. **`verify` 会在 `touched` 为空时判 BETTER。** 空 diff 守卫不阻断流程，run 仍会走到 verify；目标用例只要在 baseline 里本来就抖，就会出现：判 BETTER → `commit(paths=[])` 空操作 → worktree 被删 → 报告写「已修复」。**系统宣称修好了一个它一个字节都没碰过的 bug**，恰好击穿「只有 verify 有资格说修好了」这条核心主张。现降级为 SAME 并记 `baseline_flaky`。
+
+### 计划外的两处加固
+
+- `fix_node` 的事件**按轮**记录而非只记最后一轮：守卫重试时，模型「一字未改」的那一轮恰恰是最该复盘的。
+- `--test` / `--dry-run` 除 parser 解析测试外补了行为测试（用「被调用即失败」的假客户端证明确实零 LLM）。参数解析得对不等于参数真的生效。
+
+### 完成标志核对
+
+- [x] `uv run pytest -q` 全绿 —— 163 passed
+- [x] 交付分支只含源码 —— 真实 run `deliver01`：`git diff --name-only main..aifix/deliver01` → `['calc.py']`，2/2 修复，$0.09 / 28,076 tokens
+- [x] `.aifix/runs/<run_id>/` 下有 `report.md`、`facts.jsonl`、`events.jsonl` —— 同上，11 条 facts / 1488 行 events
+- [x] 空 diff 守卫真实触发 —— 场景「唯一的失败只能靠改测试来修，而那是被禁止的」：`guard_hits == ["empty_diff", "empty_diff"]`，报告中止原因为 `empty_diff` 而非笼统的 `max_attempts`
+- [x] 预算中止 —— `budget_usd=0.001`：第一个 failure 修完后触发，报告同时给出中止原因与已交付成果
+
+### 已知遗留
+
+- **`abort_reason` 只在终局分支写进 results。** 未到 `max_attempts` 时守卫的 `abort_reason` 不进报告，只在 `facts.jsonl` 的 `guard_hit` 里。当前可接受（trace 有全量），M3 评测若要按守卫类型分组统计需要补。
+- **SQLite 轨迹推迟到 M3**（见上文「与规格的偏差」）。

@@ -18,6 +18,7 @@ class AifixState(TypedDict, total=False):
     adapter_name: str
     worktree_path: str
     branch: str
+    artifact_dir: str
 
     baseline_ids: list[str]
     queue: list[str]
@@ -26,6 +27,15 @@ class AifixState(TypedDict, total=False):
 
     diagnosis: dict[str, Any] | None
     verdict: str | None
+
+    touched: list[str]
+    guard_hits: list[str]
+    diff_lines: int
+    abort_reason: str | None
+    flaky_filtered: list[str]
+    confirmed_regressions: list[str]
+    consecutive_failures: int
+    failure_token_budget: int
 
     spent_usd: float
     spent_tokens: int
@@ -37,17 +47,51 @@ class AifixState(TypedDict, total=False):
     # baseline 解析出的 Failure 对象，按 test_id 索引。
     # 下划线前缀表示它不参与路由判断，只作为 detect / verify 的数据源。
     _failures: dict[str, Any]
+    # 当前 run 的 RunTrace。同样不参与路由，只是各节点写观测数据的出口。
+    _trace: Any
 
 
 def new_state(repo: Path, config: AifixConfig, run_id: str) -> AifixState:
     return AifixState(
         run_id=run_id, repo=str(repo), config=config,
-        adapter_name="", worktree_path="", branch="",
+        adapter_name="", worktree_path="", branch="", artifact_dir="",
         baseline_ids=[], queue=[], current=None, attempt=0,
         diagnosis=None, verdict=None,
+        touched=[], guard_hits=[], diff_lines=0, abort_reason=None,
+        flaky_filtered=[], confirmed_regressions=[], consecutive_failures=0,
+        failure_token_budget=0,
         spent_usd=0.0, spent_tokens=0,
         results=[], abort=None,
     )
+
+
+class _NullTrace:
+    """trace 缺席时的空实现 —— 单测直接调节点时不必构造 trace。"""
+
+    def fact(self, *a: Any, **k: Any) -> None: ...
+
+    def record_events(self, *a: Any, **k: Any) -> None: ...
+
+
+def trace_of(state: AifixState):
+    """取当前 run 的 trace；未接线时返回一个吞掉所有调用的空实现。"""
+    t = state.get("_trace")
+    return t if t is not None else _NullTrace()
+
+
+def check_circuit_breaker(state: AifixState) -> str | None:
+    """连续失败达到阈值就中止整个 run，返回中止原因；未达阈值返回 None。
+
+    连着几个 failure 一个都没修好，大概率不是「这些 bug 恰好都难」，
+    而是环境坏了、prompt 崩了、或今天这个模型不行。继续跑只是匀速烧钱。
+    比预算上限更早生效，也更有信息量 —— 它把「钱花完了」变成
+    「出问题了，去看 trace」。
+    """
+    limit = state["config"].consecutive_failure_limit
+    n = state.get("consecutive_failures", 0)
+    if n >= limit:
+        return f"连续 {n} 个 failure 均未修复，疑似系统性问题，已中止"
+    return None
 
 
 def route_after_baseline(state: AifixState) -> str:
@@ -59,11 +103,29 @@ def route_after_baseline(state: AifixState) -> str:
 
 def route_after_verify(state: AifixState) -> str:
     """current 仍在 → 同一个 failure 重试；已清空 → 取下一个或收尾。"""
-    if state.get("abort"):
+    if state.get("abort") or check_circuit_breaker(state):
         return "report"
     if state["current"] is not None:
         return "detect"
     return "detect" if state["queue"] else "report"
+
+
+def checkpointer_for(config: AifixConfig, artifact_dir: Path):
+    """按配置建 LangGraph 的 SqliteSaver；未开启返回 None。
+
+    SqliteSaver 在独立包 langgraph-checkpoint-sqlite 里，
+    langgraph 本体只依赖抽象基座 langgraph-checkpoint。
+    """
+    if not config.enable_checkpoint:
+        return None
+    import sqlite3
+
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    d = Path(artifact_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(d / "checkpoint.sqlite"), check_same_thread=False)
+    return SqliteSaver(conn)
 
 
 def build_graph(checkpointer: Any = None):

@@ -97,6 +97,10 @@ async def test_verify_better_commits(buggy_repo, fixed_source):
     with Worktree(buggy_repo, run_id="r1") as wt:
         st = _failure_state(buggy_repo, wt)
         (wt.path / "calc.py").write_text(fixed_source, encoding="utf-8")
+        # 生产里改动只可能来自 apply_patch，它会把路径记进 touched。
+        # 这里直接写文件绕过了那一步，所以要手工补上 —— 否则 verify 会
+        # 正确地把「没改任何文件却变绿」判为 baseline 抖动而非修复。
+        st["touched"] = ["calc.py"]
         out = await verify_node(st)
         assert out["verdict"] == Verdict.BETTER.value
         assert out["current"] is None            # 该 failure 完结

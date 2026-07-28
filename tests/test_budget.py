@@ -1,0 +1,73 @@
+from aifix.budget import RunBudget
+
+
+def test_allocates_by_remaining_failures():
+    """动态分配：前面省下的额度自动流给后面难的。"""
+    b = RunBudget(total_tokens=100_000, total_usd=2.0, total_seconds=600)
+    assert b.for_failure(remaining_failures=4) == 25_000
+    b.charge(tokens=5_000, usd=0.1)
+    # 剩 95k，还剩 3 个 → 每个 31666
+    assert b.for_failure(remaining_failures=3) == 31_666
+
+
+def test_fixed_split_would_waste_but_dynamic_does_not():
+    """固定切分会让最后一个 failure 明明有钱却因自己那份用完而放弃。"""
+    b = RunBudget(total_tokens=100_000, total_usd=2.0, total_seconds=600)
+    b.charge(tokens=1_000, usd=0.01)     # 第一个只花了一点
+    assert b.for_failure(remaining_failures=1) == 99_000
+
+
+def test_never_returns_below_floor():
+    b = RunBudget(total_tokens=100_000, total_usd=2.0, total_seconds=600)
+    b.charge(tokens=99_999, usd=0.0)
+    assert b.for_failure(remaining_failures=1) == RunBudget.FLOOR_TOKENS
+
+
+def test_zero_remaining_failures_returns_all():
+    b = RunBudget(total_tokens=100_000, total_usd=2.0, total_seconds=600)
+    assert b.for_failure(remaining_failures=0) == 100_000
+
+
+def test_exhausted_on_tokens():
+    b = RunBudget(total_tokens=1_000, total_usd=2.0, total_seconds=600)
+    assert b.exhausted() is None
+    b.charge(tokens=1_000, usd=0.0)
+    assert "token" in b.exhausted()
+
+
+def test_exhausted_on_usd():
+    b = RunBudget(total_tokens=100_000, total_usd=0.5, total_seconds=600)
+    b.charge(tokens=10, usd=0.5)
+    assert "美元" in b.exhausted()
+
+
+def test_exhausted_on_wall_clock():
+    clock = iter([0.0, 0.0, 700.0])
+    b = RunBudget(total_tokens=100_000, total_usd=2.0, total_seconds=600,
+                  clock=lambda: next(clock))
+    b.start()
+    assert b.exhausted() is None
+    assert "时间" in b.exhausted()
+
+
+def test_wall_clock_not_checked_before_start():
+    """没 start 就不该有时间判定 —— 否则单测直接构造就会误触发。"""
+    b = RunBudget(total_tokens=100_000, total_usd=2.0, total_seconds=0.0)
+    assert b.exhausted() is None
+
+
+def test_spent_accessors():
+    b = RunBudget(total_tokens=100_000, total_usd=2.0, total_seconds=600)
+    b.charge(tokens=1_200, usd=0.05)
+    b.charge(tokens=800, usd=0.03)
+    assert b.spent_tokens == 2_000
+    assert abs(b.spent_usd - 0.08) < 1e-9
+
+
+def test_tiny_budget_is_not_rounded_to_zero_in_message():
+    """--budget 0.001 时上限不该显示成 $0.00 —— 那读起来像 bug。"""
+    b = RunBudget(total_tokens=100_000, total_usd=0.001, total_seconds=600)
+    b.charge(tokens=10, usd=0.0612)
+    msg = b.exhausted()
+    assert "0.001" in msg, msg
+    assert "/ $0.00 " not in msg and not msg.endswith("/ $0.00")
