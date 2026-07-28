@@ -59,6 +59,9 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
     # 优先用本轮分配到的额度；未分配（如单测直接调用）时退回全局剩余
     remaining = state.get("failure_token_budget") or max(
         cfg.budget_tokens - state["spent_tokens"], 10_000)
+    # 本轮 failure 分到的美元额度。0 / 缺席表示不设美元闸（退回 token 闸）。
+    usd_alloc = state.get("failure_usd_budget") or None
+    cost_capped = False
     touched: set[str] = set()
     guard_hits: list[str] = []
     abort_reason: str | None = None
@@ -87,9 +90,18 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
         messages = build_initial_messages(failure, diagnosis)
 
         for _ in range(cfg.fix_guard_retries + 1):
-            outcome = await consume(loop.run(messages=list(messages)))
+            # 额度是**整个 failure** 的，不是每轮的：守卫重试是同一次修复
+            # 尝试的延续，各轮分别给一份额度等于把上限悄悄放大数倍。
+            round_cap = None if usd_alloc is None else usd_alloc - cost
+            if round_cap is not None and round_cap <= 0:
+                cost_capped = True
+                break
+            outcome = await consume(loop.run(messages=list(messages)),
+                                    cost_cap=round_cap)
             tokens += outcome.tokens
             cost += outcome.cost_usd
+            if outcome.cost_capped:
+                cost_capped = True
             # 每一轮都记：守卫重试时，模型「一字未改」的那一轮恰恰
             # 是最该复盘的，只记最后一轮等于把它丢了。
             trace.record_events(outcome.events)
@@ -117,6 +129,9 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
                 abort_reason = None
                 break
 
+            if cost_capped:
+                break
+
             messages = messages + [
                 Message(role=Role.ASSISTANT, content=outcome.text or "（无输出）"),
                 Message(role=Role.USER, content=feedback),
@@ -137,4 +152,5 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
         "diff_lines": lines,
         "abort_reason": abort_reason,
         "abort": None,      # AgentLoop 的错误不中止整个 run，交给 verify 判定
+        "cost_capped": cost_capped,
     }

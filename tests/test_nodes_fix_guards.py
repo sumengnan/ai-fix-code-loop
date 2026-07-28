@@ -142,3 +142,26 @@ async def test_good_patch_passes_guards_in_one_shot(buggy_repo):
         assert out["abort_reason"] is None
         assert out["diff_lines"] == 2
         assert client.calls == 2, "一次过，没有守卫重试"
+
+
+async def test_fix_stops_when_failure_usd_budget_exhausted(buggy_repo):
+    """单 failure 的美元额度用完 —— 不再发起新的模型调用。"""
+    with Worktree(buggy_repo, run_id="r1") as wt:
+        st = _state(buggy_repo, wt, price_map={"gpt-4o-mini": [1000.0, 1000.0]})
+        st["failure_usd_budget"] = 0.001      # 一次调用就必然越线
+        client = _Scripted([_text("我想想"),
+                            _tool("apply_patch", json.dumps({"diff": _PATCH})),
+                            _text("改好了")])
+        out = await fix_node(st, client=client)
+        assert client.calls == 1, "越线后不该再发起第二次调用"
+        assert out["cost_capped"] is True
+
+
+async def test_fix_without_usd_budget_runs_normally(buggy_repo):
+    with Worktree(buggy_repo, run_id="r1") as wt:
+        st = _state(buggy_repo, wt)
+        client = _Scripted([_tool("apply_patch", json.dumps({"diff": _PATCH})),
+                            _text("已修复")])
+        out = await fix_node(st, client=client)
+        assert out["cost_capped"] is False
+        assert out["diff_lines"] == 2

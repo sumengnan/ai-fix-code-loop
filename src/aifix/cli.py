@@ -80,6 +80,8 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                 # 剩余 failure 数 = 队列里的 + 手上这个
                 state["failure_token_budget"] = budget.for_failure(
                     len(state["queue"]) + 1)
+                state["failure_usd_budget"] = budget.usd_for_failure(
+                    len(state["queue"]) + 1)
                 before = state["spent_tokens"], state["spent_usd"]
                 with trace.failure_span(state["current"]), \
                         trace.attempt_span(state["attempt"]):
