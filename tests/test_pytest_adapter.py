@@ -77,6 +77,15 @@ def test_test_dirs():
     assert "tests" in PytestAdapter().test_dirs()
 
 
+def test_source_suffixes_is_python_only():
+    """挖任务时「哪些后缀算源文件」由适配器回答，不是写死在 mine 里。
+
+    只认 `.py` 是这个适配器的**正确答案**，不是缺口 —— 缺口在于以前它被写死
+    在 eval/mine.split_paths 里，于是对 Java 仓库也只认 `.py`。
+    """
+    assert PytestAdapter().source_suffixes() == (".py",)
+
+
 def test_locate_source_picks_deepest_repo_frame(buggy_repo):
     trace = (
         'Traceback (most recent call last):\n'

@@ -22,9 +22,20 @@ from .task import Task
 from .workspace import materialize
 
 
-def split_paths(paths: list[str],
-                test_dirs: list[str]) -> tuple[list[str], list[str]]:
+def split_paths(paths: list[str], test_dirs: list[str],
+                source_suffixes: tuple[str, ...],
+                ) -> tuple[list[str], list[str]]:
     """把 commit 改动的路径拆成（测试侧, 源文件）。
+
+    两个判据都是**传进来的值**（`adapter.test_dirs()` /
+    `adapter.source_suffixes()`），不是 adapter 对象：这个函数是纯的字符串
+    分类，拿着 adapter 就得在测试里造一个假适配器才能覆盖一种布局，而真正
+    决定行为的只有这两个值。
+
+    `source_suffixes` 没有默认值，是有意的：默认 `(".py",)` 正是这个函数
+    此前的 bug —— Java 源码全部落空、gold_files 恒空、is_candidate 恒 False，
+    `aifix mine` 对 Maven 工程一个任务都挖不出来，还不报任何错。少传一个
+    参数当场 TypeError，比静默退化成「只认 Python」好。
 
     「测试侧」不只是 .py：测试目录下的夹具（数据文件、快照、配置片段）必须
     跟着测试一起被 materialize 嫁接。少了它们，任务在 base 侧因缺文件而红、
@@ -32,7 +43,8 @@ def split_paths(paths: list[str],
     修复模型即便诊断和补丁都对也过不了。这不是捏造任务（确实是红转绿），
     是任务质量问题。
 
-    非测试目录下的非 .py 一律忽略，**不进 gold_files**：gold 是 locate_hit
+    非测试目录下、后缀不在 `source_suffixes` 里的文件一律忽略，
+    **不进 gold_files**：gold 是 locate_hit
     的判定依据，衡量的是 Detector 定位**源文件**的能力，塞进数据文件会稀释
     这个指标。
     """
@@ -46,18 +58,19 @@ def split_paths(paths: list[str],
         # `parts[0] in test_dirs` —— M5 的 MavenAdapter 一落地（test_dirs 是
         # `["src/test"]`，首段为 `src`），那道守卫就会静默放行改测试的补丁。
         in_test_dir = under_dirs(p, test_dirs)
-        is_py = pp.suffix == ".py"
+        is_src = pp.suffix in source_suffixes
         # 两侧的判据刻意不对称。测试目录**内**的任意文件都算测试侧，后缀不
         # 限：夹具、数据、快照都得跟着测试一起被 materialize 嫁接。目录**外**
-        # 只认 `test_*.py` —— `test_` 前缀是 Python 的测试命名约定，
-        # `docs/test_plan.md` 不是测试；放它进 test_files 会让 is_candidate 把
-        # 「只改了源码 + 一份文档」的 commit 判成候选，白跑一次克隆和两轮 scoped。
+        # 只认 `test_*` 且后缀是源文件后缀的 —— `test_` 前缀是 Python 的测试
+        # 命名约定，`docs/test_plan.md` 不是测试；放它进 test_files 会让
+        # is_candidate 把「只改了源码 + 一份文档」的 commit 判成候选，白跑一次
+        # 克隆和两轮 scoped。
         # conftest.py 则无论躺在哪都算：它可能在仓库根目录，既不在 test_dirs
         # 里也不以 test_ 开头，会被判成源文件进 gold_files，而它是测试基础设施。
         if in_test_dir or pp.name == "conftest.py" or (
-                is_py and pp.name.startswith("test_")):
+                is_src and pp.name.startswith("test_")):
             tests.append(p)
-        elif is_py:
+        elif is_src:
             src.append(p)
     return tests, src
 
@@ -241,7 +254,8 @@ async def mine_tasks(repo: str, adapter: PytestAdapter, limit: int = 50,
         if base is None:
             continue
         test_files, gold_files = split_paths(
-            _changed_paths(repo, sha), adapter.test_dirs())
+            _changed_paths(repo, sha), adapter.test_dirs(),
+            adapter.source_suffixes())
         if not is_candidate(test_files, gold_files):
             continue
         try:

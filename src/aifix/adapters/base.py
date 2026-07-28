@@ -70,6 +70,15 @@ class ProjectAdapter(Protocol):
 
     def test_dirs(self) -> list[str]: ...
 
+    # 挖任务时「哪些后缀算源文件」。判据必须由适配器给，不能写死在挖掘代码
+    # 里：`eval/mine.split_paths` 曾经只认 `.py`，于是 Java 仓库的源码全部
+    # 落空 → gold_files 恒空 → is_candidate 恒 False → `aifix mine` 对任何
+    # Maven 工程产出 0 个任务，且不报错，与「这个仓库最近没有红转绿的提交」
+    # 无法区分。
+    # 只收产品代码的后缀，不收资源/配置：gold_files 是 locate_hit 的判定
+    # 依据，衡量的是 Detector 定位**源文件**的能力，掺进数据文件会稀释它。
+    def source_suffixes(self) -> tuple[str, ...]: ...
+
     def make_test_id(self, classname: str, name: str, file: str | None) -> str: ...
 
     def locate_source(self, failure: Failure, repo: Path) -> list[SourceCandidate]: ...

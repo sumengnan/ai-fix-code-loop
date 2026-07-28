@@ -459,7 +459,10 @@ async def mutate_tasks(repo: str, adapter: PytestAdapter, max_tasks: int = 10,
 
         paths = [p for p in _git(tree, "ls-files", "--", "*.py").split("\n")
                  if p.strip()]
-        _tests, sources = split_paths(paths, adapter.test_dirs())
+        # 这里的 `.py` 写死是**算子层自己的限制**，不是适配层的遗漏：变异靠
+        # Python 的 ast 定位（见模块 docstring），换成 adapter.source_suffixes()
+        # 只会把 `.java` 喂进 ast.parse。变异任务今天只对 Python 工程成立。
+        _tests, sources = split_paths(paths, adapter.test_dirs(), (".py",))
         # seed 决定文件顺序与每个文件内候选的顺序：max_tasks 一截断，取到哪
         # 几个变异就全看这个顺序，不定死就没有可复现的任务集可言
         rng = random.Random(seed)

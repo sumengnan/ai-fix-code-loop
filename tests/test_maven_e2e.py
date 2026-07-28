@@ -362,10 +362,12 @@ def test_split_paths_classifies_the_maven_test_dir(project):
     paths = [_TEST_PATH, _SRC_PATH, "pom.xml"]
     for p in paths:
         assert (project / p).is_file(), p
-    tests, gold = split_paths(paths, MavenAdapter().test_dirs())
+    adapter = MavenAdapter()
+    tests, gold = split_paths(paths, adapter.test_dirs(),
+                              adapter.source_suffixes())
     assert tests == [_TEST_PATH], tests
-    # 现状快照，不是背书：split_paths 的源文件侧只收 `.py`，Java 源码
-    # 一律落空。后果是 is_candidate 对任何 Java 仓库恒为 False —— aifix
-    # mine 挖不出一个 Maven 任务。这条一旦转红，说明有人补上了这个缺口，
-    # 请把断言改成 [_SRC_PATH]。
-    assert gold == [], gold
+    # 这里曾是一条「现状快照」：源文件侧写死 `.py`，Java 源码一律落空，
+    # gold 恒空 → is_candidate 恒 False → aifix mine 对 Maven 工程一个任务
+    # 都挖不出来。缺口已补（后缀改由 adapter.source_suffixes() 回答），
+    # 快照随之转正。
+    assert gold == [_SRC_PATH], gold

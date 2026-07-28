@@ -219,6 +219,15 @@ def test_test_dirs_is_the_maven_standard_layout():
     assert MavenAdapter().test_dirs() == ["src/test"]
 
 
+def test_source_suffixes_is_java_only():
+    """gold_files 衡量的是定位**源文件**的能力。
+
+    `.xml`（pom）、`.properties`（资源）都躺在 Maven 工程里，收进来只会稀释
+    这个指标；locate_source 也只映射 src/main/java 下的 `.java`。
+    """
+    assert MavenAdapter().source_suffixes() == (".java",)
+
+
 def test_report_paths_is_empty_when_nothing_ran(tmp_path):
     """报告缺失返回空列表，不抛 —— require_report 那一层才负责判定。"""
     assert MavenAdapter().report_paths(tmp_path) == []

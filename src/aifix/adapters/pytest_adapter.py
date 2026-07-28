@@ -64,6 +64,11 @@ class PytestAdapter:
     def test_dirs(self) -> list[str]:
         return ["tests", "test"]
 
+    def source_suffixes(self) -> tuple[str, ...]:
+        # 不含 `.pyi`：存根文件里没有可执行的实现，改它修不好任何测试，
+        # 进 gold_files 只会让 locate_hit 变得更难达成。
+        return (".py",)
+
     def make_test_id(self, classname: str, name: str, file: str | None) -> str:
         """把 junit 报告里的一条 <testcase> 还原成 pytest 认得的 node id。
 

@@ -67,6 +67,13 @@ class MavenAdapter:
     def test_dirs(self) -> list[str]:
         return ["src/test"]
 
+    def source_suffixes(self) -> tuple[str, ...]:
+        # 只有 `.java`。pom.xml 的改动确实能让测试转红转绿（依赖版本、
+        # 编译级别），但它不是 locate_source 能指向的东西 —— 这个适配器只把
+        # 栈帧映射到 src/main/java 下的 `.java`，把 pom.xml 塞进 gold_files
+        # 等于给 Detector 记一个它按设计就拿不到的分。
+        return (".java",)
+
     def make_test_id(self, classname: str, name: str, file: str | None) -> str:
         """surefire 的 -Dtest= 选择器语法就是 `全限定类名#方法名`。
 
