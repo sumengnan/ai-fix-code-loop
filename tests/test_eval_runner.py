@@ -354,6 +354,50 @@ async def test_suite_budget_gate_holds_under_concurrency(monkeypatch, tmp_path):
         f"整批实际花销 {total_spent} 超过上限 $1.0（容差 1e-9）")
 
 
+async def test_on_done_is_never_called_while_holding_the_lock(
+        monkeypatch, tmp_path):
+    """三条路径（正常 / 异常 / 跳过）都必须在锁外回调 on_done。
+
+    on_done 是用户提供的 I/O 回调（CLI 里是 print），锁内调用会把整批
+    调度阻塞在一次 I/O 上，且与正常/异常两条路径的回调时机不一致。
+
+    断言方式：monkeypatch 掉 runner 模块里的 asyncio.Lock 构造函数，把
+    run_suite 内部真正用来做「预留」记账的那把锁偷渡出来；on_done 触发
+    时立即读它的 locked()——如果此刻返回 True，说明 on_done 正跑在
+    `async with lock:` 内部。这比「在 on_done 里 sleep(0) 后断言另一个
+    任务推进了」更直接：不依赖并发调度的时序巧合，直接看临界区状态本
+    身，不会写成恒真断言。
+    """
+    import aifix.eval.runner as R
+
+    captured: list[asyncio.Lock] = []
+    real_lock_cls = asyncio.Lock
+
+    def _spy_lock(*a, **kw):
+        lk = real_lock_cls(*a, **kw)
+        captured.append(lk)
+        return lk
+
+    monkeypatch.setattr(R.asyncio, "Lock", _spy_lock)
+    monkeypatch.setattr(R, "run_task", _fake_run_task([], [], cost=1.0))
+
+    locked_at_call: list[bool] = []
+
+    def on_done(r):
+        assert captured, "没能拿到 run_suite 内部的锁引用"
+        locked_at_call.append(captured[0].locked())
+
+    tasks = [_bare_task(f"t{i}") for i in range(3)]
+    # total_usd 只够第一个任务，逼第 2、3 个任务走跳过分支；三个任务都
+    # 会各触发一次 on_done，凑齐「正常 + 跳过」两条路径。
+    await R.run_suite(tasks, AifixConfig(budget_usd=5.0), "假模型", tmp_path,
+                      parallel=1, total_usd=1.0, on_done=on_done)
+
+    assert len(locked_at_call) == 3, "三个任务都应该各触发一次 on_done"
+    assert not any(locked_at_call), (
+        f"on_done 在锁仍被持有时被调用了：{locked_at_call}")
+
+
 async def test_no_suite_budget_leaves_config_untouched(monkeypatch, tmp_path):
     """不给整批上限时全跑，且不改写每任务额度。"""
     import aifix.eval.runner as R

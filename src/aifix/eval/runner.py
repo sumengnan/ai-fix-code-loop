@@ -198,21 +198,28 @@ async def run_suite(tasks: list[Task], config: AifixConfig, model: str,
         nonlocal spent
         async with sem:
             if total_usd is not None:
+                skipped = False
                 async with lock:
                     # 读 left、算 cap、预留进 spent 必须在同一把锁内一次
                     # 完成，中间不能释放锁 —— 否则另一个并发槽位会插进
-                    # 来读到预留之前的旧 spent，竞态原样存在。
+                    # 来读到预留之前的旧 spent，竞态原样存在。锁内只判定
+                    # 是否跳过，不做任何回调 —— on_done 是用户提供的 I/O
+                    # 回调（CLI 里是 print），锁内调用会把整批调度阻塞在
+                    # 一次 I/O 上，且与正常/异常两条路径的回调时机不一致。
                     left = total_usd - spent
                     if left <= 0:
-                        # 记成 error 而不是失败的 verdict：这是评测的调度
-                        # 决策，不是被测系统的成绩。混进比率分母会让修复
-                        # 成功率凭空变低 —— 被测系统替调度背锅。
-                        r = _blank(t.task_id, model, _SKIPPED)
-                        if on_done:
-                            on_done(r)
-                        return r
-                    cap = min(config.budget_usd, left)
-                    spent += cap
+                        skipped = True
+                    else:
+                        cap = min(config.budget_usd, left)
+                        spent += cap
+                if skipped:
+                    # 记成 error 而不是失败的 verdict：这是评测的调度
+                    # 决策，不是被测系统的成绩。混进比率分母会让修复
+                    # 成功率凭空变低 —— 被测系统替调度背锅。
+                    r = _blank(t.task_id, model, _SKIPPED)
+                    if on_done:
+                        on_done(r)
+                    return r
                 task_config = config.model_copy(
                     update={"budget_usd": cap})
             else:
