@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 from harness.llm.base import StreamChunk, ToolCallDelta
@@ -315,6 +316,42 @@ async def test_per_task_cap_is_clamped_to_remaining(monkeypatch, tmp_path):
                       AifixConfig(budget_usd=5.0), "假模型", tmp_path,
                       parallel=1, total_usd=1.5)
     assert caps == [1.5, 0.5], "第一个被整批剩余压到 1.5，第二个只剩 0.5"
+
+
+async def test_suite_budget_gate_holds_under_concurrency(monkeypatch, tmp_path):
+    """并发派发下，整批总闸必须靠「预留」而不是「事后累加」，否则同一批
+    额度会被超支到并发数那么多倍。
+
+    复现条件与实测一致：整批上限 $1.0、每个任务花 $1.0、4 个任务、
+    parallel=4。修复前，`spent` 只在任务跑完后才累加，4 个并发槽位在
+    派发前全部读到同一个旧值 `spent=0.0`，都误判「还有额度」，于是全部
+    4 个任务都被派发、实际烧掉 $4.0 —— 4 倍超支。用 `asyncio.sleep`
+    强制任务体跨越检查窗口，让 4 个协程真正交错；不 sleep 的话协程可能
+    近似顺序执行，测不出竞态。
+    """
+    import aifix.eval.runner as R
+
+    seen: list[str] = []
+
+    async def fake(task, config, model, workdir, **kw):
+        seen.append(task.task_id)
+        await asyncio.sleep(0.05)  # 强迫 4 个协程的派发窗口互相交错
+        return TaskResult(task_id=task.task_id, model=model, locate_hit=True,
+                          suspect_file="a.py", verdict="better", attempts=1,
+                          tokens=100, cost_usd=1.0, violations=0)
+
+    monkeypatch.setattr(R, "run_task", fake)
+    tasks = [_bare_task(f"t{i}") for i in range(4)]
+    rs = await R.run_suite(tasks, AifixConfig(budget_usd=5.0), "假模型",
+                           tmp_path, parallel=4, total_usd=1.0)
+
+    total_spent = sum(r.cost_usd for r in rs)
+    ran = sum(1 for r in rs if r.error is None)
+    assert ran == 1, (
+        f"整批上限 $1.0 只够跑 1 个花 $1.0 的任务，实际跑了 {ran} 个："
+        f"{seen}")
+    assert total_spent <= 1.0 + 1e-9, (
+        f"整批实际花销 {total_spent} 超过上限 $1.0（容差 1e-9）")
 
 
 async def test_no_suite_budget_leaves_config_untouched(monkeypatch, tmp_path):

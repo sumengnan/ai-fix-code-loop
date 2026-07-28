@@ -193,7 +193,17 @@ async def run_suite(tasks: list[Task], config: AifixConfig, model: str,
 
     total_usd：整批的美元上限。检查发生在**派发之前**，已经在跑的任务
     放它们跑完 —— 它们的结果是有效数据，中途掐掉等于白花已经花掉的钱。
-    因此超支上界是「并发数 − 1 个任务」的成本，这一点要在 --help 里写明。
+
+    `spent` 记的不是「已经花掉」而是「已经发出去的最大可能花销」：算出
+    `cap` 的同一把锁内立即把 `cap` 预留进 `spent`，任务跑完后再回填差额
+    `cost_usd - cap`。若只在任务跑完后才累加（预留之前的写法），
+    parallel=N 时 N 个并发槽位会在派发前全部读到同一个旧 `spent`，各自
+    以为还有整批上限那么多额度可花 —— 实测 `total_usd=1.0`、每任务花
+    `1.0`、4 个任务：parallel=1 正确地只花 $1.0，parallel=4 却花掉
+    $4.0，4 倍超支，且 parallel=4 正是 `aifix eval` 的默认并发度。预留
+    之后，整批的超支只可能来自「每个在跑的任务超出它自己那份额度的
+    量」，而单任务的超出量由 `consume()` 的契约兜住（至多一次模型调
+    用）。因此整批超支上界 = 并发数 × 一次模型调用的成本。
     """
     sem = asyncio.Semaphore(parallel)
     spent = 0.0
@@ -204,27 +214,37 @@ async def run_suite(tasks: list[Task], config: AifixConfig, model: str,
         async with sem:
             if total_usd is not None:
                 async with lock:
+                    # 读 left、算 cap、预留进 spent 必须在同一把锁内一次
+                    # 完成，中间不能释放锁 —— 否则另一个并发槽位会插进
+                    # 来读到预留之前的旧 spent，竞态原样存在。
                     left = total_usd - spent
-                if left <= 0:
-                    # 记成 error 而不是失败的 verdict：这是评测的调度决策，
-                    # 不是被测系统的成绩。混进比率分母会让修复成功率凭空
-                    # 变低 —— 被测系统替调度背锅。
-                    r = _blank(t.task_id, model, _SKIPPED)
-                    if on_done:
-                        on_done(r)
-                    return r
+                    if left <= 0:
+                        # 记成 error 而不是失败的 verdict：这是评测的调度
+                        # 决策，不是被测系统的成绩。混进比率分母会让修复
+                        # 成功率凭空变低 —— 被测系统替调度背锅。
+                        r = _blank(t.task_id, model, _SKIPPED)
+                        if on_done:
+                            on_done(r)
+                        return r
+                    cap = min(config.budget_usd, left)
+                    spent += cap
                 task_config = config.model_copy(
-                    update={"budget_usd": min(config.budget_usd, left)})
+                    update={"budget_usd": cap})
             else:
                 task_config = config
+                cap = None
             try:
                 r = await run_task(t, task_config, model, workdir,
                                    detector_client=detector_client,
                                    fixer_client=fixer_client)
             except Exception as e:      # 一个任务炸掉不能带走整个 suite
                 r = _blank(t.task_id, model, repr(e))
-            async with lock:
-                spent += r.cost_usd
+            if cap is not None:
+                # 回填预留与实际花销的差额。异常路径 r.cost_usd 是
+                # 0.0，回填 0.0 - cap 会把预留原样退回，是对的 ——
+                # 否则预留会永久占住额度，把后续任务全部饿死。
+                async with lock:
+                    spent += r.cost_usd - cap
             if on_done:
                 on_done(r)
             return r
