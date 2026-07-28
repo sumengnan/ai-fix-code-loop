@@ -84,9 +84,14 @@ async def test_empty_diff_triggers_retry_with_feedback(buggy_repo):
 
 
 async def test_empty_diff_exhausts_retries(buggy_repo):
-    """一直不改就放弃，并记下原因。"""
+    """一直不改就放弃，并记下原因。
+
+    guard_giveup_limit 特意调大到跳出 fix_guard_retries+1 的轮数之外，
+    这样测的是「重试次数耗尽」本身，不会被同守卫连续放弃规则抢先命中
+    （那条规则由 test_same_guard_twice_gives_up 等用例单独覆盖）。
+    """
     with Worktree(buggy_repo, run_id="r1") as wt:
-        st = _state(buggy_repo, wt, fix_guard_retries=1)
+        st = _state(buggy_repo, wt, fix_guard_retries=1, guard_giveup_limit=3)
         client = _Scripted([_text("已修复")])
         out = await fix_node(st, client=client)
         assert client.calls == 2
@@ -165,3 +170,48 @@ async def test_fix_without_usd_budget_runs_normally(buggy_repo):
         out = await fix_node(st, client=client)
         assert out["cost_capped"] is False
         assert out["diff_lines"] == 2
+
+
+async def test_same_guard_twice_gives_up(buggy_repo):
+    """连续两次空 diff = 同一堵墙撞两回，别再撞第三次。
+
+    实测两个真实模型都在这里各烧了 51~52 万 token 却一个字没改。
+    """
+    with Worktree(buggy_repo, run_id="r1") as wt:
+        st = _state(buggy_repo, wt, fix_guard_retries=5, guard_giveup_limit=2)
+        client = _Scripted([_text("已修复")])       # 永远不改任何文件
+        out = await fix_node(st, client=client)
+        assert client.calls == 2, "第二次空 diff 即放弃，不该跑满 6 轮"
+        assert out["abort_reason"] == "empty_diff_giveup"
+        assert out["guard_hits"] == ["empty_diff", "empty_diff"]
+
+
+async def test_alternating_guards_do_not_give_up(buggy_repo):
+    """交替触发说明模型在换思路，值得再给一次机会。"""
+    big = "".join(f"+line{i}\n" for i in range(400))
+    huge = ("--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,400 @@\n"
+            "-def add(a, b):\n"
+            "-    return a - b        # bug: 应为 a + b\n" + big)
+    with Worktree(buggy_repo, run_id="r1") as wt:
+        st = _state(buggy_repo, wt, max_diff_lines=50,
+                    fix_guard_retries=3, guard_giveup_limit=2)
+        client = _Scripted([
+            _text("先不改"),                                    # empty_diff
+            _tool("apply_patch", json.dumps({"diff": huge})),   # huge_diff
+            _text("重写完毕"),
+            _tool("apply_patch", json.dumps({"diff": _PATCH})),
+            _text("这次只改一行"),
+        ])
+        out = await fix_node(st, client=client)
+        assert out["guard_hits"] == ["empty_diff", "huge_diff"]
+        assert out["abort_reason"] is None, "交替触发不该提前放弃"
+        assert out["diff_lines"] == 2
+
+
+async def test_giveup_limit_one_gives_up_immediately(buggy_repo):
+    with Worktree(buggy_repo, run_id="r1") as wt:
+        st = _state(buggy_repo, wt, fix_guard_retries=5, guard_giveup_limit=1)
+        client = _Scripted([_text("已修复")])
+        out = await fix_node(st, client=client)
+        assert client.calls == 1
+        assert out["abort_reason"] == "empty_diff_giveup"

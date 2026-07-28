@@ -50,6 +50,11 @@ class AifixConfig(BaseSettings):
     max_diff_lines: int = 300
     # 守卫触发后额外给模型的重试次数（不计入 max_attempts）
     fix_guard_retries: int = 2
+    # 同一条守卫连续触发多少次即放弃该 failure。用「同一条」而不是「任意
+    # 守卫」：交替触发（空 diff → 巨型 diff）说明模型在换思路，值得再给一次；
+    # 连续两次空 diff 是同一堵墙撞两回。实测两个真实模型都在这里各烧了
+    # 51~52 万 token 却一个字没改。
+    guard_giveup_limit: int = 2
     # 连着几个 failure 一个都没修好，大概率不是「这些 bug 恰好都难」，
     # 而是环境坏了 / prompt 崩了 / 今天这个模型不行。继续跑只是匀速烧钱。
     consecutive_failure_limit: int = 3

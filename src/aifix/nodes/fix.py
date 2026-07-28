@@ -89,6 +89,8 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
         )
         messages = build_initial_messages(failure, diagnosis)
 
+        last_guard: str | None = None
+        guard_repeats = 0
         for _ in range(cfg.fix_guard_retries + 1):
             # 额度是**整个 failure** 的，不是每轮的：守卫重试是同一次修复
             # 尝试的延续，各轮分别给一份额度等于把上限悄悄放大数倍。
@@ -111,22 +113,29 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
             lines = await _diff_lines(sandbox)
 
             if lines == 0:
-                guard_hits.append("empty_diff")
-                abort_reason = "empty_diff"
-                feedback = _EMPTY_FEEDBACK
+                kind, feedback = "empty_diff", _EMPTY_FEEDBACK
             elif lines > cfg.max_diff_lines:
-                guard_hits.append("huge_diff")
-                abort_reason = "huge_diff"
+                kind = "huge_diff"
                 feedback = _HUGE_FEEDBACK.format(
                     lines=lines, limit=cfg.max_diff_lines)
                 await _rollback(sandbox)
                 touched.clear()
-                # 已回滚，工作区确实没有改动了。不清零的话，守卫用尽时
-                # 记进 trace 的会是回滚前的陈旧值 —— 观测数据撒谎比没有
-                # 观测更糟。
+                # 已回滚，工作区确实没有改动了。不清零的话，守卫用尽时记进
+                # trace 的会是回滚前的陈旧值 —— 观测数据撒谎比没有观测更糟。
                 lines = 0
             else:
                 abort_reason = None
+                break
+
+            guard_hits.append(kind)
+            abort_reason = kind
+            guard_repeats = guard_repeats + 1 if kind == last_guard else 1
+            last_guard = kind
+            if guard_repeats >= cfg.guard_giveup_limit:
+                # 同一堵墙撞够了。把「钱花完了」变成「出问题了，去看 trace」——
+                # 后者信息量大得多，省下的额度还能流给真有希望的 failure。
+                abort_reason = f"{kind}_giveup"
+                trace.fact("guard_giveup", kind)
                 break
 
             if cost_capped:
