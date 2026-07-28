@@ -189,3 +189,101 @@ async def test_touched_is_optional(buggy_repo):
         assert not r.is_error
     finally:
         await sb.close()
+
+
+# ---------------------------------------------------------- 伪造前缀绕过守卫
+#
+# 这三个 diff 的正文逐字相同（把 test_add 的断言换成 assert True），只有
+# `--- / +++` 那两行的路径写法不同。守卫看到的路径必须与 git 真正写入的路径
+# 是同一个，否则「不许改测试文件」这道守卫可以被路径写法整个绕过。
+
+def _kill_assert(header_path: str) -> str:
+    return (f"--- {header_path}\n"
+            f"+++ {header_path}\n"
+            "@@ -4,3 +4,3 @@\n"
+            " def test_add():\n"
+            "-    assert add(2, 3) == 5\n"
+            "+    assert True\n"
+            " \n")
+
+
+_FORGED_PREFIX = _kill_assert("x/tests/test_calc.py")
+_UPPERCASE_DIR = _kill_assert("a/TESTS/test_calc.py")
+
+
+async def test_forged_path_prefix_cannot_bypass_the_test_guard(executor):
+    """`git apply` 默认 -p1，剥掉的是**任意**第一段，不只是 `a/` / `b/`。
+
+    只认 `a/` / `b/` 的话，`x/tests/test_calc.py` 在守卫眼里首段是 `x`
+    （不在 test_dirs 里，放行），而 git 剥掉 `x/` 后写的是
+    `tests/test_calc.py` —— 断言真的被删掉，工具还回「补丁已应用」。
+    """
+    ex, repo = executor
+    r = await ex.execute(ToolCall(id="1", name="apply_patch",
+                                  arguments={"diff": _FORGED_PREFIX}))
+    body = (repo / "tests" / "test_calc.py").read_text(encoding="utf-8")
+    # 磁盘先看：即使工具报了错，只要文件被改了，这道守卫就是失效的
+    assert "assert add(2, 3) == 5" in body, "测试文件被改写了"
+    assert "assert True" not in body
+    assert r.is_error
+    assert "测试" in r.content
+
+
+async def test_uppercase_test_dir_cannot_bypass_the_test_guard(executor):
+    """守卫大小写敏感、而 macOS / Windows 的文件系统不敏感。
+
+    `a/TESTS/test_calc.py` 在守卫眼里不是 `tests` 目录，git 却把它写进了
+    `tests/test_calc.py`。守卫宁可多拦不可漏放，判定必须大小写不敏感。
+    """
+    ex, repo = executor
+    r = await ex.execute(ToolCall(id="1", name="apply_patch",
+                                  arguments={"diff": _UPPERCASE_DIR}))
+    body = (repo / "tests" / "test_calc.py").read_text(encoding="utf-8")
+    assert "assert add(2, 3) == 5" in body, "测试文件被改写了"
+    assert "assert True" not in body
+    assert r.is_error
+    assert "测试" in r.content
+
+
+_NO_PREFIX_SOURCE = """--- calc.py
++++ calc.py
+@@ -1,2 +1,2 @@
+ def add(a, b):
+-    return a - b        # bug: 应为 a + b
++    return a + b
+"""
+
+
+async def test_single_segment_path_is_not_stripped(executor):
+    """区分度：`git apply -p1` 只在有 `/` 时才剥一段。
+
+    不加这一条的话，一个「无条件丢掉第一段」的实现也能让上面两条变绿，
+    而它会把 `--- calc.py`（diff.noprefix 风格）剥成空路径，守卫拿着空路径
+    去判、去做围栏检查，行为完全不可预测。git 对它的处理是原样保留。
+    """
+    ex, repo = executor
+    r = await ex.execute(ToolCall(id="1", name="apply_patch",
+                                  arguments={"diff": _NO_PREFIX_SOURCE}))
+    assert not r.is_error, r.content
+    assert "return a + b" in (repo / "calc.py").read_text(encoding="utf-8")
+
+
+async def test_touched_records_the_path_git_actually_writes(buggy_repo):
+    """记账记的必须是 git 写入的路径，不是 diff 头上的原样字符串。
+
+    记成 `a/calc.py` 的话，交付时 `git add -- a/calc.py` 匹配不到任何文件，
+    交付分支上一个提交都没有 —— 报告却照写「已修复」。
+    """
+    sb = LocalSandbox(workspace=str(buggy_repo))
+    await sb.start()
+    try:
+        touched: set[str] = set()
+        reg = ToolRegistry()
+        reg.register(ApplyPatchTool(sb, test_dirs=["tests"], touched=touched))
+        ex = ToolExecutor(reg, max_chars=8000)
+        r = await ex.execute(ToolCall(id="1", name="apply_patch",
+                                      arguments={"diff": _NO_PREFIX_SOURCE}))
+        assert not r.is_error, r.content
+        assert touched == {"calc.py"}
+    finally:
+        await sb.close()

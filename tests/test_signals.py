@@ -220,3 +220,16 @@ def test_under_dirs_normalizes_separators_and_leading_dot():
     assert under_dirs("./src/test/java/X.java", ["src/test"])
     assert under_dirs("src\\test\\java\\X.java", ["src/test"])
     assert under_dirs("src/test/java/X.java", ["src/test/"])
+
+
+def test_under_dirs_is_case_insensitive():
+    """macOS / Windows 的文件系统不区分大小写，守卫不能区分。
+
+    `TESTS/test_calc.py` 在大小写敏感的判定里不是 `tests` 目录，而 git 会把
+    它老老实实写进 `tests/test_calc.py` —— 断言被删掉，守卫一声不吭。
+    """
+    assert under_dirs("TESTS/test_calc.py", ["tests"])
+    assert under_dirs("tests/test_calc.py", ["TESTS"])
+    assert under_dirs("SRC/Test/java/X.java", ["src/test"])
+    # 区分度：不敏感只放宽大小写，不放宽分段边界
+    assert not under_dirs("TESTDATA/x.py", ["tests"])

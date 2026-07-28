@@ -76,10 +76,17 @@ def under_dirs(path: str, dirs: list[str]) -> bool:
 
     空字符串一律跳过：它的分段序列是 ()，是任何路径的前缀，会让守卫拦下
     一切改动 —— 配置里多一个空项就把整个系统变成只读的。
+
+    **大小写不敏感**，这是个取舍。macOS 与 Windows 的文件系统默认不区分大小
+    写：`a/TESTS/test_add.py` 在守卫眼里不是 `tests` 目录，git 却老老实实把
+    它写进了 `tests/test_add.py`，断言被删掉而守卫一声不吭。代价是一个同时
+    存在 `tests/` 与 `TESTS/` 两个**不同**目录的仓库会被多拦一次 —— 这道守
+    卫挡的是「模型删断言让测试变绿」，宁可多拦不可漏放；何况那样的仓库本身
+    就是病态的。
     """
-    p = _path_parts(path)
+    p = tuple(seg.casefold() for seg in _path_parts(path))
     for d in dirs:
-        prefix = _path_parts(d)
+        prefix = tuple(seg.casefold() for seg in _path_parts(d))
         if prefix and p[:len(prefix)] == prefix:
             return True
     return False
