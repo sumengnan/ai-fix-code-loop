@@ -33,15 +33,22 @@ class PytestAdapter:
     _BASE = ["-B", "-m", "pytest", "-q", "-p", "no:cacheprovider",
              "-o", "junit_family=xunit1"]
 
-    def full_test_command(self, report_path: str) -> list[str]:
-        return [sys.executable, *self._BASE, f"--junitxml={report_path}"]
+    # 复跑单独一份报告：flaky 确认发生在全量结果还要继续用的时候，同名会把
+    # baseline 那份覆盖成只含两三个用例的报告，随后又被清理删掉。
+    REPORT_NAME = ".aifix-report.xml"
+    SCOPED_REPORT_NAME = ".aifix-recheck.xml"
 
-    def scoped_test_command(self, test_ids: list[str], report_path: str) -> list[str]:
+    def full_test_command(self) -> list[str]:
+        return [sys.executable, *self._BASE, f"--junitxml={self.REPORT_NAME}"]
+
+    def scoped_test_command(self, test_ids: list[str]) -> list[str]:
         return [sys.executable, *self._BASE,
-                f"--junitxml={report_path}", *test_ids]
+                f"--junitxml={self.SCOPED_REPORT_NAME}", *test_ids]
 
-    def report_glob(self) -> str:
-        return ".aifix-report.xml"
+    def report_paths(self, worktree: Path, scoped: bool = False) -> list[Path]:
+        name = self.SCOPED_REPORT_NAME if scoped else self.REPORT_NAME
+        path = Path(worktree) / name
+        return [path] if path.is_file() else []
 
     def test_dirs(self) -> list[str]:
         return ["tests", "test"]

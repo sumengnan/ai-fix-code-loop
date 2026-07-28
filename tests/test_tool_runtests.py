@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 from harness.sandbox.local import LocalSandbox
 from harness.tools.base import ToolExecutor, ToolRegistry
@@ -64,7 +66,13 @@ async def test_too_many_ids_rejected_by_schema(executor):
 
 async def test_report_file_cleaned_up(executor):
     ex, repo = executor
-    await ex.execute(ToolCall(
-        id="1", name="run_tests",
-        arguments={"test_ids": ["tests/test_calc.py::test_identity"]}))
-    assert not (repo / ".aifix-scoped.xml").exists()
+    tid = "tests/test_calc.py::test_identity"
+    a = PytestAdapter()
+    await ex.execute(ToolCall(id="1", name="run_tests",
+                              arguments={"test_ids": [tid]}))
+    assert a.report_paths(repo, scoped=True) == []
+    # 反证：同一条命令直接跑确实会留下报告。少了这一步，上面那句在
+    # 「报告名改了、根本没人写这个文件」时也照样绿 —— 恒真断言。
+    subprocess.run(a.scoped_test_command([tid]), cwd=repo,
+                   capture_output=True, text=True)
+    assert a.report_paths(repo, scoped=True), "复跑没写出报告，上一句断言不作数"

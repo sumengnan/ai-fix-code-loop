@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import BaseModel, Field
 
 from harness.sandbox.base import Sandbox
@@ -7,8 +9,6 @@ from harness.tools.base import Tool, ToolError
 from harness.tools.builtins._sandbox_util import format_exec
 
 from ..adapters.base import ProjectAdapter
-
-_SCOPED_REPORT = ".aifix-scoped.xml"
 
 
 class RunTestsTool(Tool):
@@ -37,10 +37,16 @@ class RunTestsTool(Tool):
             raise ToolError(
                 f"未知的测试标识：{unknown}。"
                 f"只能跑当前失败列表中的用例：{sorted(self._known)}")
-        cmd = self._adapter.scoped_test_command(params.test_ids, _SCOPED_REPORT)
+        cmd = self._adapter.scoped_test_command(params.test_ids)
         try:
             res = await self._sandbox.exec(cmd, self._timeout)
         finally:
-            await self._sandbox.exec(["rm", "-f", _SCOPED_REPORT], 10.0)
+            # 报告路径不再由调用方指定，只能问适配器要 —— 而且可能不止一份。
+            # 不删干净的代价：Worktree.commit() 的 git add -A 把它带进交付分支。
+            stale = self._adapter.report_paths(
+                Path(self._sandbox.workspace), scoped=True)
+            if stale:
+                await self._sandbox.exec(
+                    ["rm", "-f", *(str(p) for p in stale)], 10.0)
         # 测试失败不是工具失败：结果原样回给模型判断，不抛 ToolError
         return format_exec(res, self._max_chars)
