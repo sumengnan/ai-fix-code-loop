@@ -117,6 +117,42 @@ def test_detected_name_is_resolvable_by_adapter_for(tmp_path, buggy_repo, kind):
     assert adapter_for(name).name == kind
 
 
+_PROTOCOL_MEMBERS = sorted(n for n in vars(ProjectAdapter)
+                           if not n.startswith("_") and n != "name")
+
+
+@pytest.mark.parametrize("cls", [PytestAdapter, MavenAdapter])
+def test_adapter_matches_the_protocol_member_for_member(cls):
+    """注册表里的每个实现都要真的满足 ProjectAdapter，逐个成员比签名。
+
+    Protocol 不做运行时检查：baseline 把参数标成 ProjectAdapter 之后，
+    一个签名对不上的适配器照样能被登记、被 adapter_for 取出来，直到
+    run_full_suite 调到那个方法才炸 —— 而那时已经跑完一次全量测试了。
+    """
+    import inspect
+    # 防空转：成员列表是从协议对象上反射出来的，协议一旦改成别的写法
+    # （比如成员只剩注解）这里会变成空列表，循环一次不跑而测试照样绿
+    assert len(_PROTOCOL_MEMBERS) == 7, _PROTOCOL_MEMBERS
+    assert isinstance(getattr(cls, "name", None), str) and cls.name
+    for member in _PROTOCOL_MEMBERS:
+        impl = getattr(cls, member, None)
+        assert impl is not None, f"{cls.__name__} 缺少协议成员 {member}"
+        assert str(inspect.signature(impl)) == \
+            str(inspect.signature(getattr(ProjectAdapter, member))), member
+
+
+@pytest.mark.parametrize("fn", [run_full_suite, run_scoped])
+def test_suite_runners_are_annotated_with_the_protocol(fn):
+    """`adapter: PytestAdapter` 在注册表有第二个实现之后就是一句假话。
+
+    注解不会在运行时报错，所以这条只能盯注解本身：它写的是「这里只接
+    PytestAdapter」，而 adapter_for 早已可能返回 MavenAdapter。读代码的人
+    和静态检查都会据此得出错误结论。
+    """
+    hints = typing.get_type_hints(fn)
+    assert hints["adapter"] is ProjectAdapter, hints["adapter"]
+
+
 def test_preflight_rejects_unknown_project(tmp_path):
     import subprocess
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)

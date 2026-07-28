@@ -53,7 +53,7 @@ def _check_report(worktree: Path, paths: list[Path], required: bool) -> None:
             "本次结果不可信")
 
 
-async def _rm_reports(sb: LocalSandbox, adapter: PytestAdapter,
+async def _rm_reports(sb: LocalSandbox, adapter: ProjectAdapter,
                       worktree: Path, scoped: bool) -> None:
     """删掉本次跑出的报告 —— 可能不止一份。
 
@@ -64,7 +64,7 @@ async def _rm_reports(sb: LocalSandbox, adapter: PytestAdapter,
         await sb.exec(["rm", "-f", *(str(p) for p in stale)], 10.0)
 
 
-async def run_full_suite(worktree: Path, adapter: PytestAdapter,
+async def run_full_suite(worktree: Path, adapter: ProjectAdapter,
                          timeout: float = 900.0,
                          require_report: bool = False):
     """在 worktree 里跑全量测试并解析报告。零 LLM。
@@ -83,7 +83,7 @@ async def run_full_suite(worktree: Path, adapter: PytestAdapter,
         await sb.close()
 
 
-async def run_scoped(worktree: Path, adapter: PytestAdapter,
+async def run_scoped(worktree: Path, adapter: ProjectAdapter,
                      test_ids: list[str], timeout: float = 300.0,
                      require_report: bool = False):
     """只跑指定用例并解析报告。供 flaky 确认使用 —— 成本远低于全量。
