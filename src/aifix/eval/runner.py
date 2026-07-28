@@ -174,25 +174,57 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
     return result
 
 
+_SKIPPED = "整批预算耗尽，未运行"
+
+
+def _blank(task_id: str, model: str, error: str) -> TaskResult:
+    return TaskResult(task_id=task_id, model=model, locate_hit=False,
+                      suspect_file=None, verdict="same", attempts=0,
+                      tokens=0, cost_usd=0.0, violations=0, error=error)
+
+
 async def run_suite(tasks: list[Task], config: AifixConfig, model: str,
                     workdir: Path, parallel: int = 4,
                     detector_client: Any = None,
                     fixer_client: Any = None,
-                    on_done=None) -> list[TaskResult]:
-    """并行跑整个任务集。返回顺序与传入顺序一致。"""
+                    on_done=None,
+                    total_usd: float | None = None) -> list[TaskResult]:
+    """并行跑整个任务集。返回顺序与传入顺序一致。
+
+    total_usd：整批的美元上限。检查发生在**派发之前**，已经在跑的任务
+    放它们跑完 —— 它们的结果是有效数据，中途掐掉等于白花已经花掉的钱。
+    因此超支上界是「并发数 − 1 个任务」的成本，这一点要在 --help 里写明。
+    """
     sem = asyncio.Semaphore(parallel)
+    spent = 0.0
+    lock = asyncio.Lock()
 
     async def one(t: Task) -> TaskResult:
+        nonlocal spent
         async with sem:
+            if total_usd is not None:
+                async with lock:
+                    left = total_usd - spent
+                if left <= 0:
+                    # 记成 error 而不是失败的 verdict：这是评测的调度决策，
+                    # 不是被测系统的成绩。混进比率分母会让修复成功率凭空
+                    # 变低 —— 被测系统替调度背锅。
+                    r = _blank(t.task_id, model, _SKIPPED)
+                    if on_done:
+                        on_done(r)
+                    return r
+                task_config = config.model_copy(
+                    update={"budget_usd": min(config.budget_usd, left)})
+            else:
+                task_config = config
             try:
-                r = await run_task(t, config, model, workdir,
+                r = await run_task(t, task_config, model, workdir,
                                    detector_client=detector_client,
                                    fixer_client=fixer_client)
             except Exception as e:      # 一个任务炸掉不能带走整个 suite
-                r = TaskResult(task_id=t.task_id, model=model,
-                               locate_hit=False, suspect_file=None,
-                               verdict="same", attempts=0, tokens=0,
-                               cost_usd=0.0, violations=0, error=repr(e))
+                r = _blank(t.task_id, model, repr(e))
+            async with lock:
+                spent += r.cost_usd
             if on_done:
                 on_done(r)
             return r

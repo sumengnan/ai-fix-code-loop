@@ -6,7 +6,7 @@ from harness.usage import Usage
 from aifix.config import AifixConfig
 from aifix.eval.runner import (first_attempt_suspect, locate_hit, run_suite,
                                run_task)
-from aifix.eval.task import Task
+from aifix.eval.task import Task, TaskResult
 
 _PATCH = """--- a/calc.py
 +++ b/calc.py
@@ -249,3 +249,83 @@ def test_locate_hit_rejects_naive_string_endswith_false_positive():
     `mine.py` 的任何一段。这条测试锁定实现必须走分段比较，不能退化回
     `str.endswith`。"""
     assert not locate_hit("xmine.py", ["src/aifix/eval/mine.py"])
+
+
+def _bare_task(tid: str) -> Task:
+    """只为调度逻辑服务的任务壳 —— 字段不会被 fake 的 run_task 读到。"""
+    return Task(task_id=tid, repo="/tmp/x", commit="c", base_commit="b",
+                test_files=["tests/t.py"], target_test="tests/t.py::x",
+                gold_files=["a.py"])
+
+
+def _fake_run_task(seen: list, caps: list, cost: float):
+    """造一个花固定钱数的 run_task 替身。
+
+    直接控制「一个任务花多少钱」，而不是让完整修复闭环去算 —— 这几条测的
+    是**调度逻辑**，不该被闭环的成本波动牵着走，也不该为此跑几分钟测试。
+    """
+    async def fake(task, config, model, workdir, **kw):
+        seen.append(task.task_id)
+        caps.append(config.budget_usd)
+        return TaskResult(task_id=task.task_id, model=model, locate_hit=True,
+                          suspect_file="a.py", verdict="better", attempts=1,
+                          tokens=100, cost_usd=cost, violations=0)
+    return fake
+
+
+async def test_suite_budget_stops_dispatching(monkeypatch, tmp_path):
+    """整批额度花完就停止派发；已跑的照常，未跑的记成评测故障。"""
+    import aifix.eval.runner as R
+
+    seen, caps = [], []
+    monkeypatch.setattr(R, "run_task", _fake_run_task(seen, caps, cost=1.0))
+    tasks = [_bare_task(f"t{i}") for i in range(4)]
+    rs = await R.run_suite(tasks, AifixConfig(budget_usd=5.0), "假模型",
+                           tmp_path, parallel=1, total_usd=2.0)
+
+    assert seen == ["t0", "t1"], "花满 2.0 之后不该再派发"
+    assert [r.task_id for r in rs] == ["t0", "t1", "t2", "t3"], "顺序必须保持"
+    assert rs[0].error is None and rs[1].error is None
+    assert all("未运行" in (r.error or "") for r in rs[2:])
+
+
+async def test_skipped_tasks_do_not_count_as_failures(monkeypatch, tmp_path):
+    """跳过的任务不能进比率分母 —— 否则被测系统替调度决策背锅。"""
+    import aifix.eval.runner as R
+    from aifix.eval.score import summarize
+
+    seen, caps = [], []
+    monkeypatch.setattr(R, "run_task", _fake_run_task(seen, caps, cost=1.0))
+    rs = await R.run_suite([_bare_task(f"t{i}") for i in range(3)],
+                           AifixConfig(budget_usd=5.0), "假模型", tmp_path,
+                           parallel=1, total_usd=1.0)
+    s = summarize(rs)
+    assert s.tasks == 1, "只有真跑过的进分母"
+    assert s.errors == 2
+    assert s.fix_rate == 1.0, "跳过的不该把成功率拉低"
+
+
+async def test_per_task_cap_is_clamped_to_remaining(monkeypatch, tmp_path):
+    """最后一个任务只拿得到剩下的钱 —— 不能起一个付不起的活。"""
+    import aifix.eval.runner as R
+
+    seen, caps = [], []
+    monkeypatch.setattr(R, "run_task", _fake_run_task(seen, caps, cost=1.0))
+    await R.run_suite([_bare_task(f"t{i}") for i in range(3)],
+                      AifixConfig(budget_usd=5.0), "假模型", tmp_path,
+                      parallel=1, total_usd=1.5)
+    assert caps == [1.5, 0.5], "第一个被整批剩余压到 1.5，第二个只剩 0.5"
+
+
+async def test_no_suite_budget_leaves_config_untouched(monkeypatch, tmp_path):
+    """不给整批上限时全跑，且不改写每任务额度。"""
+    import aifix.eval.runner as R
+
+    seen, caps = [], []
+    monkeypatch.setattr(R, "run_task", _fake_run_task(seen, caps, cost=99.0))
+    rs = await R.run_suite([_bare_task(f"t{i}") for i in range(3)],
+                           AifixConfig(budget_usd=5.0), "假模型", tmp_path,
+                           parallel=1)
+    assert seen == ["t0", "t1", "t2"]
+    assert caps == [5.0, 5.0, 5.0], "没有整批闸时不该压低每任务额度"
+    assert all(r.error is None for r in rs)
