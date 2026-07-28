@@ -10,12 +10,15 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from .stats import wilson
 from .task import TaskResult
 
 
 class Summary(BaseModel):
     model: str
     tasks: int                  # 有效任务数（不含出错的）
+    locate_hits: int            # 分子。光有比率渲染不出 (12/20)
+    fix_hits: int
     locate_rate: float
     fix_rate: float
     avg_cost_usd: float
@@ -33,14 +36,18 @@ def summarize(results: list[TaskResult]) -> Summary:
     valid = [r for r in results if r.error is None]
     n = len(valid)
     if n == 0:
-        return Summary(model=model, tasks=0, locate_rate=0.0, fix_rate=0.0,
+        return Summary(model=model, tasks=0, locate_hits=0, fix_hits=0,
+                       locate_rate=0.0, fix_rate=0.0,
                        avg_cost_usd=0.0, avg_tokens=0.0, avg_attempts=0.0,
                        violations=sum(r.violations for r in results),
                        errors=len(results) - n)
+    locate_hits = sum(r.locate_hit for r in valid)
+    fix_hits = sum(r.verdict == "better" for r in valid)
     return Summary(
         model=model, tasks=n,
-        locate_rate=sum(r.locate_hit for r in valid) / n,
-        fix_rate=sum(r.verdict == "better" for r in valid) / n,
+        locate_hits=locate_hits, fix_hits=fix_hits,
+        locate_rate=locate_hits / n,
+        fix_rate=fix_hits / n,
         avg_cost_usd=sum(r.cost_usd for r in valid) / n,
         avg_tokens=sum(r.tokens for r in valid) / n,
         avg_attempts=sum(r.attempts for r in valid) / n,
@@ -68,15 +75,29 @@ def _cost_cell(s: Summary) -> str:
     return f"${s.avg_cost_usd:.4f}"
 
 
+def _rate_cell(hits: int, n: int) -> str:
+    """比率、分数、95% 区间一起给。
+
+    只给比率会让 1/1 的 100% 和 12/20 的 60% 长得一样重 —— M3 那张只有一个
+    样本的对比表就是这么被读成结论的。n = 0 时不渲染任何数字：0% 会被读成
+    「一个都没修好」，而真相是「一个有效任务都没有」。
+    """
+    if n <= 0:
+        return "—"
+    lo, hi = wilson(hits, n)
+    return f"{hits / n:.0%} ({hits}/{n}, 95%CI {lo:.0%}–{hi:.0%})"
+
+
 def render_table(summaries: list[Summary]) -> str:
     lines = [
-        "| 模型 | 任务数 | 定位准确率 | 修复成功率 | 平均成本 | 平均 tokens |"
-        " 平均尝试 | 越界尝试 | 评测故障 |",
+        "| 模型 | 任务数 | 定位准确率（分数, 95%CI） | 修复成功率（分数, 95%CI）"
+        " | 平均成本 | 平均 tokens | 平均尝试 | 越界尝试 | 评测故障 |",
         "|---|---|---|---|---|---|---|---|---|",
     ]
     for s in summaries:
         lines.append(
-            f"| {s.model} | {s.tasks} | {s.locate_rate:.0%} | {s.fix_rate:.0%}"
+            f"| {s.model} | {s.tasks} | {_rate_cell(s.locate_hits, s.tasks)}"
+            f" | {_rate_cell(s.fix_hits, s.tasks)}"
             f" | {_cost_cell(s)} | {s.avg_tokens:,.0f} | {s.avg_attempts:.1f}"
             f" | {s.violations} | {s.errors} |")
     return "\n".join(lines) + "\n"

@@ -95,6 +95,28 @@ def test_cost_column_width_matches_across_rows():
     assert "$0.0000" in md, md
 
 
+def test_table_shows_fraction_and_interval():
+    """1/1 的 100% 必须在表格里就能看出「只有一个样本」。"""
+    r = TaskResult(task_id="t", model="m", locate_hit=True, suspect_file="a.py",
+                   verdict="better", attempts=1, tokens=10, cost_usd=0.1,
+                   violations=0)
+    table = render_table([summarize([r])])
+    assert "100% (1/1" in table
+    assert "21%" in table          # Wilson 下界，见 stats.wilson(1,1)
+    # 反向钉死：不能只显示一个光秃秃的 100%
+    assert "| 100% |" not in table
+
+
+def test_zero_valid_tasks_renders_dash_not_zero_percent():
+    """全是评测故障时，比率没有意义，不能显示 0%（会被读成「一个都没修好」）。"""
+    r = TaskResult(task_id="t", model="m", locate_hit=False, suspect_file=None,
+                   verdict="same", attempts=0, tokens=0, cost_usd=0.0,
+                   violations=0, error="克隆失败")
+    table = render_table([summarize([r])])
+    assert "0%" not in table
+    assert "—" in table
+
+
 def test_table_marks_error_count():
     """评测故障要单列出来 —— 不进分母，但也不能藏起来。"""
     s = summarize([_r(), _r(error="炸了")])
