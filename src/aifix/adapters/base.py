@@ -29,6 +29,12 @@ class SourceCandidate:
 @dataclass(frozen=True)
 class FailureSet:
     failures: dict[str, Failure]
+    # 报告里真正跑出结果的用例（通过 + 失败，不含 skipped）。
+    # 「不在 failures 里」有三种可能：通过了、被删了、被跳过了。核心循环
+    # 只关心第一种，所以一直不需要区分；但挖任务时把后两种当成「红转绿」
+    # 会造出无人能通过的假任务，必须能分辨。默认空集 —— 手工构造
+    # FailureSet 的既有调用点（verify_node）用不到这个信息。
+    ran: frozenset[str] = frozenset()
 
     @property
     def ids(self) -> set[str]:

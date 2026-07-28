@@ -56,6 +56,33 @@ def test_wall_clock_not_checked_before_start():
     assert b.exhausted() is None
 
 
+def test_exhaustion_reports_the_kind():
+    """种类要能与消息分开取：token / 美元归模型，墙钟归评测调度器。"""
+    b = RunBudget(total_tokens=1_000, total_usd=2.0, total_seconds=600)
+    assert b.exhaustion() is None
+    b.charge(tokens=1_000, usd=0.0)
+    assert b.exhaustion()[0] == "tokens"
+
+    b2 = RunBudget(total_tokens=100_000, total_usd=0.5, total_seconds=600)
+    b2.charge(tokens=10, usd=0.5)
+    assert b2.exhaustion()[0] == "usd"
+
+    clock = iter([0.0, 700.0])
+    b3 = RunBudget(total_tokens=100_000, total_usd=2.0, total_seconds=600,
+                   clock=lambda: next(clock))
+    b3.start()
+    kind, msg = b3.exhaustion()
+    assert kind == "wall"
+    assert msg == "时间预算耗尽：700s / 600s"
+
+
+def test_exhausted_still_returns_just_the_message():
+    """cli.run_once 在用 exhausted() 的返回值，语义不能变。"""
+    b = RunBudget(total_tokens=1_000, total_usd=2.0, total_seconds=600)
+    b.charge(tokens=1_000, usd=0.0)
+    assert b.exhausted() == b.exhaustion()[1]
+
+
 def test_spent_accessors():
     b = RunBudget(total_tokens=100_000, total_usd=2.0, total_seconds=600)
     b.charge(tokens=1_200, usd=0.05)

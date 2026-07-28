@@ -42,6 +42,10 @@ class AifixState(TypedDict, total=False):
 
     results: list[dict[str, Any]]
     abort: str | None
+    # 中止的**种类**（budget.exhaustion 的取值：tokens / usd / wall；熔断为
+    # None）。abort 是给人看的消息，种类是给程序判的：评测要据此区分
+    # 「模型没在预算内修好」（成绩）与「评测调度器的墙钟耗尽」（故障）。
+    abort_kind: str | None
     report_md: str
 
     # baseline 解析出的 Failure 对象，按 test_id 索引。
@@ -61,7 +65,7 @@ def new_state(repo: Path, config: AifixConfig, run_id: str) -> AifixState:
         flaky_filtered=[], confirmed_regressions=[], consecutive_failures=0,
         failure_token_budget=0,
         spent_usd=0.0, spent_tokens=0,
-        results=[], abort=None,
+        results=[], abort=None, abort_kind=None,
     )
 
 

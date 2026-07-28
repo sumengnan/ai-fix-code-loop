@@ -52,6 +52,35 @@ def test_multiple_report_files_merged(tmp_path):
     assert len(fs.ids) == 3
 
 
+_XML_SKIP = '''<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testsuite name="pytest" tests="2" failures="0" errors="0" skipped="1">
+    <testcase classname="tests.test_calc" name="test_identity" file="tests/test_calc.py" line="8" time="0.01"/>
+    <testcase classname="tests.test_calc" name="test_skipped" file="tests/test_calc.py" line="12" time="0.0">
+      <skipped message="要 numpy" type="pytest.skip"/>
+    </testcase>
+  </testsuite>
+</testsuites>
+'''
+
+
+def test_ran_covers_passed_and_failed(tmp_path):
+    """挖任务要区分「跑了但通过」与「压根没跑」：后者不是红转绿。"""
+    fs = parse_junit([_write(tmp_path)], lambda c, n, f: f"{c}::{n}")
+    assert fs.ran == {"tests.test_calc::test_add", "tests.test_calc::test_boom",
+                      "tests.test_calc::test_identity"}
+
+
+def test_ran_excludes_skipped(tmp_path):
+    """被跳过的用例既不失败也不算跑过 —— 红转跳过不是红转绿。"""
+    p = tmp_path / "skip.xml"
+    p.write_text(_XML_SKIP, encoding="utf-8")
+    fs = parse_junit([p], lambda c, n, f: f"{c}::{n}")
+    assert fs.ran == {"tests.test_calc::test_identity"}
+    assert fs.ids == set()
+
+
 def test_missing_file_is_ignored(tmp_path):
     fs = parse_junit([tmp_path / "nope.xml"], lambda c, n, f: f"{c}::{n}")
     assert fs.ids == set()
+    assert fs.ran == set()

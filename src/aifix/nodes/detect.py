@@ -38,13 +38,15 @@ async def detect_node(state: AifixState, client: Any = None) -> dict[str, Any]:
     trace = trace_of(state)
     trace.record_events(outcome.events)
     if diagnosis is not None:
-        # 模型点名的文件是否在 locate_source 的候选里 —— 评测直接取这条，
-        # 不必为「定位准确率」单独埋点。
+        # 模型点名的文件是否落在 traceback 指出的候选里。
+        # 这不是规格 §9 的 locate_hit —— 那个对 ground truth 判定，由评测
+        # 计算。两者是不同的集合：异常常在下游抛出而缺陷在上游。共用一个
+        # 名字会让评测悄悄量成「模型有没有照抄 traceback」。
         hit = any(c.path == diagnosis.suspect_file for c in candidates)
-        trace.fact("locate_hit", hit)
+        trace.fact("suspect_in_traceback", hit)
         trace.fact("suspect_file", diagnosis.suspect_file)
     else:
-        trace.fact("locate_hit", False)
+        trace.fact("suspect_in_traceback", False)
         trace.fact("diagnosis_parse_failed", True)
     return {
         "diagnosis": diagnosis.model_dump() if diagnosis else None,

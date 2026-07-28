@@ -17,22 +17,28 @@ def parse_junit(paths: Iterable[Path], make_test_id: MakeTestId) -> FailureSet:
     （pytest 给的是点分模块名，重跑要的是文件路径形式）。
     """
     failures: dict[str, Failure] = {}
+    ran: set[str] = set()
     for path in paths:
         if not Path(path).is_file():
-            continue                      # 报告缺失（如测试进程崩溃）不算解析错误
+            # 报告缺失（如测试进程崩溃）不算解析错误。调用方若需要区分
+            # 「跑完了、全绿」与「压根没跑成」，用 run_full_suite 的
+            # require_report=True。
+            continue
         root = ET.parse(path).getroot()
         for case in root.iter("testcase"):
-            # 注意：Element 无子元素时为 falsy，必须显式与 None 比较
-            bad = case.find("failure")
-            if bad is None:
-                bad = case.find("error")
-            if bad is None:
-                continue
             classname = case.get("classname", "")
             name = case.get("name", "")
             file = case.get("file")
             raw_line = case.get("line")
             test_id = make_test_id(classname, name, file)
+            # 注意：Element 无子元素时为 falsy，必须显式与 None 比较
+            if case.find("skipped") is None:
+                ran.add(test_id)
+            bad = case.find("failure")
+            if bad is None:
+                bad = case.find("error")
+            if bad is None:
+                continue
             failures[test_id] = Failure(
                 test_id=test_id,
                 classname=classname,
@@ -42,4 +48,4 @@ def parse_junit(paths: Iterable[Path], make_test_id: MakeTestId) -> FailureSet:
                 file=file,
                 line=int(raw_line) if raw_line and raw_line.isdigit() else None,
             )
-    return FailureSet(failures)
+    return FailureSet(failures, ran=frozenset(ran))
