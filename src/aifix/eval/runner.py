@@ -9,7 +9,7 @@ import asyncio
 import hashlib
 import json
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..cli import run_once
@@ -57,6 +57,65 @@ def first_attempt_suspect(facts: list[dict[str, Any]]) -> str | None:
                 None)
 
 
+def _path_parts(path: str) -> tuple[str, ...]:
+    """把路径规整成 POSIX 分段序列，供后缀匹配用。
+
+    仓库里的路径都是 git 产出的 POSIX 形式，但模型给出的 suspect_file 可能带
+    `./` 前缀或 `\\` 分隔符（尤其是习惯 Windows 风格的模型）。先统一分隔符、
+    去掉前导 `./`，再切分，两侧才能在同一套坐标系里比较。
+    """
+    normalized = path.replace("\\", "/")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    return PurePosixPath(normalized).parts
+
+
+def locate_hit(suspect: str | None, gold_files: list[str]) -> bool:
+    """判定 suspect_file 是否定位到了 gold_files 里的某个文件。
+
+    起因：M3 跨模型评测第一次真跑，deepseek-v4-pro 与 deepseek-v4-flash 的
+    定位准确率都被判成 0%。看明细，两个模型给出的 suspect_file 是模块路径
+    形式（`aifix/eval/mine.py`），gold_files 是仓库路径形式（`src/aifix/
+    eval/mine.py`）——两者其实是同一个文件，只是少了一段 `src/` 前缀，旧的
+    判定是裸字符串相等（`suspect in task.gold_files`），于是两个模型都答对
+    了却都被计成没命中。定位准确率对应规格 §9 里 Detector 的能力，是跨模型
+    对比的核心指标之一；如果判定依赖模型的路径书写习惯，这一列衡量的就不
+    是定位能力，而是书写风格——习惯写模块路径的模型会被系统性地打成 0
+    分，这在跨模型对比里是不能接受的。
+
+    因此改成「路径分段后缀匹配」：两条路径各自按 `/` 切成分段序列，其中一
+    个序列是另一个的后缀（不论谁更长），就算命中。
+
+    为什么必须按分段比、不能用裸字符串 `endswith`：`"b/mine.py".endswith(
+    "mine.py")` 和 `"xmine.py".endswith("mine.py")` 都是 True，但后者是把
+    `"mine.py"` 从字符中间截出来的假阳性，`xmine.py` 根本不是同一个文件名。
+    按分段比较，`xmine.py` 整段就不等于 `mine.py`，不会有这种误判。
+
+    为什么不放宽到「只比文件名」：那样 `other/mine.py` 也会命中 `src/
+    aifix/eval/mine.py`，仅仅因为文件名相同、目录完全对不上——指标会被
+    「蒙对文件名」的运气稀释，跨模型对比就失去区分度了。只报裸文件名（不
+    带任何目录）的情况之所以命中，是因为它本身就是「分段序列长度为 1 的
+    后缀」，符合同一条规则，不是放宽出的特例。
+    """
+    if not suspect:
+        return False
+    suspect_parts = _path_parts(suspect)
+    if not suspect_parts:
+        return False
+    for gold in gold_files:
+        if not gold:
+            continue
+        gold_parts = _path_parts(gold)
+        if not gold_parts:
+            continue
+        shorter, longer = ((suspect_parts, gold_parts)
+                           if len(suspect_parts) <= len(gold_parts)
+                           else (gold_parts, suspect_parts))
+        if longer[len(longer) - len(shorter):] == shorter:
+            return True
+    return False
+
+
 async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
                    detector_client: Any = None,
                    fixer_client: Any = None) -> TaskResult:
@@ -86,8 +145,10 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
 
     result = TaskResult(
         task_id=task.task_id, model=model,
-        # 规格 §9 的定义：对 ground truth 判，不是对 traceback 判
-        locate_hit=suspect in task.gold_files if suspect else False,
+        # 规格 §9 的定义：对 ground truth 判，不是对 traceback 判。命中判定
+        # 见 locate_hit() 的 docstring —— 裸字符串相等会把「模块路径 vs 仓
+        # 库路径」这种书写风格差异算成没命中，跨模型对比里不能有这种偏差。
+        locate_hit=locate_hit(suspect, task.gold_files),
         suspect_file=suspect,
         verdict=row["verdict"] if row else "same",
         # 没有 results 行 = 中止发生在两轮之间（verify_node 只在 better 或

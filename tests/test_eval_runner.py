@@ -4,7 +4,8 @@ from harness.llm.base import StreamChunk, ToolCallDelta
 from harness.usage import Usage
 
 from aifix.config import AifixConfig
-from aifix.eval.runner import first_attempt_suspect, run_suite, run_task
+from aifix.eval.runner import (first_attempt_suspect, locate_hit, run_suite,
+                               run_task)
 from aifix.eval.task import Task
 
 _PATCH = """--- a/calc.py
@@ -192,3 +193,59 @@ async def test_suite_preserves_order(history_repo, tmp_path):
                          detector_client=_Scripted([_text(_DIAG)]),
                          fixer_client=_fixer())
     assert [r.task_id for r in rs] == ["t0", "t1", "t2"]
+
+
+# locate_hit：M3 跨模型评测第一次真跑，deepseek-v4-pro 与 deepseek-v4-flash
+# 都把定位准确率判成了 0% —— 两个模型给出的 suspect_file 是模块路径形式
+# （`aifix/eval/mine.py`），gold_files 是仓库路径形式（`src/aifix/eval/
+# mine.py`），两者其实指向同一个文件，裸字符串相等的旧判定却算作没命中。
+# 下面这组测试锁定「路径分段后缀匹配」的语义，防止再退化回裸字符串比较。
+
+def test_locate_hit_module_path_vs_repo_path():
+    """模型写模块路径（少一段 src/ 前缀），gold 是仓库路径——应命中。"""
+    assert locate_hit("aifix/eval/mine.py", ["src/aifix/eval/mine.py"])
+
+
+def test_locate_hit_bare_filename_counts_as_located():
+    """模型只报文件名——分段序列长度为 1，仍是 gold 路径的后缀，应命中。"""
+    assert locate_hit("mine.py", ["src/aifix/eval/mine.py"])
+
+
+def test_locate_hit_is_symmetric():
+    """suspect 比 gold 更长时也要能命中，不能假设 gold 总是更长的那一边。"""
+    assert locate_hit("src/aifix/eval/mine.py", ["aifix/eval/mine.py"])
+
+
+def test_locate_hit_different_filename_misses():
+    assert not locate_hit("eval/mine.py", ["src/aifix/eval/task.py"])
+
+
+def test_locate_hit_same_filename_different_dir_misses():
+    """目录对不上不能只靠文件名撞对——否则指标会被文件名撞车稀释。"""
+    assert not locate_hit("other/mine.py", ["src/aifix/eval/mine.py"])
+
+
+def test_locate_hit_none_suspect_misses():
+    assert not locate_hit(None, ["src/aifix/eval/mine.py"])
+
+
+def test_locate_hit_empty_suspect_misses():
+    assert not locate_hit("", ["src/aifix/eval/mine.py"])
+
+
+def test_locate_hit_empty_gold_entry_is_ignored():
+    assert not locate_hit("mine.py", [""])
+
+
+def test_locate_hit_leading_dot_slash_is_normalized():
+    """模型可能带 `./` 前缀，两侧都要先规整掉再比较分段。"""
+    assert locate_hit("./aifix/eval/mine.py", ["src/aifix/eval/mine.py"])
+    assert locate_hit("aifix/eval/mine.py", ["./src/aifix/eval/mine.py"])
+
+
+def test_locate_hit_rejects_naive_string_endswith_false_positive():
+    """裸字符串 endswith 会把 `xmine.py` 误判成命中 `mine.py`（前缀被截断
+    到字符中间）——按路径分段比较则不会，因为 `xmine.py` 整段都不等于
+    `mine.py` 的任何一段。这条测试锁定实现必须走分段比较，不能退化回
+    `str.endswith`。"""
+    assert not locate_hit("xmine.py", ["src/aifix/eval/mine.py"])
