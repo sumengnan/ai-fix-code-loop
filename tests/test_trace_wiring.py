@@ -82,7 +82,7 @@ async def test_detect_records_traceback_miss(buggy_repo, tmp_path):
 
 
 async def test_detect_records_parse_failure(buggy_repo, tmp_path):
-    """模型没吐出合法 JSON 时也要留痕，否则 locate_hit 的分母不可信。"""
+    """模型没吐出合法 JSON 时也要留痕，否则 suspect_in_traceback 的分母不可信。"""
     with Worktree(buggy_repo, run_id="r1") as wt:
         trace = RunTrace(tmp_path, run_id="r1")
         st = _state(buggy_repo, wt, trace, "")
