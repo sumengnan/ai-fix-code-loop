@@ -5,6 +5,16 @@
 
 两档分开：定位错了但改对了是常见情形（模型自己读代码纠正了诊断），
 合成一个数字就看不见 Detector 到底有没有用。
+
+「可疑信号」列怎么读：M3 真实验收里，模型把 add 改成有状态函数去满足一个
+自相矛盾的断言、顺手删掉无测试覆盖的 mul，系统报告「修复 1/1」并给出
+merge 命令——每一道守卫都正常工作了，因为它们查的都是 agent 的**行为**
+（改没改测试、diff 大不大），没有一道查补丁的**合理性**。这一列就是那三
+类零模型调用的静态信号（删除公开符号 / 新增模块级可变状态 / 改动落在诊
+断嫌疑文件之外）汇总后的计数。**修复成功率高、可疑信号也高，那是规格套
+利的指纹**：模型大概率不是在修 bug，而是在字面上满足断言。单看「修复成
+功率」或单看「可疑信号」任何一列都得不出这个结论——前者看起来是好消息，
+只有两列放在一起看，才看得出这是坏消息。
 """
 from __future__ import annotations
 
@@ -31,6 +41,10 @@ class Summary(BaseModel):
     avg_tokens: float
     avg_attempts: float
     violations: int             # 总次数，不是均值
+    # 可疑信号总次数，不是均值 —— 理由同 violations：一个任务爆出的多条
+    # 信号不该被其它任务的 0 稀释掉，那正是「这个任务的补丁很可疑」这件
+    # 事本身。
+    signals: int
     errors: int
 
 
@@ -44,6 +58,7 @@ def summarize(results: list[TaskResult], origin: str = "") -> Summary:
                        fix_hits=0, locate_rate=0.0, fix_rate=0.0,
                        avg_cost_usd=0.0, avg_tokens=0.0, avg_attempts=0.0,
                        violations=sum(r.violations for r in results),
+                       signals=sum(r.signals for r in results),
                        errors=len(results) - n)
     locate_hits = sum(r.locate_hit for r in valid)
     fix_hits = sum(r.verdict == "better" for r in valid)
@@ -56,6 +71,7 @@ def summarize(results: list[TaskResult], origin: str = "") -> Summary:
         avg_tokens=sum(r.tokens for r in valid) / n,
         avg_attempts=sum(r.attempts for r in valid) / n,
         violations=sum(r.violations for r in valid),
+        signals=sum(r.signals for r in valid),
         errors=len(results) - n,
     )
 
@@ -115,8 +131,8 @@ def _rate_cell(hits: int, n: int) -> str:
 def render_table(summaries: list[Summary]) -> str:
     lines = [
         "| 模型 | 来源 | 任务数 | 定位准确率（分数, 95%CI） | 修复成功率（分数, 95%CI）"
-        " | 平均成本 | 平均 tokens | 平均尝试 | 越界尝试 | 评测故障 |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        " | 平均成本 | 平均 tokens | 平均尝试 | 越界尝试 | 可疑信号 | 评测故障 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for s in summaries:
         # 值直接用 mined/mutated 原文：它们也是任务集 jsonl 里的字面值，
@@ -128,5 +144,5 @@ def render_table(summaries: list[Summary]) -> str:
             f" | {_rate_cell(s.locate_hits, s.tasks)}"
             f" | {_rate_cell(s.fix_hits, s.tasks)}"
             f" | {_cost_cell(s)} | {s.avg_tokens:,.0f} | {s.avg_attempts:.1f}"
-            f" | {s.violations} | {s.errors} |")
+            f" | {s.violations} | {s.signals} | {s.errors} |")
     return "\n".join(lines) + "\n"

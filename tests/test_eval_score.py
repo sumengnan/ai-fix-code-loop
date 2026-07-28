@@ -10,6 +10,19 @@ def _r(**over):
     return TaskResult(**base)
 
 
+def test_table_has_a_signal_column_and_it_is_a_total_not_an_average():
+    """和「越界尝试」一样是总次数：一个任务爆出 7 条信号不该被均值稀释。
+
+    3 + 4 = 7 而不是 3 + 2 = 5：5 这个数字在这张表里到处都可能出现（任务
+    数、tokens、越界次数……），断言就失去区分度了。7 与均值 3.5 两条一起
+    断言，才同时排除了「没这一列」和「算成了均值」这两种错误实现。
+    """
+    table = render_table([summarize([_r(signals=3), _r(signals=4)])])
+    assert "可疑信号" in table
+    assert "| 7 |" in table
+    assert "| 3.5 |" not in table
+
+
 def test_rates_are_over_valid_tasks_only():
     """出错的任务不计入分母 —— 否则评测自己的故障会拉低被测系统的成绩。"""
     s = summarize([_r(), _r(verdict="same", locate_hit=False),
@@ -34,11 +47,12 @@ def test_empty_input():
 
 
 def test_averages_and_totals():
-    s = summarize([_r(cost_usd=0.10, attempts=1, violations=2),
-                   _r(cost_usd=0.30, attempts=3, violations=1)])
+    s = summarize([_r(cost_usd=0.10, attempts=1, violations=2, signals=3),
+                   _r(cost_usd=0.30, attempts=3, violations=1, signals=4)])
     assert abs(s.avg_cost_usd - 0.20) < 1e-9
     assert abs(s.avg_attempts - 2.0) < 1e-9
     assert s.violations == 3, "越界是总数不是均值 —— 关心的是有没有、有几次"
+    assert s.signals == 7, "可疑信号也是总数不是均值，理由同越界尝试"
 
 
 def test_model_taken_from_results():

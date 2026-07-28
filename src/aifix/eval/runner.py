@@ -121,6 +121,12 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
     facts = _read_facts(dest, run_id)
     suspect = first_attempt_suspect(facts)
     violations = sum(1 for f in facts if f.get("key") == "violation")
+    # 按 fact 条数记，不按 value 展开：files_outside_suspect 的 value 是
+    # 一个文件列表，若按列表长度算，「一次改动动了 20 个文件」会把这一列
+    # 冲爆到几十，掩盖掉另外两类信号——三类各出没出现过一次，比出现的
+    # 文件数量更能说明问题，且不会被单个信号的规模稀释或放大。
+    signals = sum(1 for f in facts if f.get("key") in (
+        "removed_public_symbol", "new_module_state", "files_outside_suspect"))
     row = next((r for r in state["results"]
                 if r["test_id"] == task.target_test), None)
 
@@ -141,6 +147,7 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
                   else max(state.get("attempt", 0) - 1, 0)),
         tokens=state["spent_tokens"], cost_usd=state["spent_usd"],
         violations=violations,
+        signals=signals,
         abort_reason=(row or {}).get("abort_reason") or state.get("abort"),
         origin=task.origin,
     )

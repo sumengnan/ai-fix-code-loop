@@ -95,6 +95,33 @@ async def test_baseline_not_reproduced_is_an_error_not_a_failure(
     assert "复现" in r.error
 
 
+async def test_task_result_counts_signals_from_facts(
+        history_repo, tmp_path, monkeypatch):
+    """信号条数从 facts.jsonl 数出来 —— 和 violations 同一条路径。
+
+    files_outside_suspect 这条 fact 的 value 是列表（这里放了 3 个文件），
+    若按列表长度记就会把总数从 3 撑到 5——「改了一堆文件」这一种情形会把
+    这一列冲爆，掩盖掉「到底出现了几类信号」。所以必须按 fact 条数记：
+    三类信号各出现一次，无论 files_outside_suspect 里有多少个文件，都只
+    算一条。
+    """
+    import aifix.eval.runner as R
+
+    facts = [
+        {"key": "suspect_file", "value": "calc.py", "attempt": 1},
+        {"key": "removed_public_symbol", "value": "mul", "attempt": 1},
+        {"key": "new_module_state", "value": "_CACHE", "attempt": 1},
+        {"key": "files_outside_suspect", "value": ["a.py", "b.py", "c.py"],
+         "attempt": 1},
+    ]
+    monkeypatch.setattr(R, "_read_facts", lambda *a, **kw: facts)
+    r = await run_task(_task(history_repo), AifixConfig(), "假模型",
+                       tmp_path / "w",
+                       detector_client=_Scripted([_text(_DIAG)]),
+                       fixer_client=_fixer())
+    assert r.signals == 3
+
+
 async def test_run_task_result_carries_task_origin(history_repo, tmp_path):
     """origin 要跟着 task 走，不能被写死成 mined —— 否则变异任务的统计
     会被并进挖掘任务里，抵消掉「按来源分行」的意义。"""
