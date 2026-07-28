@@ -173,6 +173,47 @@ def test_commit_is_quiet_when_the_files_equal_head(buggy_repo):
         assert _git(wt.path, "rev-parse", "HEAD").strip() == before
 
 
+def test_commit_returns_true_only_when_a_commit_was_really_produced(
+        buggy_repo, fixed_source):
+    """返回值就是「交付分支上到底多没多一个提交」—— 判定侧唯一能信的答案。"""
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        before = _git(wt.path, "rev-parse", "HEAD").strip()
+        (wt.path / "calc.py").write_text(fixed_source, encoding="utf-8")
+        assert wt.commit("fix: x", paths=["calc.py"]) is True
+        assert _git(wt.path, "rev-parse", "HEAD").strip() != before
+
+
+def test_commit_returns_false_when_the_files_equal_head(buggy_repo):
+    """补丁被自己的反向补丁抵消：路径都在、内容与 HEAD 逐字相同。
+
+    这不是错误（所以不抛），但它**没有交付**，调用方必须能分辨 ——
+    否则报告照写「已修复」，而交付分支上一个提交都没有。
+    """
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        assert wt.commit("fix: x", paths=["calc.py"]) is False
+
+
+def test_commit_returns_false_with_empty_paths(buggy_repo):
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        assert wt.commit("fix: x", paths=[]) is False
+
+
+def test_commit_returns_true_for_a_new_untracked_file(buggy_repo):
+    """新建文件也是**真的交付了** —— 区分度：`git diff` 看不见未跟踪文件。
+
+    拿 `git diff` 当「有没有改动」的判据，这一条会返回 False：模型新建一个
+    源文件是完全合法的修复，却被判成「什么都没做」而降级、回滚。那比现在的
+    洞更糟 —— 现在只是多报一次修复，那样是把真修复扔掉。
+    """
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        (wt.path / "helper.py").write_text("def h():\n    return 1\n",
+                                           encoding="utf-8")
+        assert wt.has_changes() is False        # git diff 眼里「什么都没变」
+        assert wt.commit("feat: helper", paths=["helper.py"]) is True
+        assert "helper.py" in _git(wt.path, "ls-tree", "-r", "--name-only",
+                                   "HEAD")
+
+
 def test_commit_reports_the_offending_path(buggy_repo):
     """报错里必须带上那条路径，否则人拿到的是一句无从下手的「提交失败」。"""
     with Worktree(buggy_repo, run_id="abc123") as wt:

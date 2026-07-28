@@ -68,17 +68,10 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
     # 放任不管的话：commit(paths=[]) 是空操作、worktree 随后被删、报告却写
     # 「已修复」—— 系统宣称修好了一个它没碰过的 bug，这会直接击穿
     # 「只有 verify 有资格说修好了」这条主张。
-    if verdict is Verdict.BETTER and not (state.get("touched") or []):
+    touched = state.get("touched") or []
+    if verdict is Verdict.BETTER and not touched:
         verdict = Verdict.SAME
         trace.fact("baseline_flaky", target)
-
-    trace.fact("verdict", verdict.value)
-    if flaky:
-        trace.fact("flaky_filtered", sorted(flaky))
-    if confirmed:
-        trace.fact("confirmed_regressions", sorted(confirmed))
-    if verdict is not Verdict.BETTER:
-        trace.fact("rollback", True)
 
     # 信号必须在 commit / rollback 之前算：那时补丁还在工作区，旧内容只能
     # 从 HEAD 拿；rollback 之后新内容就没了，commit 之后 HEAD 就是新内容。
@@ -89,9 +82,34 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
         f = worktree_path / p
         return f.read_text(encoding="utf-8") if f.is_file() else None
 
-    touched = state.get("touched") or []
     sig = analyze({p: (wt.file_at_head(p), _now(p)) for p in touched},
                   suspect=(state.get("diagnosis") or {}).get("suspect_file"))
+
+    # commit 提到这里（而不是留在下面的 BETTER 分支里）：**它的返回值参与判
+    # 定**，所以必须发生在写 verdict / 信号那几条 fact 之前，否则 facts.jsonl
+    # 里会先写下一个随后被推翻的 better，被丢弃的补丁也会被记成交付。
+    #
+    # 判据是「提交有没有真的产生」，不是提前用 git diff 去猜：这个系统里唯一
+    # 有资格回答「分支上有没有东西」的是 git 自己。git diff 看不见未跟踪文件，
+    # 而新建一个源文件是完全合法的修复 —— 按 diff 判会把它误降级成 SAME，那
+    # 是比多报一次修复更糟的回归（真修复连同报告一起被扔掉）。
+    #
+    # 上面那道 touched 守卫仍然保留：它更早、更便宜，且在 commit 之前就能挡
+    # 住「一个字节都没碰」。这一道管的是另一件事 —— 碰了，但补丁被自己的反向
+    # 补丁抵消了，touched 非空而暂存区为空。两者的 fact 分开记：复盘要区分的
+    # 是模型的行为，不是判定的结果。
+    if verdict is Verdict.BETTER and not wt.commit(f"fix: {target}",
+                                                   paths=touched):
+        verdict = Verdict.SAME
+        trace.fact("patch_cancelled_out", target)
+
+    trace.fact("verdict", verdict.value)
+    if flaky:
+        trace.fact("flaky_filtered", sorted(flaky))
+    if confirmed:
+        trace.fact("confirmed_regressions", sorted(confirmed))
+    if verdict is not Verdict.BETTER:
+        trace.fact("rollback", True)
 
     # 信号只对**真正交付的补丁**负责。判 BETTER 才写这三条 fact，因为只有
     # 这一支会 commit 进交付分支；SAME / WORSE 的补丁下面就被 rollback 丢
@@ -137,8 +155,10 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
               # 信号只标注，不参与判定 —— 三态判定仍然只看测试结果。
               "signals": signals}
 
+    # 提交已在上面发生（判定要用它的结果）。降级过的 verdict 到这里只剩一条
+    # SAME 通路：consecutive_failures 递增、attempt 递增或记终局、rollback，
+    # 全部与「本来就没修好」共用同一段代码 —— 并行写两套只会各自漂移。
     if verdict is Verdict.BETTER:
-        wt.commit(f"fix: {target}", paths=state.get("touched") or [])
         results.append({"test_id": target, "verdict": verdict.value,
                         "attempts": state["attempt"], "abort_reason": None})
         return {"verdict": verdict.value, "current": None, "attempt": 0,

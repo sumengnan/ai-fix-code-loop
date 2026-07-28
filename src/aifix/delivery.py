@@ -72,8 +72,8 @@ class Worktree:
         res = _git(self.path, "show", f"HEAD:{path}")
         return res.stdout if res.returncode == 0 else None
 
-    def commit(self, message: str, paths: list[str]) -> None:
-        """只提交 `paths` 里明确列出的文件。
+    def commit(self, message: str, paths: list[str]) -> bool:
+        """只提交 `paths` 里明确列出的文件，返回**是否真的产生了提交**。
 
         绝不用 `git add -A`：worktree 里跑测试会产生未跟踪产物
         （__pycache__、覆盖率文件、日志……），全扫进去会污染交付分支。
@@ -91,9 +91,13 @@ class Worktree:
         交」—— 而在**暂存结果**：add 报错说明路径本身有问题，add 成功却什么
         都没暂存说明文件真的没变。所以按 add 的退出码判失败，按暂存区判要不
         要提交，commit 的非 0 退出只剩真正的意外。
+
+        返回值就是「交付分支上到底多没多一个提交」，判定侧据此决定要不要说
+        「已修复」。它必须由 git 来回答：调用方提前用 `git diff` 猜会漏掉新增
+        文件（diff 看不见未跟踪文件），而新建一个源文件是合法的修复。
         """
         if not paths:
-            return
+            return False
         added = _git(self.path, "add", "--", *paths)
         if added.returncode != 0:
             raise RuntimeError(
@@ -101,9 +105,10 @@ class Worktree:
                 f"{added.stderr.strip() or added.stdout.strip()}")
         staged = _git(self.path, "diff", "--cached", "--name-only")
         if not staged.stdout.strip():
-            return
+            return False
         res = _git(self.path, "commit", "-q", "-m", message)
         if res.returncode != 0:
             raise RuntimeError(
                 f"交付失败：git commit 未能提交 {'、'.join(paths)} —— "
                 f"{res.stderr.strip() or res.stdout.strip()}")
+        return True
