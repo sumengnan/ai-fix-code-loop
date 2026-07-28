@@ -59,7 +59,7 @@ async def test_artifacts_written(buggy_repo):
     assert state["results"][0]["verdict"] == "better"
 
 
-async def test_facts_contain_verdict_and_locate_hit(buggy_repo):
+async def test_facts_contain_verdict_and_suspect(buggy_repo):
     await run_once(
         buggy_repo, AifixConfig(), run_id="art2",
         detector_client=_Scripted([_text(_DIAG)]),
@@ -68,7 +68,7 @@ async def test_facts_contain_verdict_and_locate_hit(buggy_repo):
     keys = {json.loads(x)["key"] for x in
             (d / "facts.jsonl").read_text(encoding="utf-8").splitlines()}
     assert "verdict" in keys
-    assert "locate_hit" in keys
+    assert "suspect_in_traceback" in keys
     assert "diff_lines" in keys
     assert "baseline_failures" in keys
 

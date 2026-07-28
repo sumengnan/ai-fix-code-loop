@@ -333,7 +333,8 @@ OpenTelemetry span 天然嵌套，**app 层只要在对的位置开 span，框�
 | `aifix.rollback` | attempt | 本轮是否回滚 |
 | `aifix.abort_reason` | attempt | `empty_diff` / `max_attempts` / `budget` / `loop_detected` |
 | `aifix.flaky_filtered` | verify | 被抖动过滤的用例数 |
-| `aifix.locate_hit` | detect | `suspect_file` 是否命中候选——§9 直接取用 |
+| `aifix.suspect_in_traceback` | detect | `suspect_file` 是否落在 traceback 候选里。**不是** §9 的 `locate_hit`（那个对 ground truth 判定，由评测计算）——两者是不同的集合 |
+| `aifix.violation` | fix | 越界尝试，一条一行：`test_edit` / `path_escape` / `loop_abort` |
 
 最后一条使 trace 同时成为评测的数据源，不必为评测单独埋点。
 

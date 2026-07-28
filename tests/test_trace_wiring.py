@@ -51,8 +51,14 @@ def _state(buggy_repo, wt, trace_obj, trace_text):
     return st
 
 
-async def test_detect_records_locate_hit(buggy_repo, tmp_path):
-    """suspect_file 是否命中 locate_source 候选 —— 评测直接取这条。"""
+async def test_detect_records_suspect_in_traceback(buggy_repo, tmp_path):
+    """suspect_file 是否落在 traceback 指出的文件里。
+
+    注意这**不是**规格 §9 的 locate_hit（那个对 ground truth 判定，
+    由评测计算）。两者是不同的集合：traceback 指向的文件未必是该改的
+    文件 —— 异常常在下游抛出，缺陷却在上游。共用一个名字会让评测
+    悄悄量错东西，所以在这里就分开。
+    """
     with Worktree(buggy_repo, run_id="r1") as wt:
         trace = RunTrace(tmp_path, run_id="r1")
         st = _state(buggy_repo, wt, trace,
@@ -60,18 +66,18 @@ async def test_detect_records_locate_hit(buggy_repo, tmp_path):
         await detect_node(st, client=_Scripted([_text(_DIAG)]))
         trace.close()
 
-    hit = [f for f in _facts(tmp_path) if f["key"] == "locate_hit"]
+    hit = [f for f in _facts(tmp_path) if f["key"] == "suspect_in_traceback"]
     assert hit and hit[0]["value"] is True
 
 
-async def test_detect_records_miss(buggy_repo, tmp_path):
+async def test_detect_records_traceback_miss(buggy_repo, tmp_path):
     with Worktree(buggy_repo, run_id="r1") as wt:
         trace = RunTrace(tmp_path, run_id="r1")
         st = _state(buggy_repo, wt, trace, "")
         await detect_node(st, client=_Scripted([_text(_DIAG)]))
         trace.close()
 
-    hit = [f for f in _facts(tmp_path) if f["key"] == "locate_hit"]
+    hit = [f for f in _facts(tmp_path) if f["key"] == "suspect_in_traceback"]
     assert hit and hit[0]["value"] is False
 
 
