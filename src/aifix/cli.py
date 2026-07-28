@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import shutil
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
@@ -105,13 +107,40 @@ def build_parser() -> argparse.ArgumentParser:
                      help="本次 run 的美元预算上限")
     run.add_argument("--dry-run", action="store_true",
                      help="只跑 preflight + baseline，报告有多少活")
+
+    mine = sub.add_parser("mine", help="从 git history 挖任务集")
+    mine.add_argument("repo", nargs="?", default=".")
+    mine.add_argument("--limit", type=int, default=50,
+                      help="回溯多少个提交")
+    mine.add_argument("--max-tasks", type=int, default=10,
+                      help="最多产出多少个任务")
+    mine.add_argument("--out", default="evals/tasks.jsonl")
+
+    ev = sub.add_parser("eval", help="在任务集上跑评测")
+    ev.add_argument("tasks")
+    ev.add_argument("--parallel", type=int, default=4)
+    ev.add_argument("--label", default=None,
+                    help="这一轮的模型标签，默认取 fixer 的 model")
+    ev.add_argument("--out", default=None)
+
+    rep = sub.add_parser("eval-report", help="把若干轮结果渲染成对比表")
+    rep.add_argument("results", nargs="+")
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
-    if args.cmd != "run":
-        return
+    if args.cmd == "run":
+        _cmd_run(args)
+    elif args.cmd == "mine":
+        _cmd_mine(args)
+    elif args.cmd == "eval":
+        _cmd_eval(args)
+    elif args.cmd == "eval-report":
+        _cmd_eval_report(args)
+
+
+def _cmd_run(args) -> None:
     config = AifixConfig()
     if args.budget is not None:
         config = config.model_copy(update={"budget_usd": args.budget})
@@ -119,3 +148,55 @@ def main() -> None:
         Path(args.repo).resolve(), config, run_id=uuid.uuid4().hex[:8],
         only_test=args.test, dry_run=args.dry_run))
     print(state["report_md"])
+
+
+def _cmd_mine(args) -> None:
+    # 延迟导入：eval 子包依赖 cli 模块（run_once），提到模块顶部会形成循环导入
+    from .adapters.pytest_adapter import PytestAdapter
+    from .eval.mine import mine_tasks
+    from .eval.task import write_jsonl
+
+    def progress(sha: str, n: int) -> None:
+        print(f"  {sha[:8]}：{n} 个可用用例", flush=True)
+
+    tasks = asyncio.run(mine_tasks(
+        str(Path(args.repo).resolve()), PytestAdapter(),
+        limit=args.limit, max_tasks=args.max_tasks, on_progress=progress))
+    write_jsonl(Path(args.out), tasks)
+    print(f"产出 {len(tasks)} 个任务 → {args.out}")
+
+
+def _cmd_eval(args) -> None:
+    # 延迟导入：理由同上
+    from .eval.runner import run_suite
+    from .eval.score import render_table, summarize
+    from .eval.task import Task, TaskResult, read_jsonl, write_jsonl
+
+    config = AifixConfig()
+    label = args.label or config.fixer.model or "未命名"
+    tasks = read_jsonl(Path(args.tasks), Task)
+    workdir = Path(tempfile.mkdtemp(prefix="aifix-eval-"))
+
+    def done(r: TaskResult) -> None:
+        mark = "✅" if r.verdict == "better" else ("⚠️" if r.error else "❌")
+        print(f"  {mark} {r.task_id}", flush=True)
+
+    print(f"{len(tasks)} 个任务 · {label} · 并行 {args.parallel}")
+    results = asyncio.run(run_suite(tasks, config, label, workdir,
+                                    parallel=args.parallel, on_done=done))
+    out = Path(args.out or f"evals/results-{label}.jsonl")
+    write_jsonl(out, results)
+    print()
+    print(render_table([summarize(results)]))
+    print(f"明细 → {out}")
+    shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _cmd_eval_report(args) -> None:
+    # 延迟导入：理由同上
+    from .eval.score import render_table, summarize
+    from .eval.task import TaskResult, read_jsonl
+
+    summaries = [summarize(read_jsonl(Path(p), TaskResult))
+                 for p in args.results]
+    print(render_table(summaries))
