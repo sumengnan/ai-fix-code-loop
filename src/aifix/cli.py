@@ -19,7 +19,12 @@ from .nodes.fix import fix_node
 from .nodes.preflight import preflight_node
 from .nodes.report import render_report, report_node
 from .nodes.verify import verify_node
+# replay 与 trajectory 可以放在模块顶部：它们只读 jsonl / sqlite，一个
+# aifix 内部模块都不 import，不存在 eval 子包那条 `eval.runner → cli` 的环
+# （trajectory 宁可复制一份 SIGNAL_KEYS 也不 import eval.runner，正是为此）。
+from .replay import render as render_replay
 from .trace import RunTrace
+from .trajectory import DB_RELPATH, ingest, query_stats
 
 
 def _backfill_in_flight_result(state: AifixState) -> None:
@@ -260,21 +265,53 @@ def build_parser() -> argparse.ArgumentParser:
 
     rep = sub.add_parser("eval-report", help="把若干轮结果渲染成对比表")
     rep.add_argument("results", nargs="+")
+
+    rp = sub.add_parser(
+        "replay", help="回放一次 run 的逐步复盘",
+        description="把一次 run 落下的 events.jsonl / facts.jsonl 渲染成可读的"
+                    "时间轴。run_id 不存在时会列出这个仓库里现有的 run —— "
+                    "诊断工具的第一要务是让人找得到东西。")
+    rp.add_argument("run_id")
+    rp.add_argument("--repo", default=".")
+    rp.add_argument("--step", type=int, default=None,
+                    help="只看第 N 步。用的是全局步号（从 1 数起）：一次 run 会开"
+                         "好几段 AgentLoop，每段内部的步号都从 1 重新数，这里按"
+                         "全局顺序重新编过，与单段会话里的步号对不上")
+    rp.add_argument("--full", action="store_true",
+                    help="不截断长文本（补丁、工具返回常有几千字）。默认每个字段"
+                         "截到 2000 字符，截断处一定留标记")
+
+    ing = sub.add_parser(
+        "ingest", help="把各次 run 的事实灌进 .aifix/trajectory.db",
+        description="扫 <repo>/.aifix/runs/*/facts.jsonl 落库，供 aifix stats 查询。"
+                    "run 结束时不自动灌库：那等于给核心循环加一条可能失败的写路径，"
+                    "而这张表是事后诊断用的，晚几分钟没有代价。"
+                    "幂等 —— 同一批产物灌任意多次，表里的行数不变。")
+    ing.add_argument("--repo", default=".")
+
+    st = sub.add_parser(
+        "stats", help="跨 run 汇总：适配器、守卫、可疑信号",
+        description="数据来自 .aifix/trajectory.db，不会自己更新，先跑一次 "
+                    "aifix ingest。空表不代表没跑过 run，只代表没灌过库。")
+    st.add_argument("--repo", default=".")
     return parser
+
+
+def _dispatch() -> dict[str, Any]:
+    """子命令名 → 处理函数。
+
+    单独拿出来是为了能被整表比对：加了 parser 却忘了在这里接一行的话，
+    argparse 照样解析成功、一个分支都不匹配、退出码 0 —— 命令静默什么都不做，
+    这种失败在手工试用时最容易被当成「跑了但没输出」。
+    """
+    return {"run": _cmd_run, "mine": _cmd_mine, "mutate": _cmd_mutate,
+            "eval": _cmd_eval, "eval-report": _cmd_eval_report,
+            "replay": _cmd_replay, "ingest": _cmd_ingest, "stats": _cmd_stats}
 
 
 def main() -> None:
     args = build_parser().parse_args()
-    if args.cmd == "run":
-        _cmd_run(args)
-    elif args.cmd == "mine":
-        _cmd_mine(args)
-    elif args.cmd == "mutate":
-        _cmd_mutate(args)
-    elif args.cmd == "eval":
-        _cmd_eval(args)
-    elif args.cmd == "eval-report":
-        _cmd_eval_report(args)
+    _dispatch()[args.cmd](args)
 
 
 def _cmd_run(args) -> None:
@@ -390,3 +427,77 @@ def _cmd_eval_report(args) -> None:
         # 不能像老版本那样每份文件只出一行汇总。
         summaries.extend(summarize_by_origin(read_jsonl(Path(p), TaskResult)))
     print(render_table(summaries))
+
+
+def _cmd_replay(args) -> None:
+    run_dir = Path(args.repo).resolve() / ".aifix" / "runs" / args.run_id
+    # 「目录不存在」交给 render 自己说：它已经会给人话并列出同级现有的 run。
+    # 在这里再判一次就是两套措辞，早晚有一套会跟另一套说得不一样。
+    print(render_replay(run_dir, step=args.step,
+                        full=args.full).rstrip("\n"))
+    if not run_dir.is_dir():
+        # 措辞只有 render 那一份，这里只补一个退出码：退 0 的话流水线里
+        # 「run_id 打错了」和「回放成功」没有任何区别
+        raise SystemExit(1)
+
+
+def _cmd_ingest(args) -> None:
+    repo = Path(args.repo).resolve()
+    n = ingest(repo)
+    if not n:
+        # 与「灌了 0 个」分开说：这里其实是没找到产物，多半是 --repo 指错了
+        print(f"没有可灌的 run：{repo / '.aifix' / 'runs'} 下"
+              "没有带 facts.jsonl 的目录。")
+        return
+    # 报的是**本次处理**的 run 数，不是新增数：灌库幂等，重灌同一批仍报同一个
+    # 数字，这正是「重灌安全」看得见的样子
+    print(f"已灌库 {n} 个 run → {repo / DB_RELPATH}")
+
+
+def _cmd_stats(args) -> None:
+    repo = Path(args.repo).resolve()
+    db = repo / DB_RELPATH
+    if not db.is_file():
+        # 渲染一张空表会被读成「这个仓库没跑过 run」，而事实是没灌过库。
+        # query_stats 对不存在的库返回空结果正是为了不顺手建一个空库出来，
+        # 那份克制在这里得配一句人话，否则用户只看到三个空小节。
+        raise SystemExit(
+            f"还没有灌过库：{db} 不存在。\n"
+            f"  先跑 `aifix ingest --repo {args.repo}`，再回来看统计。")
+    print(_render_stats(query_stats(db), db))
+
+
+def _render_stats(stats: dict[str, Any], db: Path) -> str:
+    """把 query_stats 的三张小结渲染成人能读的中文。
+
+    取不到的字段一律「未知」/「—」，绝不写 0：报告里解不出修复数（库里是
+    NULL）与「一个都没修好」（0）是两回事，后者是结论，而我们手上没有这个
+    结论。这个项目在成本、修复数上反复吃过「假的 0」的亏。
+    """
+    hr = "──"
+    lines = [f"aifix 跨 run 统计 · {db}", "", f"{hr} 按适配器 {hr}"]
+    by_adapter = stats.get("by_adapter") or {}
+    if not by_adapter:
+        lines.append("  （库里还没有 run 记录）")
+    for adapter, row in by_adapter.items():
+        fixed = row.get("fixed")
+        lines.append(f"  {adapter or '未知'}：run {row.get('runs')} 次 · "
+                     f"修复 {'—' if fixed is None else fixed} 个用例")
+
+    lines += ["", f"{hr} 守卫触发（按次数降序）{hr}"]
+    hits = stats.get("guard_hits") or []
+    if not hits:
+        lines.append("  （这批 run 里没有守卫触发的记录）")
+    for kind, n in hits:
+        # kind 已经由 query_stats 解过 JSON 了。库里存的是带引号的
+        # `"empty_diff"`，那是内部编码，不该出现在人看的输出里；反过来在这
+        # 儿再解一次也不行 —— empty_diff 不是合法 JSON。
+        lines.append(f"  {kind}：{n} 次")
+
+    lines += ["", f"{hr} 可疑信号最多的 run {hr}"]
+    signal_runs = stats.get("signal_runs") or []
+    if not signal_runs:
+        lines.append("  （没有 run 记录到可疑信号）")
+    for run_id, n in signal_runs:
+        lines.append(f"  {run_id}：{n} 条")
+    return "\n".join(lines)
