@@ -63,6 +63,15 @@ class Worktree:
         _git(self.path, "checkout", "--", ".")
         _git(self.path, "clean", "-fd")
 
+    def file_at_head(self, path: str) -> str | None:
+        """worktree 里 HEAD 版本的文件内容；HEAD 里没有这个文件时返回 None。
+
+        信号计算要在 commit 之前做 —— 那时改动还在工作区，旧内容只能
+        从 HEAD 拿。
+        """
+        res = _git(self.path, "show", f"HEAD:{path}")
+        return res.stdout if res.returncode == 0 else None
+
     def commit(self, message: str, paths: list[str]) -> None:
         """只提交 `paths` 里明确列出的文件。
 

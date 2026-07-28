@@ -34,6 +34,9 @@ class AifixState(TypedDict, total=False):
     abort_reason: str | None
     flaky_filtered: list[str]
     confirmed_regressions: list[str]
+    # 补丁合理性的静态信号（signals.PatchSignals 的字段）。**不参与任何判定**，
+    # 只由 verify 算出、由报告展示给人看。
+    signals: dict[str, Any]
     consecutive_failures: int
     failure_token_budget: int | None
     # 本轮 failure 分到的美元额度。**只有 cli.run_once 会填**：build_graph()
@@ -68,7 +71,8 @@ def new_state(repo: Path, config: AifixConfig, run_id: str) -> AifixState:
         baseline_ids=[], queue=[], current=None, attempt=0,
         diagnosis=None, verdict=None,
         touched=[], guard_hits=[], diff_lines=0, abort_reason=None,
-        flaky_filtered=[], confirmed_regressions=[], consecutive_failures=0,
+        flaky_filtered=[], confirmed_regressions=[], signals={},
+        consecutive_failures=0,
         failure_token_budget=None,
         failure_usd_budget=None, cost_capped=False,
         spent_usd=0.0, spent_tokens=0,

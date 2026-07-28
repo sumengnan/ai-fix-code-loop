@@ -110,6 +110,24 @@ def test_commit_stages_new_file_when_listed(buggy_repo):
         assert "helper.py" in tracked
 
 
+def test_file_at_head_reads_the_committed_version(buggy_repo, fixed_source):
+    """改动还没提交时，旧内容只能从 HEAD 拿 —— 信号在 commit 之前计算。"""
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        (wt.path / "calc.py").write_text(fixed_source, encoding="utf-8")
+        head = wt.file_at_head("calc.py")
+        assert head is not None
+        assert "a - b" in head          # HEAD 版本
+        assert head != fixed_source     # 工作区版本不该混进来
+
+
+def test_file_at_head_returns_none_for_new_file(buggy_repo):
+    """补丁新建的文件在 HEAD 里不存在 —— 返回 None，signals 才不会误报删除。"""
+    with Worktree(buggy_repo, run_id="abc123") as wt:
+        (wt.path / "helper.py").write_text("def h():\n    return 1\n",
+                                           encoding="utf-8")
+        assert wt.file_at_head("helper.py") is None
+
+
 def test_commit_with_empty_paths_is_noop(buggy_repo, fixed_source):
     """没有明确改过的文件就不该产生提交。"""
     with Worktree(buggy_repo, run_id="abc123") as wt:

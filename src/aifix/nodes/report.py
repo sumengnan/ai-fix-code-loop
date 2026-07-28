@@ -45,6 +45,24 @@ def render_report(state: dict[str, Any]) -> str:
         lines.append(
             f"| `{r['test_id']}` | {_VERDICT_CN.get(r['verdict'], r['verdict'])} "
             f"| {r['attempts']} | {r['abort_reason'] or '—'} |")
+    # 静态信号一节：只在真有信号时出现。恒定出现的一节会被人当成模板噪音
+    # 无视掉，而它存在的全部意义就是在少数几次里被看见。
+    sig = state.get("signals") or {}
+    if any(sig.values()):
+        lines += ["", "## ⚠️ 值得多看一眼", ""]
+        if sig.get("removed_public_symbols"):
+            lines.append(f"- 补丁删除了公开符号："
+                         f"{'、'.join('`%s`' % x for x in sig['removed_public_symbols'])}")
+        if sig.get("new_module_state"):
+            lines.append(f"- 补丁新增了模块级可变状态："
+                         f"{'、'.join('`%s`' % x for x in sig['new_module_state'])}")
+        if sig.get("files_outside_suspect"):
+            lines.append(f"- 改动落在诊断的嫌疑文件之外："
+                         f"{'、'.join('`%s`' % x for x in sig['files_outside_suspect'])}")
+        lines += ["",
+                  "这些是静态信号，**不改变判定** —— 测试确实转绿了。"
+                  "它们只是说：合并之前值得亲眼看一遍这个 diff。"]
+
     lines += ["", f"合并：`git merge {state['branch']}`"]
     return "\n".join(lines) + "\n"
 

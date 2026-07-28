@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from ..adapters.base import FailureSet, Verdict
 from ..delivery import Worktree
 from ..graph import AifixState, trace_of
+from ..signals import analyze
 from ..verify import compare
 from .baseline import adapter_for, run_full_suite, run_scoped
 
@@ -13,8 +15,9 @@ from .baseline import adapter_for, run_full_suite, run_scoped
 def _worktree(state: AifixState) -> Worktree:
     """指向已存在的 worktree —— **不进入上下文管理器**。
 
-    worktree 由 cli.run_once 建立并负责移除；这里只借用 commit / rollback
-    这两个纯路径操作。若在此 `with`，退出时会把还在用的 worktree 删掉。
+    worktree 由 cli.run_once 建立并负责移除；这里只借用 commit / rollback /
+    file_at_head 这几个纯路径操作。若在此 `with`，退出时会把还在用的
+    worktree 删掉。
     """
     return Worktree(Path(state["repo"]), run_id=state["run_id"])
 
@@ -77,9 +80,32 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
     if verdict is not Verdict.BETTER:
         trace.fact("rollback", True)
 
+    # 信号必须在 commit / rollback 之前算：那时补丁还在工作区，旧内容只能
+    # 从 HEAD 拿；rollback 之后新内容就没了，commit 之后 HEAD 就是新内容。
+    # 同理，diagnosis 在下面几个返回分支里被清成 None，这里的读取发生在清空
+    # 之前，拿到的还是本轮的诊断。
+    def _now(p: str) -> str | None:
+        """工作区当前内容；补丁把文件删掉时返回 None。"""
+        f = worktree_path / p
+        return f.read_text(encoding="utf-8") if f.is_file() else None
+
+    touched = state.get("touched") or []
+    sig = analyze({p: (wt.file_at_head(p), _now(p)) for p in touched},
+                  suspect=(state.get("diagnosis") or {}).get("suspect_file"))
+    if not sig.is_empty():
+        # 只在有信号时写 fact：一条恒定出现的空 fact 会让 facts.jsonl 变噪音
+        for n in sig.removed_public_symbols:
+            trace.fact("removed_public_symbol", n)
+        for n in sig.new_module_state:
+            trace.fact("new_module_state", n)
+        if sig.files_outside_suspect:
+            trace.fact("files_outside_suspect", sig.files_outside_suspect)
+
     results = list(state["results"])
     common = {"flaky_filtered": sorted(flaky),
-              "confirmed_regressions": sorted(confirmed)}
+              "confirmed_regressions": sorted(confirmed),
+              # 信号只标注，不参与判定 —— 三态判定仍然只看测试结果。
+              "signals": asdict(sig)}
 
     if verdict is Verdict.BETTER:
         wt.commit(f"fix: {target}", paths=state.get("touched") or [])
