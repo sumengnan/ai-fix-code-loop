@@ -71,13 +71,14 @@ def render(run_dir: Path, step: int | None = None,
         body = _render_step(step, steps[step - 1], full, max_chars)
         return "\n".join(head) + "\n\n" + body
 
-    if events and facts:
-        # 事件流里没有 failure / attempt 标记（event_to_dict 不写这两个字段，
-        # RunTrace 也没往事件上贴），所以事件与事实之间**没有可靠的逐步对应
-        # 关系**。硬按顺序猜能拼出一条看着精确、实则编出来的时间轴 —— 那正是
-        # 这个项目一再吃亏的形状。事实的归属由它自带的 failure / attempt 写在
-        # 标题里，不靠位置暗示。
-        head.append("说明：事件流不带 failure / attempt 标记，"
+    if events and facts and not any("failure" in e for e in events):
+        # M4 之前的产物：事件流里没有 failure / attempt 标记，事件与事实之间
+        # **没有可靠的逐步对应关系**。硬按顺序猜能拼出一条看着精确、实则编出
+        # 来的时间轴 —— 那正是这个项目一再吃亏的形状。事实的归属由它自带的
+        # failure / attempt 写在标题里，不靠位置暗示。
+        # 新产物由 RunTrace.record_events 带上归属，这句话就不再成立，不能照
+        # 印 —— 描述输入的话说错了，读的人会据此放弃一条本来可用的对应关系。
+        head.append("说明：这批事件流不带 failure / attempt 标记（M4 之前的产物），"
                     "领域事实按自身归属分组列在时间轴之后。")
 
     parts = ["\n".join(head)]

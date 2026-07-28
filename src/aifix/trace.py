@@ -75,10 +75,17 @@ class RunTrace:
             else json.dumps(value, ensure_ascii=False))
 
     def record_events(self, events: Iterable[Any]) -> None:
-        """把 AgentLoop 的事件流落成 jsonl，供 replay 使用。"""
+        """把 AgentLoop 的事件流落成 jsonl，供 replay 使用。
+
+        并入 `_current`（failure / attempt）：`event_to_dict` 只给 type 与
+        data，落盘之后就再也认不出「这一步是修哪个用例的第几次尝试」。一次
+        run 会开好几段 AgentLoop（detect 一段、每次守卫重试各一段），首尾相
+        接写进同一个文件，按位置猜归属只能猜出一条错位的时间轴 —— 归属只能
+        由写的这一侧带上。
+        """
         for ev in events:
-            self._events.write(
-                json.dumps(event_to_dict(ev), ensure_ascii=False) + "\n")
+            rec = {**event_to_dict(ev), **self._current}
+            self._events.write(json.dumps(rec, ensure_ascii=False) + "\n")
         self._events.flush()
 
     def close(self) -> None:

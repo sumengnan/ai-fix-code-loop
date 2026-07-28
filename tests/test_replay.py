@@ -125,6 +125,45 @@ async def test_truncation_is_marked_and_full_disables_it(run_dir):
     assert "已截断" not in full
 
 
+async def test_replay_does_not_claim_attribution_is_missing(run_dir):
+    """事件流现在自带 failure / attempt，回放不能再声明它不带。
+
+    诊断工具描述自己的输入时说错话，比少印一行更糟：读的人会据此认定
+    「事件与事实对不上」，转而去手工拼那条它本可以直接给出的时间轴。
+    """
+    out = render(run_dir)
+
+    assert "不带 failure / attempt" not in out
+    # 前提：这批产物确实带了归属（否则上面那条是靠「凑巧没这句话」通过的）
+    events = [json.loads(x) for x in
+              (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert all("failure" in e for e in events)
+
+
+def test_replay_reads_old_artifacts_without_attribution(tmp_path):
+    """构造目录：M4 之前落下的 events.jsonl 没有这两个字段。
+
+    渲染器读到缺字段不能崩，并且**要照旧说明**归属对不上 —— 老产物里
+    事件与事实之间确实没有可靠的逐步对应关系。
+    """
+    d = tmp_path / "runs" / "旧产物"
+    d.mkdir(parents=True)
+    (d / "events.jsonl").write_text(
+        json.dumps({"type": "RunStarted", "data": {"run_id": "old"}}) + "\n"
+        + json.dumps({"type": "StepStarted", "data": {"step": 1}}) + "\n",
+        encoding="utf-8")
+    (d / "facts.jsonl").write_text(
+        json.dumps({"run_id": "old", "key": "verdict", "value": "better",
+                    "failure": _TID, "attempt": 1}, ensure_ascii=False) + "\n",
+        encoding="utf-8")
+
+    out = render(d)
+
+    assert "Traceback" not in out
+    assert "verdict" in out and _TID in out
+    assert "不带 failure / attempt" in out
+
+
 async def test_missing_run_dir_says_so_in_plain_words(tmp_path):
     """诊断工具的第一要务是让人找得到东西，不是抛 traceback。"""
     out = render(tmp_path / "runs" / "不存在")
