@@ -151,10 +151,11 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
         locate_hit=locate_hit(suspect, task.gold_files),
         suspect_file=suspect,
         verdict=row["verdict"] if row else "same",
-        # 没有 results 行 = 中止发生在两轮之间（verify_node 只在 better 或
-        # attempt≥max_attempts 时才写行）。这时 state["attempt"] 停在「下一轮
-        # 的编号」，真实跑过的轮数是它减一。落成 0 会把「平均尝试」系统性
-        # 拉低，而这个任务明明真跑过。
+        # 有 results 行意味着中止发生在「verify 判定后」（better 或
+        # attempt≥max_attempts 时写行）；**没有行恰恰说明这个 failure 压根
+        # 没轮到**（在队列里但预算先耗尽、或被 only_test 过滤掉）。本分支加了
+        # 「中止时补录在飞的 failure」之后，两轮之间的中止也恒有 results 行。
+        # 回落到 0 恰好表达「没轮到」的含义，与「平均尝试」的计数基数一致。
         attempts=(row["attempts"] if row
                   else max(state.get("attempt", 0) - 1, 0)),
         tokens=state["spent_tokens"], cost_usd=state["spent_usd"],
