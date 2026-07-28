@@ -47,6 +47,18 @@ def test_fixture_files_under_test_dirs_go_with_the_tests():
     assert src == ["src/pkg/mod.py"]
 
 
+def test_test_prefix_outside_test_dirs_only_applies_to_python():
+    """`docs/test_plan.md` 不是测试 —— `test_` 是 Python 的命名约定。
+
+    它落进 test_files 会让 is_candidate 把「只改了源码 + 一份文档」的 commit
+    误判成候选：克隆一次、跑两轮 scoped，最后必然一无所获。候选在真实仓库里
+    本就占提交总数的六成，再掺进这类假候选，挖掘时间是白烧的。
+    """
+    tests, src = split_paths(["docs/test_plan.md", "src/pkg/mod.py"], ["tests"])
+    assert tests == []
+    assert src == ["src/pkg/mod.py"]
+
+
 def test_conftest_is_test_infrastructure_not_ground_truth():
     """根目录 conftest.py 既不在 test_dirs 里也不以 test_ 开头。"""
     tests, src = split_paths(["conftest.py", "src/pkg/mod.py"], ["tests"])
@@ -318,6 +330,114 @@ async def test_candidate_red_only_under_scope_is_dropped(
     assert got == ["tests/test_zz.py::test_sum_is_addition"], (
         "test_needs_ready 只在 scoped 下红，全量下会被 test_a_setup 救绿，"
         "不该进任务集")
+
+
+async def test_verify_raises_when_the_full_confirmation_run_ran_nothing(
+        history_repo, tmp_path, monkeypatch):
+    """阶段 4 的全量一个用例都没跑到 —— 必须抛，不能静默返回 []。
+
+    能走到阶段 4 说明阶段 1 已经跑出过失败，所以「一个用例都没跑到」一定是
+    异常（整轮中止、报告为空），不是「这个仓库没测试」。此前 `cand &
+    red_full.ids` 会安静地退化成空集，on_progress 那里看到的是 n=0 ——
+    与「这个 commit 没有可用用例」这个正常结果完全无法区分，一整轮挖掘可能
+    颗粒无收却不报一个错。
+    """
+    import aifix.eval.mine as mine
+    from aifix.adapters.base import FailureSet
+
+    async def full_ran_nothing(*a, **kw):
+        return FailureSet(failures={}, ran=frozenset())
+
+    monkeypatch.setattr(mine, "run_full_suite", full_ran_nothing)
+
+    h = history_repo
+    with pytest.raises(RuntimeError, match="全量"):
+        await verify_commit(str(h["path"]), h["commit"], h["base"],
+                            h["test_files"], PytestAdapter(), tmp_path / "v")
+
+
+async def test_mine_reports_the_failed_full_confirmation_as_a_skip(
+        history_repo, tmp_path, monkeypatch):
+    """阶段 4 抛出的 RuntimeError 要走「验证失败，已跳过」那条路。"""
+    import aifix.eval.mine as mine
+    from aifix.adapters.base import FailureSet
+
+    async def full_ran_nothing(*a, **kw):
+        return FailureSet(failures={}, ran=frozenset())
+
+    monkeypatch.setattr(mine, "run_full_suite", full_ran_nothing)
+
+    seen = []
+    tasks = await mine_tasks(str(history_repo["path"]), PytestAdapter(),
+                             limit=10, workdir=tmp_path / "m",
+                             on_progress=lambda sha, n, error=None:
+                                 seen.append((n, error)))
+    assert tasks == []
+    # n=-1 且 error 非空，而不是「n=0，没事发生」
+    assert [(n, err is not None) for n, err in seen] == [(-1, True)]
+
+
+async def test_verify_keeps_a_file_that_could_not_be_imported_at_base(
+        history_repo, tmp_path):
+    """新增测试文件 + 它 import 的新模块 —— 这一整类候选靠文件级 id 才留得住。
+
+    嫁接到 C^ 上时被 import 的模块还不存在，pytest 在收集阶段就 ImportError，
+    junit 里发出的是一条文件级 <error>（classname=""、name 是点分模块名），
+    make_test_id 还原出来的 id 就是文件路径本身，不带 `::`。
+
+    这种 id 在 C 侧不会出现在 green.ran 里（那一侧该文件正常收集，发出的是
+    各个用例），所以 `(red - green) & green.ran` 会把整类候选静默丢掉 ——
+    实测本仓库 65 个候选 commit 里有 32 个是这个形状。
+    """
+    repo = history_repo["path"]
+    base = _rev(repo, "HEAD")
+
+    (repo / "shapes.py").write_text(
+        "def area(w, h):\n    return w * h\n", encoding="utf-8")
+    (repo / "tests" / "test_shapes.py").write_text(
+        "from shapes import area\n\n\n"
+        "def test_area():\n"
+        "    assert area(2, 3) == 6\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    _commit(repo, "feat: shapes.area 及其测试")
+    commit = _rev(repo, "HEAD")
+
+    got = await verify_commit(str(repo), commit, base, ["tests/test_shapes.py"],
+                              PytestAdapter(), tmp_path / "v")
+
+    assert got == ["tests/test_shapes.py"], (
+        "C^ 处导入失败、C 处正常的测试文件必须以文件级 id 留在候选里")
+
+
+def test_file_went_green_needs_at_least_one_case_that_actually_ran():
+    """整个文件的用例全被 skip 掉不是「变绿」。
+
+    ran 不含 skipped（见 FailureSet.ran），所以「没有失败」在这里同时意味着
+    「没有跑」。放行它就是造一个 target_test 永远不会真正执行的假任务。
+    """
+    from aifix.adapters.base import FailureSet
+    from aifix.eval.mine import _file_went_green
+
+    all_skipped = FailureSet(failures={}, ran=frozenset())
+    assert _file_went_green("tests/test_x.py", all_skipped) is False
+
+
+def test_file_went_green_is_false_when_some_case_still_fails():
+    """文件里还有用例在红 —— 这个文件没有整体变绿。"""
+    from aifix.adapters.base import Failure, FailureSet
+    from aifix.eval.mine import _file_went_green
+
+    bad = "tests/test_x.py::test_b"
+    partial = FailureSet(
+        failures={bad: Failure(test_id=bad, classname="tests.test_x",
+                               name="test_b", message="", trace="")},
+        ran=frozenset({"tests/test_x.py::test_a", bad}))
+    assert _file_went_green("tests/test_x.py", partial) is False
+    # 另一侧要有区分度：同样的形状去掉那条失败就该是 True，否则这个断言
+    # 恒成立也看不出来
+    ok = FailureSet(failures={},
+                    ran=frozenset({"tests/test_x.py::test_a", bad}))
+    assert _file_went_green("tests/test_x.py", ok) is True
 
 
 def _commit(repo, msg: str) -> None:

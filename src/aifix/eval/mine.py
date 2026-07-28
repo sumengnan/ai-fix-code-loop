@@ -43,11 +43,18 @@ def split_paths(paths: list[str],
     for p in paths:
         pp = PurePosixPath(p)
         in_test_dir = any(pp.parts[:len(d)] == d for d in prefixes if d)
-        # conftest.py 可能躺在仓库根目录 —— 既不在 test_dirs 里，也不以
-        # test_ 开头，会被判成源文件进 gold_files。它是测试基础设施。
-        if in_test_dir or pp.name == "conftest.py" or pp.name.startswith("test_"):
+        is_py = pp.suffix == ".py"
+        # 两侧的判据刻意不对称。测试目录**内**的任意文件都算测试侧，后缀不
+        # 限：夹具、数据、快照都得跟着测试一起被 materialize 嫁接。目录**外**
+        # 只认 `test_*.py` —— `test_` 前缀是 Python 的测试命名约定，
+        # `docs/test_plan.md` 不是测试；放它进 test_files 会让 is_candidate 把
+        # 「只改了源码 + 一份文档」的 commit 判成候选，白跑一次克隆和两轮 scoped。
+        # conftest.py 则无论躺在哪都算：它可能在仓库根目录，既不在 test_dirs
+        # 里也不以 test_ 开头，会被判成源文件进 gold_files，而它是测试基础设施。
+        if in_test_dir or pp.name == "conftest.py" or (
+                is_py and pp.name.startswith("test_")):
             tests.append(p)
-        elif pp.suffix == ".py":
+        elif is_py:
             src.append(p)
     return tests, src
 
@@ -115,6 +122,24 @@ async def verify_commit(repo: str, commit: str, base_commit: str,
     必须先用 recheck.ran 确认这个用例真的被 pytest 跑到过，跑不到的
     候选（包括这种整轮中止的情形）一律不能入选，而不是被这条静默路径
     误判成「复跑绿了」全部放行。
+
+    **红侧全量确认、绿侧只 scoped —— 这是一个有意识的不对称，不是遗漏。**
+
+    C^ 那一侧（阶段 1、阶段 4）是**人造状态**：源码被回退、测试来自未来，
+    这个组合在历史上从来没有存在过，没有任何人跑过它，意外全藏在那里 ——
+    所以必须用全量确认。C 那一侧（阶段 2、阶段 3）是 commit 作者真正提交过
+    的状态，作者提交前跑过全量，它在全量下红的概率远低于 C^ 侧，所以只做
+    scoped 确认就够了。加第五个阶段（C 处再跑一次全量）会让成本退回两次
+    全量，把整个提速抵消掉，不值。
+
+    代价是明确的：源仓库自身在 C 处就有顺序依赖故障时（某用例单跑绿、
+    全量红），它会通过阶段 2/3，又因为在 C^ 全量下红而通过阶段 4，于是进
+    任务集 —— 而评测时 verify_node 跑的是全量，该用例本就红，任何模型都
+    恒判 SAME。这是一个谁都做不出来、又不报任何错的假任务。
+
+    真被它咬到时的症状是「新流程挖出来的任务模型普遍做不出来」。**别把它
+    误读成模型不行** —— 先去源仓库确认那几个 target_test 在 C 处单跑与
+    全量下的结果是否一致。
     """
     workdir = Path(workdir)
     shutil.rmtree(workdir, ignore_errors=True)
@@ -165,6 +190,15 @@ async def verify_commit(repo: str, commit: str, base_commit: str,
     # 这里一次性付清
     _git(workdir, "checkout", "--force", "--quiet", staged_head)
     red_full = await run_full_suite(workdir, adapter, require_report=True)
+    # 能走到这里，说明阶段 1 的 scoped 已经真跑出过失败 —— 所以全量「一个用例
+    # 都没跑到」一定是异常（收集整轮中止、报告为空），不可能是「这个仓库没有
+    # 测试」。不抛的话 red_full.ids 是空集，返回值静默退化成 []，on_progress
+    # 那里看到的是 n=0，与「这个 commit 没有可用用例」这个正常结果无法区分。
+    if not red_full.ran:
+        raise RuntimeError(
+            f"阶段 4 的全量确认跑没能跑到任何用例（worktree={workdir}）："
+            "前面的 scoped 已经跑出过失败，全量却一个用例都没跑到，"
+            "本次结果不可信")
     return sorted(cand & red_full.ids)
 
 
