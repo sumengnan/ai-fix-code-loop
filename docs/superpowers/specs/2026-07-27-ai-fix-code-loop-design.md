@@ -336,7 +336,9 @@ OpenTelemetry span 天然嵌套，**app 层只要在对的位置开 span，框�
 | `aifix.suspect_in_traceback` | detect | `suspect_file` 是否落在 traceback 候选里。**不是** §9 的 `locate_hit`（那个对 ground truth 判定，由评测计算）——两者是不同的集合 |
 | `aifix.violation` | fix | 越界尝试，一条一行：`test_edit` / `path_escape` / `loop_abort` |
 
-最后一条使 trace 同时成为评测的数据源，不必为评测单独埋点。
+`aifix.violation` 由 §9 的评测直接取用（从 `facts.jsonl` 按类型分组计数），不必为评测单独埋点。
+
+`aifix.suspect_in_traceback` 则**不**被 §9 取用——§9 的 `locate_hit` 是对 ground truth 判定的，两者是不同的集合。这里写死指向哪一条，是因为本表原先用「最后一条」这种位置指代，而那句话贴在了错误的指标上，直接导致评测差点量错东西。
 
 ### 三份产物（落 `.aifix/runs/<run_id>/`）
 
