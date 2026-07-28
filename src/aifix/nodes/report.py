@@ -7,6 +7,48 @@ from ..budget import fmt_usd
 
 _VERDICT_CN = {"better": "已修复", "same": "未改善", "worse": "引入回归"}
 
+_SIGNAL_CN = [
+    ("removed_public_symbols", "补丁删除了公开符号"),
+    ("new_module_state", "补丁新增了模块级可变状态"),
+    ("files_outside_suspect", "改动落在诊断的嫌疑文件之外"),
+]
+
+
+def _signal_section(signals: list[dict[str, Any]]) -> list[str]:
+    """静态信号一节：只在真有信号时出现，且**按 test_id 分组**。
+
+    恒定出现的一节会被人当成模板噪音无视掉，而它存在的全部意义就是在少数几
+    次里被看见。
+
+    分组不是排版偏好：一个 run 会依次修好多个 failure，把所有补丁的信号合成
+    一份并集，人就分不清「删掉的那个公开符号」是修哪一个用例时删的 ——
+    要去看的 diff 是哪一个 commit 也就无从谈起。
+    """
+    groups: list[tuple[str, list[dict[str, Any]]]] = []
+    for entry in signals:
+        if not any(entry.get(k) for k, _ in _SIGNAL_CN):
+            continue
+        test_id = entry.get("test_id") or "—"
+        if groups and groups[-1][0] == test_id:
+            groups[-1][1].append(entry)
+        else:
+            groups.append((test_id, [entry]))
+    if not groups:
+        return []
+
+    lines = ["", "## ⚠️ 值得多看一眼", ""]
+    for test_id, entries in groups:
+        lines += [f"修复 `{test_id}` 的补丁：", ""]
+        for entry in entries:
+            for key, label in _SIGNAL_CN:
+                if entry.get(key):
+                    lines.append(
+                        f"- {label}："
+                        f"{'、'.join('`%s`' % x for x in entry[key])}")
+        lines.append("")
+    return lines + ["这些是静态信号，**不改变判定** —— 测试确实转绿了。"
+                    "它们只是说：合并之前值得亲眼看一遍这个 diff。"]
+
 
 def render_report(state: dict[str, Any]) -> str:
     abort = state.get("abort")
@@ -45,23 +87,7 @@ def render_report(state: dict[str, Any]) -> str:
         lines.append(
             f"| `{r['test_id']}` | {_VERDICT_CN.get(r['verdict'], r['verdict'])} "
             f"| {r['attempts']} | {r['abort_reason'] or '—'} |")
-    # 静态信号一节：只在真有信号时出现。恒定出现的一节会被人当成模板噪音
-    # 无视掉，而它存在的全部意义就是在少数几次里被看见。
-    sig = state.get("signals") or {}
-    if any(sig.values()):
-        lines += ["", "## ⚠️ 值得多看一眼", ""]
-        if sig.get("removed_public_symbols"):
-            lines.append(f"- 补丁删除了公开符号："
-                         f"{'、'.join('`%s`' % x for x in sig['removed_public_symbols'])}")
-        if sig.get("new_module_state"):
-            lines.append(f"- 补丁新增了模块级可变状态："
-                         f"{'、'.join('`%s`' % x for x in sig['new_module_state'])}")
-        if sig.get("files_outside_suspect"):
-            lines.append(f"- 改动落在诊断的嫌疑文件之外："
-                         f"{'、'.join('`%s`' % x for x in sig['files_outside_suspect'])}")
-        lines += ["",
-                  "这些是静态信号，**不改变判定** —— 测试确实转绿了。"
-                  "它们只是说：合并之前值得亲眼看一遍这个 diff。"]
+    lines += _signal_section(state.get("signals") or [])
 
     lines += ["", f"合并：`git merge {state['branch']}`"]
     return "\n".join(lines) + "\n"

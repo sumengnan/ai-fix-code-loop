@@ -34,9 +34,13 @@ class AifixState(TypedDict, total=False):
     abort_reason: str | None
     flaky_filtered: list[str]
     confirmed_regressions: list[str]
-    # 补丁合理性的静态信号（signals.PatchSignals 的字段）。**不参与任何判定**，
-    # 只由 verify 算出、由报告展示给人看。
-    signals: dict[str, Any]
+    # 补丁合理性的静态信号。**不参与任何判定**，只由 verify 算出、由报告展示
+    # 给人看。每个元素是 `{"test_id": ..., **PatchSignals 的字段}`。
+    # 是**列表**不是单个 dict：核心循环对 baseline 里每个 failure 各跑一轮
+    # verify，而报告在整个 run 结束后才渲染 —— 单个 dict 会被后一轮整个替换
+    # 掉，多 failure 时报告只剩最后一个补丁的信号。带 test_id 是为了让人分得
+    # 清是哪一次改动删的符号。只有判 BETTER（补丁真的交付了）才追加。
+    signals: list[dict[str, Any]]
     consecutive_failures: int
     failure_token_budget: int | None
     # 本轮 failure 分到的美元额度。**只有 cli.run_once 会填**：build_graph()
@@ -71,7 +75,7 @@ def new_state(repo: Path, config: AifixConfig, run_id: str) -> AifixState:
         baseline_ids=[], queue=[], current=None, attempt=0,
         diagnosis=None, verdict=None,
         touched=[], guard_hits=[], diff_lines=0, abort_reason=None,
-        flaky_filtered=[], confirmed_regressions=[], signals={},
+        flaky_filtered=[], confirmed_regressions=[], signals=[],
         consecutive_failures=0,
         failure_token_budget=None,
         failure_usd_budget=None, cost_capped=False,

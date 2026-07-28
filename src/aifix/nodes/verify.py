@@ -92,20 +92,43 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
     touched = state.get("touched") or []
     sig = analyze({p: (wt.file_at_head(p), _now(p)) for p in touched},
                   suspect=(state.get("diagnosis") or {}).get("suspect_file"))
-    if not sig.is_empty():
+
+    # 信号只对**真正交付的补丁**负责。判 BETTER 才写这三条 fact，因为只有
+    # 这一支会 commit 进交付分支；SAME / WORSE 的补丁下面就被 rollback 丢
+    # 掉了，它从未存在过。否则「第 1 轮删了公开符号被回滚、第 2 轮干净地修
+    # 好」会被 eval 记成 fix_hits=1 且 signals≥1 —— 而 eval/score.py 恰好把
+    # 这个组合定义为规格套利的指纹，于是指纹是假的，方向还偏向爱试错的模型。
+    #
+    # 三类**各写一条**，value 是整个列表，不是一个符号一条：每个交付的补丁
+    # 至多贡献 3 条，单位是「类」不是「个」。按符号个数展开的话，在一个文件
+    # 里删 10 个符号记 10、把改动摊到 20 个文件一个符号没删记 1，跨模型比这
+    # 一列就不是同一把尺（规模仍留在 value 与报告里，没有丢）。
+    # key 名沿用单数：facts.jsonl 是评测与人共同消费的数据契约，改名会让
+    # 历史 run 的 facts 与新代码对不上，收益不抵代价。
+    signals = list(state.get("signals") or [])
+    if verdict is Verdict.BETTER:
         # 只在有信号时写 fact：一条恒定出现的空 fact 会让 facts.jsonl 变噪音
-        for n in sig.removed_public_symbols:
-            trace.fact("removed_public_symbol", n)
-        for n in sig.new_module_state:
-            trace.fact("new_module_state", n)
+        if sig.removed_public_symbols:
+            trace.fact("removed_public_symbol", sig.removed_public_symbols)
+        if sig.new_module_state:
+            trace.fact("new_module_state", sig.new_module_state)
         if sig.files_outside_suspect:
             trace.fact("files_outside_suspect", sig.files_outside_suspect)
+        if not sig.is_empty():
+            # 带上 test_id：多 failure 的 run 里，报告只给一份并集的话，人分
+            # 不清是哪一次改动删的符号。这个 key 是**追加**不是替换 ——
+            # 核心循环对每个 failure 各跑一轮 verify，替换只会剩最后一轮。
+            signals.append({"test_id": target, **asdict(sig)})
+    elif not sig.is_empty():
+        # 换一个**不被 eval 计数**的 key：被丢弃的尝试仍有诊断价值（模型试
+        # 过什么是复盘的素材），但它不该出现在任何指标里。
+        trace.fact("signals_discarded", sig.count)
 
     results = list(state["results"])
     common = {"flaky_filtered": sorted(flaky),
               "confirmed_regressions": sorted(confirmed),
               # 信号只标注，不参与判定 —— 三态判定仍然只看测试结果。
-              "signals": asdict(sig)}
+              "signals": signals}
 
     if verdict is Verdict.BETTER:
         wt.commit(f"fix: {target}", paths=state.get("touched") or [])
