@@ -66,8 +66,14 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                    dry_run: bool = False) -> AifixState:
     """按状态图的语义顺序执行一次完整 run。
 
-    M1 直接手工驱动节点，语义与 build_graph() 的图完全一致——把
+    M1 直接手工驱动节点，节点顺序与路由和 build_graph() 的图一致——把
     LangGraph 的 checkpointer 接进来是 M2 的事（需要先有 trace 落盘）。
+
+    **但两条路径不再等价：预算只在这里**。RunBudget、`failure_token_budget`
+    与 `failure_usd_budget` 的分配、以及「越线即中止」的检查全部写在这个
+    函数里；build_graph() 那条路径没有 RunBudget，`failure_usd_budget`
+    一直是 None，整条美元闸不存在。产品入口走的是 run_once，图那条路径
+    目前只用于结构验证，别拿它去验证任何与花钱有关的保证。
     """
     state = new_state(repo, config, run_id=run_id)
     state.update(preflight_node(state))

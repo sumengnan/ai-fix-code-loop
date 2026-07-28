@@ -48,7 +48,13 @@ class AifixConfig(BaseSettings):
     # 单次修复允许的改动行数上限（+/- 行合计）。超过即判为整文件重写：
     # 模型放弃理解、直接重写，那种补丁即使测试转绿也不该合。
     max_diff_lines: int = 300
-    # 守卫触发后额外给模型的重试次数（不计入 max_attempts）
+    # 守卫触发后额外给模型的重试次数（不计入 max_attempts）。
+    # 注意它与下面的 guard_giveup_limit 咬在一起：默认配置（retries=2 /
+    # giveup=2）下，**同一条**守卫连撞两次就直接放弃，第 3 轮永远走不到 ——
+    # 所以对「反复空 diff」这类最常见的情形，把这个值调大不会有任何效果。
+    # 它只对**交替触发**（空 diff → 巨型 diff → 空 diff）有意义：那种情况
+    # guard_repeats 每次都被重置，放弃规则不触发，多出来的轮数才用得上。
+    # 想让同一条守卫多撞几次，要调的是 guard_giveup_limit。
     fix_guard_retries: int = 2
     # 同一条守卫连续触发多少次即放弃该 failure。用「同一条」而不是「任意
     # 守卫」：交替触发（空 diff → 巨型 diff）说明模型在换思路，值得再给一次；

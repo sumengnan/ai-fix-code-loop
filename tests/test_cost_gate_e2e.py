@@ -68,7 +68,9 @@ async def test_usd_budget_stops_the_run(buggy_repo):
         buggy_repo, AifixConfig(budget_usd=0.0001, price_map=_PRICEY),
         run_id="cap1",
         detector_client=_Scripted([_text(_DIAG)]), fixer_client=fixer)
-    assert state["results"][0]["verdict"] != "better"
+    # 钉死具体判定而不是 `!= "better"`：否定式断言连 "worse"（把别的用例
+    # 改红了）都算通过，而那是完全不同、且严重得多的结果。
+    assert state["results"][0]["verdict"] == "same"
     assert fixer.calls <= 1, "越线后不该再发起新的模型调用"
 
 
