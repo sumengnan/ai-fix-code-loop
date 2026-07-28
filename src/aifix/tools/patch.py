@@ -49,8 +49,13 @@ class ApplyPatchTool(Tool):
         self._sandbox = sandbox
         self._test_dirs = [d.strip("/") for d in test_dirs]
         self._timeout = timeout
-        # 本次 run 中被成功应用的补丁触及的路径。交付时只提交这些文件，
-        # 避免 git add -A 把测试产物、缓存等未跟踪垃圾扫进分支。
+        # 本次 run 中被成功应用的补丁触及的路径。这份记账是交付时
+        # `git add -- <paths>` 的**全部**输入（delivery.Worktree.commit），
+        # 也是 nodes/fix._diff_lines 统计巨型 diff 的名单。
+        # 交付路径上之所以不需要 git add -A（仓库里也确实没有），正是因为有
+        # 它：agent 只能经由这个工具改文件，所以「改过哪些」是已知的，交付侧
+        # 不必靠「把工作区里变了的东西全扫进来」去猜，测试产物、缓存这些未跟踪
+        # 垃圾也就没有机会混进分支。
         self._touched = touched
 
     def _targets(self, diff: str) -> list[tuple[str, str]]:

@@ -21,9 +21,20 @@ class PytestAdapter:
             return True
         return (repo / "tests").is_dir()
 
-    # -B 不写 __pycache__，-p no:cacheprovider 不写 .pytest_cache：
-    # 两者都是为了不在 worktree 里留下未跟踪产物 —— Worktree.commit() 的
-    # git add -A 会把它们扫进交付分支，用户 review 时看到二进制垃圾。
+    # -B 不写 __pycache__，-p no:cacheprovider 不写 .pytest_cache：两者都是
+    # 为了跑完测试之后，worktree 里除了被跟踪文件的改动之外什么都不多出来。
+    #
+    # 理由**不是**「会被扫进交付分支」——Worktree.commit 只
+    # `git add -- <ApplyPatchTool 记账过的路径>`，这个仓库里没有 git add -A
+    # 这条交付路径（delivery.Worktree.commit 的 docstring 写着绝不用；
+    # tests/test_maven_e2e.py 有一条真跑 mvn 的验收：整个 target/ 都没进树）。
+    # 真实理由是未跟踪产物**跨状态存活**：同一个 worktree 会被
+    # `git checkout --force` 在 C^ 和 C 之间来回切（eval/mine.verify_commit），
+    # 而 checkout 不碰未跟踪文件，上一跑留下的东西原样活到下一跑。陈旧报告被
+    # 下一跑当成自己的结果就是这个机制（见 nodes/baseline._rm_reports 与
+    # MavenAdapter 命令里的 clean）；压根不写出来的产物，不需要任何人记得去
+    # 清，也就不存在清漏。顺带，`git status` 不被这些目录淹掉，交付前想看一眼
+    # 工作区到底动了什么才看得清。
     #
     # -o junit_family=xunit1：xunit2（pytest 的默认）**不写** <testcase file=...>，
     # 而 file 是把 junit 报告里的用例还原成可重跑 node id 的唯一可靠依据。

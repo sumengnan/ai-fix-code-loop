@@ -42,7 +42,13 @@ class RunTestsTool(Tool):
             res = await self._sandbox.exec(cmd, self._timeout)
         finally:
             # 报告路径不再由调用方指定，只能问适配器要 —— 而且可能不止一份。
-            # 不删干净的代价：Worktree.commit() 的 git add -A 把它带进交付分支。
+            # 不删干净的代价不是「被提交进交付分支」（Worktree.commit 只
+            # add 记账过的路径，没有 git add -A 这条路），而是**陈旧报告被
+            # 下一跑当成自己的结果**：这个工具与 run_scoped 写的是同一份
+            # scoped 报告，而 report_paths 只看文件系统当前状态 —— 留在原地
+            # 的话，verify 的 flaky 确认那一跑即便被超时杀掉、什么都没写出来，
+            # 也会解析到这里剩下的这份并当成自己的结论。
+            # 同一条理由见 nodes/baseline._rm_reports。
             stale = self._adapter.report_paths(
                 Path(self._sandbox.workspace), scoped=True)
             if stale:
