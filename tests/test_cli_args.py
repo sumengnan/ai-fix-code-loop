@@ -80,3 +80,26 @@ def test_eval_report_takes_many_result_files():
 def test_eval_report_requires_at_least_one():
     with pytest.raises(SystemExit):
         build_parser().parse_args(["eval-report"])
+
+
+def test_safe_label_replaces_slashes():
+    """含斜杠的 label 被洗成不含路径分隔符的单段文件名。"""
+    from aifix.cli import _safe_label
+    assert _safe_label("org/model-v2") == "org_model-v2"
+    assert _safe_label("deepseek-ai/deepseek-coder") == "deepseek-ai_deepseek-coder"
+
+
+def test_safe_label_keeps_normal_names():
+    """不含特殊字符的普通 label 保持原样。"""
+    from aifix.cli import _safe_label
+    assert _safe_label("gpt-4") == "gpt-4"
+    assert _safe_label("claude_sonnet") == "claude_sonnet"
+    assert _safe_label("model.v2") == "model.v2"
+
+
+def test_safe_label_fallback_for_empty():
+    """洗完为空的极端输入有兜底。"""
+    from aifix.cli import _safe_label
+    assert _safe_label("///") == "未命名"
+    assert _safe_label("   ") == "未命名"
+    assert _safe_label("") == "未命名"

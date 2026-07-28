@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import shutil
 import tempfile
 import uuid
@@ -96,6 +97,20 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
     return state
 
 
+_LABEL_UNSAFE = re.compile(r"[^\w.-]+", re.UNICODE)
+
+
+def _safe_label(label: str) -> str:
+    """把模型标签洗成可安全用作文件名的形式。
+
+    模型名常带斜杠（org/model-v2）。直接拼进 f"evals/results-{label}.jsonl"
+    会被 Path 当成子目录，而 write_jsonl 会 mkdir(parents=True) —— 于是
+    不报错，只是静默写到别处；下一轮换个不带斜杠的模型名，两轮结果就
+    分散在不同目录，跨模型对比再也对不上。
+    """
+    return _LABEL_UNSAFE.sub("_", label).strip("_") or "未命名"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aifix")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -184,7 +199,7 @@ def _cmd_eval(args) -> None:
     print(f"{len(tasks)} 个任务 · {label} · 并行 {args.parallel}")
     results = asyncio.run(run_suite(tasks, config, label, workdir,
                                     parallel=args.parallel, on_done=done))
-    out = Path(args.out or f"evals/results-{label}.jsonl")
+    out = Path(args.out or f"evals/results-{_safe_label(label)}.jsonl")
     write_jsonl(out, results)
     print()
     print(render_table([summarize(results)]))
