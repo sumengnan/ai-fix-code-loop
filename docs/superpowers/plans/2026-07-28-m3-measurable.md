@@ -2049,3 +2049,5 @@ aifix eval-report evals/pro.jsonl evals/flash.jsonl
 | SQLite 轨迹 | M2 推迟至今。本计划用 jsonl 撑住了单 suite 的分析；跨 suite、跨时间的聚合仍缺一张表 |
 | C 类冒烟集 | 人造变异生成器（规格 §9）。先用 `mine --max-tasks 5` 顶替；等真跑过一轮、确认 A 类耗时确实是瓶颈了再补 |
 | 公开数据集 | SWE-bench Lite / Defects4J，规格 §9 列为第二阶段 |
+| `make_test_id` 对类内测试产出无效 id | pytest 默认 `junit_family=xunit2` 不写 `<testcase file="...">` 属性，`make_test_id` 缺失 file 时走 `classname.replace(".", "/") + ".py"` 回退路径，对 `test_foo.TestBar::test_baz` 这类类内测试会拼出不存在的路径。M1 遗留，影响面不止挖掘：M2 的 flaky 过滤（`run_scoped` 复跑）和 `run_tests` 工具同样依赖这个 id 能对上真实路径。修法方向是让适配器优先用 junit 的 `file` 属性，缺失时再从 classname 推断类名段，而不是整段替换成路径 |
+| `split_paths` 只处理 `.py` | 若某个 commit 同时新增了测试所需的非 `.py` 夹具文件（如数据文件、配置片段），该文件不会被 `materialize` 嫁接到任务工作区，任务会在 base 侧因缺文件而红、在 C 侧绿，通过全部现有校验进入任务集，但 ground truth 实际不可达。这不是「捏造任务」——确实是红转绿——而是任务质量问题：修复模型即便诊断和补丁都对，也可能因为缺夹具文件而通不过 |
