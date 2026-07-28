@@ -84,7 +84,7 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
     row = next((r for r in state["results"]
                 if r["test_id"] == task.target_test), None)
 
-    return TaskResult(
+    result = TaskResult(
         task_id=task.task_id, model=model,
         # 规格 §9 的定义：对 ground truth 判，不是对 traceback 判
         locate_hit=suspect in task.gold_files if suspect else False,
@@ -100,6 +100,17 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
         violations=violations,
         abort_reason=(row or {}).get("abort_reason") or state.get("abort"),
     )
+    if state.get("abort_kind") == "wall":
+        # 墙钟预算是评测调度器的属性，不是模型的属性：--parallel 8 时几个
+        # 任务在同一台机器上抢 CPU 跑全量 pytest，墙钟耗尽的概率远高于
+        # --parallel 1。记成模型的失败，就等于「只改并行度就能改变修复
+        # 成功率」，直接违背跨模型对比的前提 —— 所以走 error，不进比率
+        # 分母。token / 美元预算相反：同一批任务同一个上限，谁先烧完谁差，
+        # 那是被测系统的真实成绩，仍记 verdict=same。
+        return result.model_copy(update={
+            "error": f"评测的墙钟预算耗尽（评测故障，非模型失败）："
+                     f"{state.get('abort')}"})
+    return result
 
 
 async def run_suite(tasks: list[Task], config: AifixConfig, model: str,

@@ -69,10 +69,13 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                         break
                     state["current"] = state["queue"].pop(0)
                     state["attempt"] = 1
-                spent = budget.exhausted()
+                spent = budget.exhaustion()
                 if spent:
-                    state["abort"] = spent
-                    trace.fact("abort", spent)
+                    # 种类另记一份：评测要据此区分「模型没在预算内修好」
+                    # 与「评测调度器的墙钟耗尽」，光靠消息文本判不可靠
+                    state["abort_kind"], state["abort"] = spent
+                    trace.fact("abort", state["abort"])
+                    trace.fact("abort_kind", state["abort_kind"])
                     break
                 # 剩余 failure 数 = 队列里的 + 手上这个
                 state["failure_token_budget"] = budget.for_failure(

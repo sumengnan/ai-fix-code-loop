@@ -155,6 +155,22 @@ async def test_budget_abort_keeps_the_attempts_actually_made(
     assert r.error is None, "token 预算是模型的属性，没在预算内修好是真实成绩"
 
 
+async def test_wall_clock_abort_is_an_eval_fault_not_a_model_failure(
+        history_repo, tmp_path, monkeypatch):
+    """墙钟预算是评测调度器的属性，不是模型的属性。
+
+    --parallel 8 时八个任务在同一台机器上抢 CPU 跑全量 pytest，墙钟耗尽的
+    概率远高于 --parallel 1 —— 记成模型的失败，就等于「只改并行度就能改变
+    修复成功率」，直接违背跨模型对比的前提。
+    """
+    t = _task(history_repo)
+    _fake_run_once(monkeypatch, t.target_test,
+                   abort="时间预算耗尽：1800s / 1800s", abort_kind="wall")
+    r = await run_task(t, AifixConfig(), "假模型", tmp_path / "w")
+    assert r.error is not None
+    assert "时间" in r.error or "墙钟" in r.error
+
+
 async def test_suite_isolates_failures(history_repo, tmp_path):
     """一个任务炸掉不能带走整个 suite。"""
     ok = _task(history_repo)

@@ -46,16 +46,33 @@ class RunBudget:
             return left
         return max(left // remaining_failures, self.FLOOR_TOKENS)
 
-    def exhausted(self) -> str | None:
-        """超限返回原因，未超返回 None。"""
+    def exhaustion(self) -> tuple[str, str] | None:
+        """超限返回 (种类, 原因)，未超返回 None。种类取值 tokens / usd / wall。
+
+        种类必须能与消息分开取，因为三者的**归属**不同：
+
+        - token 与美元预算是**模型**的属性。同一批任务、同一个上限，谁先
+          烧完谁差 —— 「没在预算内修好」是被测系统的真实成绩，可比。
+        - 墙钟预算是**评测调度器**的属性。`--parallel 8` 时八个任务在同一台
+          机器上抢 CPU 跑全量 pytest，墙钟耗尽的概率远高于 `--parallel 1`；
+          把它记成模型的失败，等于只改并行度就能改变修复成功率，直接违背
+          跨模型对比的前提。
+        """
         if self.spent_tokens >= self._total_tokens:
-            return f"token 预算耗尽：{self.spent_tokens} / {self._total_tokens}"
+            return ("tokens",
+                    f"token 预算耗尽：{self.spent_tokens} / {self._total_tokens}")
         if self.spent_usd >= self._total_usd:
-            return (f"美元预算耗尽：{fmt_usd(self.spent_usd)}"
-                    f" / {fmt_usd(self._total_usd)}")
+            return ("usd", f"美元预算耗尽：{fmt_usd(self.spent_usd)}"
+                           f" / {fmt_usd(self._total_usd)}")
         # 未 start 就不计时：单测直接构造 RunBudget 不该误触发时间中止
         if self._start is not None:
             elapsed = self._clock() - self._start
             if elapsed >= self._total_seconds:
-                return f"时间预算耗尽：{elapsed:.0f}s / {self._total_seconds:.0f}s"
+                return ("wall", f"时间预算耗尽：{elapsed:.0f}s"
+                                f" / {self._total_seconds:.0f}s")
         return None
+
+    def exhausted(self) -> str | None:
+        """超限返回原因，未超返回 None。"""
+        hit = self.exhaustion()
+        return hit[1] if hit else None
