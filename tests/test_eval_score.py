@@ -40,6 +40,29 @@ def test_all_errors_gives_zero_rates_not_crash():
     assert s.locate_rate == 0.0
 
 
+def test_error_only_totals_exclude_the_broken_tasks_too():
+    """出错的任务不进任何口径 —— 越界与信号两列也一样。
+
+    原来 tasks == 0 的早返回分支对**全部** results 求和，tasks > 0 的分支只
+    对 valid 求和。于是同一批结果里多一个成功任务，这两列反而从 (9, 7)
+    归零：同一列在两个分支下量的不是同一个东西。
+    """
+    s = summarize([_r(error="炸了", violations=9, signals=7)])
+    assert s.tasks == 0
+    assert s.violations == 0, "出错的任务不该给越界列贡献次数"
+    assert s.signals == 0, "出错的任务不该给可疑信号列贡献次数"
+    assert s.errors == 1
+
+
+def test_totals_do_not_change_when_a_valid_task_is_added():
+    """两个分支必须是同一把尺：加一个干净的有效任务不该改变这两列。"""
+    broken = _r(error="炸了", violations=9, signals=7)
+    alone = summarize([broken])
+    with_valid = summarize([broken, _r(violations=0, signals=0)])
+    assert (alone.violations, alone.signals) == (0, 0)
+    assert (with_valid.violations, with_valid.signals) == (0, 0)
+
+
 def test_empty_input():
     s = summarize([])
     assert s.tasks == 0
