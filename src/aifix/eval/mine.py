@@ -23,17 +23,31 @@ from .workspace import materialize
 
 def split_paths(paths: list[str],
                 test_dirs: list[str]) -> tuple[list[str], list[str]]:
-    """把 commit 改动的路径拆成（测试文件, 源文件）。"""
+    """把 commit 改动的路径拆成（测试侧, 源文件）。
+
+    「测试侧」不只是 .py：测试目录下的夹具（数据文件、快照、配置片段）必须
+    跟着测试一起被 materialize 嫁接。少了它们，任务在 base 侧因缺文件而红、
+    在 C 侧绿，通过全部现有校验进入任务集，但 ground truth 实际不可达 ——
+    修复模型即便诊断和补丁都对也过不了。这不是捏造任务（确实是红转绿），
+    是任务质量问题。
+
+    非测试目录下的非 .py 一律忽略，**不进 gold_files**：gold 是 locate_hit
+    的判定依据，衡量的是 Detector 定位**源文件**的能力，塞进数据文件会稀释
+    这个指标。
+    """
     tests: list[str] = []
     src: list[str] = []
+    # 按**分段**比前缀，不用裸 startswith：`testdata/x.py`.startswith("test")
+    # 是 True，但它不是 `test` 目录下的文件
+    prefixes = [PurePosixPath(d).parts for d in test_dirs]
     for p in paths:
         pp = PurePosixPath(p)
-        if pp.suffix != ".py":
-            continue
-        # 目录判 + 文件名判：有的项目把测试和源码放在一起
-        if (pp.parts and pp.parts[0] in test_dirs) or pp.name.startswith("test_"):
+        in_test_dir = any(pp.parts[:len(d)] == d for d in prefixes if d)
+        # conftest.py 可能躺在仓库根目录 —— 既不在 test_dirs 里，也不以
+        # test_ 开头，会被判成源文件进 gold_files。它是测试基础设施。
+        if in_test_dir or pp.name == "conftest.py" or pp.name.startswith("test_"):
             tests.append(p)
-        else:
+        elif pp.suffix == ".py":
             src.append(p)
     return tests, src
 

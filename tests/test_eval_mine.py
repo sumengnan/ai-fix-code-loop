@@ -34,6 +34,48 @@ def test_empty_commit_is_not_a_candidate():
     assert is_candidate(*split_paths([], _DIRS)) is False
 
 
+def test_fixture_files_under_test_dirs_go_with_the_tests():
+    """测试目录下的非 .py 夹具必须跟着测试一起嫁接，否则 ground truth 不可达。"""
+    tests, src = split_paths(
+        ["tests/test_a.py", "tests/data/golden.json", "tests/fixtures/x.sql",
+         "src/pkg/mod.py", "README.md", "assets/logo.png"],
+        ["tests", "test"])
+    assert tests == ["tests/test_a.py", "tests/data/golden.json",
+                     "tests/fixtures/x.sql"]
+    # 非测试目录的非 .py 不进 gold_files：gold 是 locate_hit 的判定依据，
+    # 衡量的是定位**源文件**的能力，塞进数据文件会稀释这个指标
+    assert src == ["src/pkg/mod.py"]
+
+
+def test_conftest_is_test_infrastructure_not_ground_truth():
+    """根目录 conftest.py 既不在 test_dirs 里也不以 test_ 开头。"""
+    tests, src = split_paths(["conftest.py", "src/pkg/mod.py"], ["tests"])
+    assert tests == ["conftest.py"]
+    assert src == ["src/pkg/mod.py"]
+
+
+def test_test_dir_is_matched_as_a_path_prefix_not_just_the_first_segment():
+    """多段的测试目录必须能判出来。
+
+    起因不是假设：M5 要做的 MavenAdapter，标准布局是 `src/test/java/...`，
+    `test_dirs` 会是 `["src/test"]`，而现在的判据是 `parts[0] in test_dirs`
+    —— `parts[0]` 是 `src`，判不出来，整个 Java 测试树会被当成源文件塞进
+    gold_files。改成路径前缀匹配，对 pytest 的 `["tests", "test"]` 行为完全
+    不变（`tests/x.py` 的前缀就是 `tests`）。
+    """
+    tests, src = split_paths(
+        ["src/test/java/demo/CalcTest.java", "src/main/java/demo/Calc.java"],
+        ["src/test"])
+    assert tests == ["src/test/java/demo/CalcTest.java"]
+    # .java 不是 .py，不进 gold_files —— 这一条由 MavenAdapter 自己的
+    # 后缀判定接手，不在本函数的职责里
+    assert src == []
+    # 前缀必须按**分段**比，不能裸 startswith：`testdata/x.py` 不是
+    # `test` 目录下的文件
+    tests, src = split_paths(["testdata/x.py"], ["test"])
+    assert tests == [] and src == ["testdata/x.py"]
+
+
 import pytest
 
 from aifix.adapters.pytest_adapter import PytestAdapter
