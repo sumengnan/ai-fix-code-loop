@@ -41,6 +41,22 @@ def _read_facts(repo: Path, run_id: str) -> list[dict[str, Any]]:
             p.read_text(encoding="utf-8").splitlines() if x.strip()]
 
 
+def first_attempt_suspect(facts: list[dict[str, Any]]) -> str | None:
+    """取第 1 轮 attempt 的 suspect_file；那一轮没写就返回 None。
+
+    定位准确率量的是 Detector 的**冷启动**能力。第 2/3 轮已经看过上一轮的
+    失败反馈，是一道更容易的题，混进来就不是同一个指标了。
+
+    必须按 attempt 过滤而不是「取第一条 suspect_file」：detect_node 在 JSON
+    解析失败时只写 diagnosis_parse_failed、不写 suspect_file，于是取第一条
+    会静默滑到第 2 轮的诊断 —— 系统性抬高定位准确率，且抬高幅度正比于模型
+    的 JSON 合规性有多差。跨模型对比里最不该被混淆的就是这个维度。
+    """
+    return next((f["value"] for f in facts
+                 if f.get("key") == "suspect_file" and f.get("attempt") == 1),
+                None)
+
+
 async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
                    detector_client: Any = None,
                    fixer_client: Any = None) -> TaskResult:
@@ -63,9 +79,8 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
             "error": f"baseline 未复现目标用例：{task.target_test}"})
 
     facts = _read_facts(dest, run_id)
-    suspect = next((f["value"] for f in facts if f["key"] == "suspect_file"),
-                   None)
-    violations = sum(1 for f in facts if f["key"] == "violation")
+    suspect = first_attempt_suspect(facts)
+    violations = sum(1 for f in facts if f.get("key") == "violation")
     row = next((r for r in state["results"]
                 if r["test_id"] == task.target_test), None)
 

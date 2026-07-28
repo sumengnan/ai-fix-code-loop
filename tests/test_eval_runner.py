@@ -4,7 +4,7 @@ from harness.llm.base import StreamChunk, ToolCallDelta
 from harness.usage import Usage
 
 from aifix.config import AifixConfig
-from aifix.eval.runner import run_suite, run_task
+from aifix.eval.runner import first_attempt_suspect, run_suite, run_task
 from aifix.eval.task import Task
 
 _PATCH = """--- a/calc.py
@@ -91,6 +91,31 @@ async def test_baseline_not_reproduced_is_an_error_not_a_failure(
                        fixer_client=_fixer())
     assert r.error is not None
     assert "复现" in r.error
+
+
+def test_suspect_is_taken_from_the_first_attempt():
+    facts = [{"key": "suspect_file", "value": "calc.py", "attempt": 1},
+             {"key": "suspect_file", "value": "别的.py", "attempt": 2}]
+    assert first_attempt_suspect(facts) == "calc.py"
+
+
+def test_parse_failure_in_first_attempt_does_not_slide_to_the_second():
+    """定位准确率量的是 Detector 的冷启动能力，不能滑到第 2 轮。
+
+    第 2/3 轮已经看过失败反馈，是一道更容易的题；而 detect_node 在 JSON
+    解析失败时压根不写 suspect_file，于是「取第一条 suspect_file」会
+    系统性地把第 2 轮的诊断算进去 —— 抬高幅度正比于模型的 JSON 合规性
+    有多差，恰好是跨模型对比里最不该被混淆的维度。
+    """
+    facts = [{"key": "diagnosis_parse_failed", "value": True, "attempt": 1},
+             {"key": "suspect_file", "value": "calc.py", "attempt": 2}]
+    assert first_attempt_suspect(facts) is None
+
+
+def test_facts_without_attempt_are_ignored():
+    """attempt 坐标缺失说明这条事实不是在 attempt_span 里记的，不可信。"""
+    assert first_attempt_suspect(
+        [{"key": "suspect_file", "value": "calc.py"}]) is None
 
 
 async def test_suite_isolates_failures(history_repo, tmp_path):
