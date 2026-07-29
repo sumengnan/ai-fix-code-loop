@@ -274,3 +274,147 @@ async def test_a_failed_archive_does_not_break_the_delivery(tmp_path):
     assert res.exit_code == 0 and res.path == "delivered"
     assert gh.prs, "PR 仍然要开出来"
     assert "归档失败" in gh.statuses[-1][1], "但必须出声"
+
+
+# ---------------------------------------------------------------- 收拾与兜底
+
+async def test_a_failed_red_check_does_not_leave_the_test_behind(tmp_path):
+    """红检不过就得把写下去的文件收走。
+
+    留着的后果不是「多个文件」：它是一条**红着的**测试，下一次 run 的 baseline
+    会把它算进失败集，于是模型被派去修一个上一次已经判定为无效的复现。
+    """
+    # 落盘走的是真的 write_reproduction（handle 只打桩了生成与红检），
+    # 所以这条断言量的是「写下去之后有没有被收走」，不是「有没有写过」。
+    _, _, _ = await _handle(_payload(), tmp_path, red=(False, "没有失败"))
+    assert not (tmp_path / "tests" / "test_issue_1.py").exists()
+
+    # 反向对照：红检通过时它必须还在 —— 否则上一条断言恒真
+    _, _, _ = await _handle(_payload(), tmp_path)
+    assert (tmp_path / "tests" / "test_issue_1.py").exists()
+
+
+async def test_an_abort_before_the_worktree_exists_still_reports(tmp_path):
+    """preflight 阶段就中止时没有交付分支 —— 不能拿空分支名去 push。
+
+    裸抛的后果不是「报错」而是失联：没有 PR、没有状态评论、issue 里最后一条
+    还停在那个 👀，人只能去 Actions 页面读一段调用栈。而 run_once 已经把报告
+    准备好了，那里面写着到底出了什么事。
+    """
+    st = _state(branch="", abort_kind="model",
+                report_md="# 报告\n\n模型端点不可达")
+    res, gh, calls = await _handle(_payload(), tmp_path, state=st)
+    assert not any("push" in c for c in calls["git"]), "没有分支可推"
+    assert not gh.prs, "没有分支就没有 PR"
+    assert gh.comments and "模型端点不可达" in gh.comments[-1][1]
+    assert res.path == "aborted"
+
+
+async def test_a_push_failure_is_reported_not_thrown(tmp_path):
+    """推不上去（没配远端、认证过期）同样不能裸抛。
+
+    与空分支那条是同一个失联：异常穿出去 → 没有 PR、没有说明、issue 里最后
+    一条还停在 👀。区别只在这次**确实是个失败**，所以退非 0。
+    """
+    gh = _Gh()
+    fakes, calls = _fakes()
+
+    def _git(repo, *args):
+        calls["git"].append(list(args))
+        if "push" in args:
+            raise RuntimeError("remote rejected")
+        return ""
+
+    fakes["git"] = _git
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    res = await handle(_payload(), tmp_path, AifixConfig(), gh, **fakes)
+    assert res.exit_code == 1 and res.path == "push_failed"
+    assert not gh.prs
+    assert gh.comments and "remote rejected" in gh.comments[-1][1]
+
+
+async def test_environment_aborts_exit_nonzero(tmp_path):
+    """口径要和 `aifix run` 一致：crash / collect / model 三种都是「这次没跑
+    成」，退 0 会让流水线把它读成正常收场。
+
+    反向对照：预算耗尽是**正常收场**（活干到钱花完为止，结论仍可信），退 0。
+    """
+    for kind, code in (("crash", 1), ("collect", 1), ("model", 1),
+                       ("usd", 0), ("wall", 0), (None, 0)):
+        st = _state(branch="", abort_kind=kind)
+        res, _, _ = await _handle(_payload(), tmp_path, state=st)
+        assert res.exit_code == code, f"{kind} 应该退 {code}"
+
+
+# ---------------------------------------------------------------- 预算
+
+async def test_the_reproduce_spend_is_deducted_from_the_run_budget(tmp_path):
+    """复现那一步花的钱必须从后面的额度里扣掉。
+
+    它在 `run_once` **之外**发起调用，三层预算闸一分都管不到。不扣的话，
+    设 AIFIX_BUDGET_USD=0.50 实际可能花掉两倍 —— 而这个项目对预算的措辞是
+    「越线之后不再发起新的模型调用」，超支上界必须是可推导的。一个精确措辞
+    但从没验证过的上界实际超支 4 倍，是这个仓库已经犯过的错。
+    """
+    seen = {}
+    fakes, _ = _fakes(repro=ReproduceOutcome(_REPRO, tokens=1200,
+                                             cost_usd=0.30))
+
+    async def _run(repo, config, **k):
+        seen["usd"] = config.budget_usd
+        seen["tokens"] = config.budget_tokens
+        return _state()
+
+    fakes["run_fn"] = _run
+    cfg = AifixConfig(budget_usd=0.50, budget_tokens=10_000)
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    await handle(_payload(), tmp_path, cfg, _Gh(), **fakes)
+    assert seen["usd"] == pytest.approx(0.20)
+    assert seen["tokens"] == 8_800
+
+
+async def test_the_budget_never_goes_negative(tmp_path):
+    """复现就把额度花超时，给 run_once 的是 0 而不是负数。
+
+    负数会让「还剩多少」的比较全部反向 —— 那时闸最该拦住的一刻，恰好完全不拦。
+    """
+    seen = {}
+    fakes, _ = _fakes(repro=ReproduceOutcome(_REPRO, tokens=99_999,
+                                             cost_usd=9.9))
+
+    async def _run(repo, config, **k):
+        seen["usd"], seen["tokens"] = config.budget_usd, config.budget_tokens
+        return _state()
+
+    fakes["run_fn"] = _run
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    await handle(_payload(), tmp_path,
+                 AifixConfig(budget_usd=0.50, budget_tokens=10_000),
+                 _Gh(), **fakes)
+    assert seen["usd"] == 0.0 and seen["tokens"] == 0
+
+
+async def test_the_reproduce_cost_is_visible_in_the_pr(tmp_path):
+    """扣掉还不够，还得让人看见 —— 报告里的成本只算 run_once 那一段，
+    PR 上不写的话，这笔钱在任何一份产物里都不存在。"""
+    fakes, _ = _fakes(repro=ReproduceOutcome(_REPRO, tokens=1200,
+                                             cost_usd=0.30))
+    gh = _Gh()
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    await handle(_payload(), tmp_path, AifixConfig(), gh, **fakes)
+    assert "1,200" in gh.prs[0]["body"] or "1200" in gh.prs[0]["body"]
+
+
+def test_issue_handle_refuses_a_usd_budget_without_a_price_map(
+        tmp_path, monkeypatch):
+    """与 `aifix run` 同一道闸。在 Actions 上这个假保证尤其贵：没人盯着终端，
+    发现时钱已经花完了。"""
+    from aifix.cli import _cmd_issue, build_parser
+    monkeypatch.setenv("AIFIX_BUDGET_USD", "0.5")
+    monkeypatch.delenv("AIFIX_PRICE_MAP", raising=False)
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(tmp_path / "ev.json"))
+    args = build_parser().parse_args(
+        ["issue", "handle", "--repo", str(tmp_path)])
+    with pytest.raises(SystemExit) as e:
+        _cmd_issue(args)
+    assert "价格表" in str(e.value)

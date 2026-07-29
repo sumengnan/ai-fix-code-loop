@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..config import AifixConfig
+from ..graph import COLLECTION_ABORT_KIND, MODEL_ABORT_KIND
 from ..delivery import COMMIT_EMAIL, COMMIT_NAME
 from ..traces import TRACES_BRANCH
 from ..nodes.report import count_fixed
@@ -34,6 +35,12 @@ class HandleResult:
     pr_url: str | None = None
 
 
+# 「这次没跑成」的三种中止。口径必须与 `aifix run` 的退出码一致（见
+# cli._cmd_run）：预算耗尽（usd / tokens / wall）相反 —— 那是**正常收场**，
+# 活干到钱花完为止，结论仍然可信，所以退 0。
+_ENV_ABORTS = frozenset({"crash", COLLECTION_ABORT_KIND, MODEL_ABORT_KIND})
+
+
 def _git(repo: Path, *args: str) -> str:
     res = subprocess.run(["git", *args], cwd=repo, capture_output=True,
                          text=True)
@@ -43,8 +50,8 @@ def _git(repo: Path, *args: str) -> str:
     return res.stdout
 
 
-def _pr_body(state: dict[str, Any], target: str,
-             issue_number: int) -> str:
+def _pr_body(state: dict[str, Any], target: str, issue_number: int,
+             repro_tokens: int = 0, repro_usd: float = 0.0) -> str:
     """PR 正文 = 报告 + 必要的背景。
 
     baseline 里有别的红时**必须出声**：那多半是 runner 的环境漂移，而它会
@@ -53,6 +60,13 @@ def _pr_body(state: dict[str, Any], target: str,
     干净的完全一样。
     """
     parts = [f"关联 issue：#{issue_number}", "", state.get("report_md") or ""]
+
+    if repro_tokens:
+        # 报告里的成本只统计 run_once 那一段。复现这一步在它之外发起调用，
+        # 不单独写出来的话，这笔钱在**任何一份产物里都不存在**。
+        cost = "未知" if repro_usd <= 0 else f"${repro_usd:.4f}"
+        parts += ["", f"（另：写复现测试花了 {repro_tokens:,} tokens、{cost}，"
+                      f"已从上面那次 run 的额度里扣除。）"]
 
     others = [i for i in (state.get("baseline_ids") or []) if i != target]
     if others:
@@ -122,9 +136,14 @@ async def handle(
         gh.comment(ev.number, f"**没能写出复现测试。**\n\n{out.reason}")
         return HandleResult(0, "no_repro")
 
-    write_reproduction(repo, r)
+    written = write_reproduction(repo, r)
     ok, why = await red_check_fn(repo, adapter, r.target_test_id)
     if not ok:
+        # 收走它。留着的后果不是「多个文件」：这是一条**红着的**测试，下一次
+        # run 的 baseline 会把它算进失败集，于是模型被派去修一个上一次已经判
+        # 定为无效的复现。runner 上无所谓（机器就没了），本地和自建 runner 上
+        # 是实打实的。
+        written.unlink(missing_ok=True)
         # 原因要原样带出来：人看到「没有失败」和看到「收集错误」时，下一步
         # 动作完全不同。归并成一句「复现失败」等于把诊断信息扔了。
         gh.comment(ev.number,
@@ -146,18 +165,57 @@ async def handle(
         f"test: 复现 #{ev.number} —— {ev.title}", "--", r.test_file)
 
     # ---------------------------------------------------------- 核心循环
+    # **复现那一步的花销要从后面的额度里扣掉。**
+    #
+    # 它在 run_once 之外发起调用，三层预算闸一分都管不到 —— 不扣的话，设
+    # AIFIX_BUDGET_USD=0.50 实际可能花掉两倍，而这个项目对预算的措辞是「越线
+    # 之后不再发起新的模型调用」，超支上界必须是可推导的。一个精确措辞但从没
+    # 验证过的上界实际超支 4 倍，是这个仓库已经犯过一次的错。
+    #
+    # 夹到 0，不允许负数：负数会让「还剩多少」的比较全部反向，那时闸最该拦住
+    # 的一刻恰好完全不拦（与 fix_node 里 `0.0 or None` 那处同类）。
+    run_config = config.model_copy(update={
+        "budget_usd": max(0.0, config.budget_usd - out.cost_usd),
+        "budget_tokens": max(0, config.budget_tokens - out.tokens)})
+
     run_id = uuid.uuid4().hex[:8]
-    state = await run_fn(repo, config, run_id=run_id,
+    state = await run_fn(repo, run_config, run_id=run_id,
                          only_test=r.target_test_id)
 
     # run_once 内部已经保证「报告先落地再返回」（见 cli.run_once 的 except），
     # 所以这里不再包一层 try —— 包了只会把它已经处理好的结果再吞一次。
-    body = _pr_body(state, r.target_test_id, ev.number)
+    body = _pr_body(state, r.target_test_id, ev.number,
+                    repro_tokens=out.tokens, repro_usd=out.cost_usd)
     fixed = count_fixed(state.get("results") or [])
     crashed = state.get("abort_kind") == "crash"
+    code = 1 if state.get("abort_kind") in _ENV_ABORTS else 0
 
     branch = state.get("branch") or ""
-    git(repo, "push", "origin", branch)
+    if not branch:
+        # run_once 在建 worktree **之前**就中止了（解释器配错、模型端点不通）。
+        # 没有分支可推，也就没有 PR。
+        #
+        # 拿空分支名去 push 的后果不是「报错」而是失联：异常裸抛出去，没有 PR、
+        # 没有状态评论，issue 里最后一条还停在那个 👀，人只能去 Actions 页面读
+        # 一段调用栈 —— 而 run_once 已经把报告准备好了，那里面写着到底出了什么事。
+        gh.comment(ev.number,
+                   f"**这次 run 没能开始。**\n\n{state.get('report_md') or ''}")
+        return HandleResult(code, "aborted")
+
+    # 推不上去（没配远端、认证过期、远端拒绝）不能裸抛：与空分支那条是同一个
+    # 失联 —— 异常穿出去就没有 PR、没有说明，issue 里最后一条还停在那个 👀。
+    # 区别只在这次**确实是个失败**，所以退非 0 而不是照常收场。
+    try:
+        git(repo, "push", "origin", branch)
+    except Exception as e:                      # noqa: BLE001 —— 见上
+        gh.comment(ev.number,
+                   f"**修复跑完了，但分支推不上去。**\n\n"
+                   f"`{type(e).__name__}：{e}`\n\n"
+                   f"分支还在这次 run 的本地仓库里（`{branch}`），但 runner "
+                   f"结束后它就没了。下面是这次的报告：\n\n"
+                   f"{state.get('report_md') or ''}")
+        return HandleResult(1, "push_failed")
+
     title = (f"fix: {ev.title} (#{ev.number})" if fixed
              else f"[复现已就位，未修复] {ev.title} (#{ev.number})")
     url = gh.create_pr(head=branch, title=title, body=body)
@@ -175,8 +233,7 @@ async def handle(
 
     gh.upsert_status(ev.number,
                      _status(state, fixed, crashed, url) + archived)
-    return HandleResult(1 if crashed else 0,
-                        "crashed" if crashed else "delivered", url)
+    return HandleResult(code, "crashed" if crashed else "delivered", url)
 
 
 def _status(state: dict[str, Any], fixed: int, crashed: bool,

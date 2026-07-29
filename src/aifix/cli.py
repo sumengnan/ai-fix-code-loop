@@ -605,11 +605,16 @@ def _cmd_issue(args) -> None:
               "（tests/fixtures/ 下有一个真实形状的样例）。")
         raise SystemExit(1)
 
+    config = AifixConfig()
+    # 与 `aifix run` 同一道闸：workflow 里显式设了 AIFIX_BUDGET_USD，而不配
+    # 价格表时成本恒为 0、美元闸永远不触发 —— 用户设了上限，系统欣然接受，
+    # 然后一分钱不拦。在 Actions 上这个假保证尤其贵：没人盯着终端。
+    require_price_map_for_usd_budget(config)
+
     payload = load_payload(args.event)
     repo = Path(args.repo).resolve()
     full = ((payload.get("repository") or {}).get("full_name") or "")
-    res = asyncio.run(handle(payload, repo, AifixConfig(),
-                             GitHubClient(full)))
+    res = asyncio.run(handle(payload, repo, config, GitHubClient(full)))
     print(f"通路：{res.path}" + (f" · PR：{res.pr_url}" if res.pr_url else ""))
     raise SystemExit(res.exit_code)
 
