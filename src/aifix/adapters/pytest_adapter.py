@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import configparser
+import json
+import os
 import re
+import subprocess
 import sys
+import tomllib
 from pathlib import Path, PurePosixPath
 
 from .base import Failure, SourceCandidate
@@ -27,9 +32,207 @@ _IN_FUNC = re.compile(r"^\s+in\s+(?P<fn>\S+)\s*$")
 
 _MARKERS = ("pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml", "conftest.py")
 
+# 探测顺序即优先级。`.venv` 在前是因为 uv / poetry / `python -m venv .venv`
+# 都用它，`venv` 是更老的写法；两个同时在（换过工具、没删干净）时取新的那个。
+_VENV_DIRS = (".venv", "venv")
+# Windows 分支**没有在真机上验证过**，仍然写进来：不写等于「Windows 上探测
+# 恒空、静默退回 sys.executable」，而写错的代价同样只是探测不到、退回
+# sys.executable —— 两边都不比现状差，写上去至少有一半机会是对的。
+_VENV_BIN = "Scripts" if os.name == "nt" else "bin"
+_VENV_EXE = "python.exe" if os.name == "nt" else "python"
+
+
+def discover_test_python(repo: Path) -> str | None:
+    """在**源仓库**里找它自己的虚拟环境解释器；没有则 None。
+
+    只探源仓库，不探 worktree —— 这不是风格选择：aifix 的 worktree 建在
+    `.aifix/runs/<id>/tree`（git worktree），评测建在 `git clone --local` 出来
+    的临时目录，两者都**不含** `.venv`（它没被 git 跟踪）。照着 worktree 探，
+    探测永远为空，整个功能会静默退化成 sys.executable 而不报任何错。
+    解释器路径是绝对的，在别的目录下当 argv[0] 用没有问题。
+
+    要求可执行而不只是「文件存在」：一个不可执行的 `.venv/bin/python`
+    （权限被改过、venv 拷贝坏了）拿去当命令会在 exec 时 PermissionError，
+    而那发生在 baseline 里 —— 用户看到的是「测试没跑成」，一句指向错误方向
+    的话。退回 sys.executable 不比现状差，所以这里宁可当作没找到。
+    """
+    for d in _VENV_DIRS:
+        p = Path(repo) / d / _VENV_BIN / _VENV_EXE
+        if p.is_file() and os.access(p, os.X_OK):
+            return str(p)
+    return None
+
+
+def resolve_test_python(repo: Path, configured: str | None = None) -> str | None:
+    """跑目标项目测试该用哪个解释器：显式配置 > 源仓库的 venv > None。
+
+    返回 None 表示两条来源都空，由适配器退回 `sys.executable`（改造之前的
+    唯一行为）——这条回退不能去掉：目标项目没有 venv、或者依赖本来就装在
+    当前解释器里（uv tool 的 overlay、CI 的单一环境）时，它是对的。
+
+    显式配置不做存在性检查，只做 `~` 展开：拒绝的动作放在 preflight，那里
+    才有「中止整个 run 并告诉用户为什么」的位置；在这里抛的话，异常会从
+    detect / fix / verify 三个节点的任意一个里钻出来。
+    """
+    if configured:
+        return os.path.expanduser(configured)
+    return discover_test_python(repo)
+
+
+# 探测目标包时跳过的目录名。`tests` 是测试自己的包，不是被验证的产品代码；
+# 其余几个是常见的非产品目录，它们即使解析到 worktree 之外也说明不了什么。
+_NOT_PRODUCT = {"tests", "test", "docs", "doc", "examples", "example",
+                "scripts", "benchmarks", "build", "dist"}
+
+# 在目标解释器里问一句「这些顶层包会从哪个文件导入」。用 find_spec 而不是
+# import：不执行包体，快，且一个包的 import 副作用不会影响下一个的答案。
+_PROBE_SRC = """
+import importlib.util, json, sys
+out = {}
+for name in sys.argv[1:]:
+    try:
+        spec = importlib.util.find_spec(name)
+    except BaseException:
+        spec = None
+    origin = None
+    if spec is not None:
+        origin = spec.origin
+        if origin in (None, "namespace"):
+            locs = list(spec.submodule_search_locations or ())
+            origin = locs[0] if locs else None
+    out[name] = origin
+print(json.dumps(out))
+"""
+
+
+def _candidate_packages(worktree: Path) -> list[str]:
+    """worktree 里能当锚点的顶层包名：根目录与 `src/` 下带 `__init__.py` 的。"""
+    names: list[str] = []
+    for parent in (worktree, worktree / "src"):
+        if not parent.is_dir():
+            continue
+        for child in sorted(parent.iterdir()):
+            n = child.name
+            if (n in _NOT_PRODUCT or n.startswith((".", "_"))
+                    or not n.isidentifier() or n in names):
+                continue
+            if (child / "__init__.py").is_file():
+                names.append(n)
+    return names[:20]
+
+
+def _ini_pythonpath(worktree: Path) -> list[str]:
+    """读 pytest 配置里的 `pythonpath`，还原成 worktree 下的绝对路径。
+
+    这一项是**决定性**的：它让 pytest 把 worktree 的源码目录插到 sys.path
+    最前，从而盖过 site-packages 里那条指向源仓库的可编辑安装记录。不读它
+    的话，凡是 src 布局 + 配了 pythonpath 的项目（正常且安全的配置）都会被
+    下面的探测误报一次 —— 一条在最常见的健康配置上就会响的警告，等于没有。
+    """
+    out: list[str] = []
+    raw: object = None
+    pyproject = worktree / "pyproject.toml"
+    if pyproject.is_file():
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            raw = data.get("tool", {}).get("pytest", {}).get(
+                "ini_options", {}).get("pythonpath")
+        except (OSError, tomllib.TOMLDecodeError, AttributeError):
+            raw = None
+    if raw is None:
+        # ini 家族里 pytest 各用一个 section 名：pytest.ini / tox.ini 是
+        # [pytest]，setup.cfg 是 [tool:pytest]（[pytest] 在 setup.cfg 里被
+        # pytest 明确拒绝）。值是空白分隔的多行字符串。
+        for fname, section in (("pytest.ini", "pytest"), ("tox.ini", "pytest"),
+                               ("setup.cfg", "tool:pytest")):
+            f = worktree / fname
+            if not f.is_file():
+                continue
+            # interpolation=None：setup.cfg / tox.ini 里出现 `%` 是常事
+            # （`%(name)s` 之外的裸 `%` 会让默认的 BasicInterpolation 抛），
+            # 而这里只是取一个值，不需要插值。
+            cp = configparser.ConfigParser(interpolation=None)
+            try:
+                cp.read(f, encoding="utf-8")
+                raw = cp.get(section, "pythonpath")
+            except (OSError, configparser.Error, UnicodeDecodeError):
+                raw = None
+            if raw is not None:
+                break
+    if isinstance(raw, str):
+        raw = raw.split()
+    for item in raw or ():
+        if isinstance(item, str):
+            out.append(str((worktree / item).resolve()))
+    return out
+
+
+def imports_outside_worktree(python: str,
+                             worktree: Path) -> list[tuple[str, str]]:
+    """目标项目的顶层包在这个解释器里解析到了 worktree 之外吗。
+
+    存在的理由（这是换解释器换来的**真实**风险）：目标项目如果把自己可编辑
+    安装（`pip install -e .`）进了那个 venv，site-packages 里会留一条指向
+    **源仓库**的路径记录。于是 `import <目标包>` 可能解析到源仓库那份
+    **没打补丁**的代码，而不是 worktree 里打了补丁的那份 —— 测试照跑、照绿，
+    验证却完全失去意义。这是这个项目最怕的那种失效：不崩溃、不报错、
+    只有结论是假的。
+
+    这里**不解决**它（那要么接管目标项目的安装方式，要么改写它的 sys.path，
+    两件都超出适配器的职权），只负责在它发生时出声。
+
+    **这是一个近似，不是保证**：它按 `python -c` 复现 pytest 的 sys.path
+    前几项（cwd + ini 里的 pythonpath + 环境里的 PYTHONPATH），但复现不了
+    conftest.py 里手写的 sys.path 改动、`--import-mode=importlib` 的细节、
+    以及 rootdir 之外的插件。所以它只报警、不拦截，且返回空**不等于**安全。
+    任何异常都吞掉返回空：这道探测的价值是提醒，代价不能是多一条崩溃路径。
+    """
+    wt = Path(worktree).resolve()
+    names = _candidate_packages(wt)
+    if not names:
+        return []
+    env = dict(os.environ)
+    extra = _ini_pythonpath(wt)
+    if extra:
+        old = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = os.pathsep.join(
+            [*extra, *([old] if old else [])])
+    try:
+        res = subprocess.run([python, "-c", _PROBE_SRC, *names],
+                             cwd=str(wt), capture_output=True, text=True,
+                             timeout=60, env=env)
+        found = json.loads(res.stdout or "{}")
+    except Exception:
+        return []
+    hits: list[tuple[str, str]] = []
+    for name in names:
+        origin = found.get(name)
+        if not isinstance(origin, str) or not origin:
+            # 解析不到（缺依赖 / 命名空间包没有实体路径）不是这道探测要说的
+            # 事：那会以收集错误的形式响亮地出现在测试结果里。
+            continue
+        try:
+            real = Path(origin).resolve()
+        except OSError:
+            continue
+        if not real.is_relative_to(wt):
+            hits.append((name, str(real)))
+    return hits
+
 
 class PytestAdapter:
     name = "pytest"
+
+    def __init__(self, python: str | None = None) -> None:
+        """python：跑测试用的解释器；None 表示退回 `sys.executable`。
+
+        做成构造参数而不是 `full_test_command(python=...)` 那样的方法参数，
+        是为了不动 `ProjectAdapter` 协议：核心循环有四个节点各自取一次适配器，
+        改协议要连 MavenAdapter 和每一个调用点一起改，而 Maven 压根不需要它
+        （`mvn` 是外部命令，不走 Python 解释器）。注入点因此收在
+        `nodes.baseline.adapter_from_state` 一处。
+        """
+        self.python = python or sys.executable
 
     @staticmethod
     def detect(repo: Path) -> bool:
@@ -66,10 +269,10 @@ class PytestAdapter:
     SCOPED_REPORT_NAME = ".aifix-recheck.xml"
 
     def full_test_command(self) -> list[str]:
-        return [sys.executable, *self._BASE, f"--junitxml={self.REPORT_NAME}"]
+        return [self.python, *self._BASE, f"--junitxml={self.REPORT_NAME}"]
 
     def scoped_test_command(self, test_ids: list[str]) -> list[str]:
-        return [sys.executable, *self._BASE,
+        return [self.python, *self._BASE,
                 f"--junitxml={self.SCOPED_REPORT_NAME}", *test_ids]
 
     def report_paths(self, worktree: Path, scoped: bool = False) -> list[Path]:

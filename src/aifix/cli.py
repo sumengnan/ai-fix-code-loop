@@ -249,10 +249,29 @@ def require_price_map_for_usd_budget(config: AifixConfig,
         "  修法二：去掉美元上限，改用 AIFIX_BUDGET_TOKENS 限制 token")
 
 
+# run / mine / mutate 三个子命令都在目标项目里真跑测试，都吃这一段。
+_TEST_PYTHON_HELP = """\
+测试用哪个解释器（AIFIX_TEST_PYTHON）：
+  显式配置 > 源仓库里的 .venv/bin/python 或 venv/bin/python > aifix 自己的解释器。
+  目标项目的测试依赖装在它自己的环境里，而不是 aifix 的环境里 —— 不这样做的话，
+  拿 aifix 的解释器去跑别人的测试通常只会得到一堆 collection error。
+
+  **一个必须知道的陷阱**：目标项目如果把自己可编辑安装（pip install -e .）进了
+  那个解释器，`import <目标包>` 可能解析到**源仓库**，而不是 worktree 里那份打了
+  补丁的代码 —— 测试照跑照绿，而验证的是没打补丁的代码，结论是假的。
+  aifix 在 baseline 之前会做一次近似探测并往 stderr 出声，但那是提醒不是保证：
+  它复现不了 conftest.py 里手写的 sys.path 改动。最可靠的自保是在目标项目的
+  pytest 配置里设 pythonpath（如 [tool.pytest.ini_options] pythonpath = ["src"]），
+  它会把 worktree 的源码目录插到 sys.path 最前，盖过可编辑安装那条记录。
+"""
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aifix")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    run = sub.add_parser("run", help="修复当前 repo 的失败测试")
+    run = sub.add_parser(
+        "run", help="修复当前 repo 的失败测试", epilog=_TEST_PYTHON_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     run.add_argument("repo", nargs="?", default=".")
     run.add_argument("--test", default=None,
                      help="只修这一个失败用例（test_id）")
@@ -263,7 +282,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--dry-run", action="store_true",
                      help="只跑 preflight + baseline，报告有多少活")
 
-    mine = sub.add_parser("mine", help="从 git history 挖任务集")
+    mine = sub.add_parser(
+        "mine", help="从 git history 挖任务集", epilog=_TEST_PYTHON_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     mine.add_argument("repo", nargs="?", default=".")
     mine.add_argument("--limit", type=int, default=50,
                       help="回溯多少个提交")
@@ -372,16 +393,21 @@ def _cmd_run(args) -> None:
 
 def _cmd_mine(args) -> None:
     # 延迟导入：eval 子包依赖 cli 模块（run_once），提到模块顶部会形成循环导入
+    from .adapters.pytest_adapter import resolve_test_python
     from .eval.mine import mine_tasks
     from .eval.task import write_jsonl
     from .nodes.baseline import detect_adapter
 
     repo = Path(args.repo).resolve()
+    # 挖任务要在克隆出来的工作树里真跑测试，和 run 一样吃「用哪个解释器」这个
+    # 问题。不接这一行的话，`aifix run` 能跑起来的项目 `aifix mine` 照样跑不动，
+    # 而失败形态是「0 个可用用例」—— 与「这个仓库最近没有红转绿的提交」一模一样。
+    test_python = resolve_test_python(repo, AifixConfig().test_python)
     # 适配器要探测，不能写死。这里曾是 `PytestAdapter()`：Maven 仓库拿到的
     # source_suffixes() 只认 `.py`，gold_files 恒空，产出 0 个任务且不报错 ——
     # 与「这个仓库最近没有红转绿的提交」无法区分。走 preflight 用的同一份
     # 探测，新增适配器时不会漏掉这一处。
-    adapter = detect_adapter(repo)
+    adapter = detect_adapter(repo, python=test_python)
     if adapter is None:
         print(f"没有适配器认领这个项目：{repo}")
         raise SystemExit(1)
@@ -402,9 +428,14 @@ def _cmd_mine(args) -> None:
 
 def _cmd_mutate(args) -> None:
     # 延迟导入：eval 子包依赖 cli 模块（run_once），提到模块顶部会形成循环导入
-    from .adapters.pytest_adapter import PytestAdapter
+    from .adapters.pytest_adapter import PytestAdapter, resolve_test_python
     from .eval.mutate import DuplicateTaskIds, mutate_tasks
     from .eval.task import write_jsonl
+
+    repo = Path(args.repo).resolve()
+    # 同 _cmd_mine：变异要在克隆的工作树里真跑测试来验证候选，用错解释器时
+    # 每个候选都「验证失败」，产出 0 个任务。
+    test_python = resolve_test_python(repo, AifixConfig().test_python)
 
     def progress(rel_path: str, n: int, error: str | None = None) -> None:
         if error is not None:
@@ -414,7 +445,7 @@ def _cmd_mutate(args) -> None:
 
     try:
         tasks = asyncio.run(mutate_tasks(
-            str(Path(args.repo).resolve()), PytestAdapter(),
+            str(repo), PytestAdapter(python=test_python),
             max_tasks=args.max_tasks, max_new_failures=args.max_new_failures,
             scope=args.scope, seed=args.seed, on_progress=progress))
     except DuplicateTaskIds as e:

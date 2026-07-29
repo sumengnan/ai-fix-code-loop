@@ -284,8 +284,8 @@ async def test_baseline_refuses_to_read_a_dead_test_run_as_all_green(
     st.update(preflight_node(st))
     with Worktree(buggy_repo, run_id="r1") as wt:
         st["worktree_path"] = str(wt.path)
-        monkeypatch.setattr(baseline_mod, "adapter_for",
-                            lambda name: _SilentAdapter())
+        monkeypatch.setattr(baseline_mod, "adapter_from_state",
+                            lambda state: _SilentAdapter())
         with pytest.raises(RuntimeError, match="报告"):
             await baseline_node(st)
 

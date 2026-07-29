@@ -28,6 +28,17 @@ _TEST_SRC = "src/test/java"
 class MavenAdapter:
     name = "maven"
 
+    def __init__(self, python: str | None = None) -> None:
+        """收下 python 但不用它 —— `mvn` 是外部命令，不走 Python 解释器。
+
+        接这个参数是接口对齐的代价，不是遗漏：`adapter_for` 对注册表里的每个
+        实现用的是同一行 `ADAPTERS[name](python=...)`，这里不收的话，任何
+        Maven 工程会在**取适配器**时 TypeError —— 而那发生在 baseline 之前，
+        表现成一次没有测试输出的崩溃。
+        （真要让 Maven 用上指定的 JDK/Maven，那是 `JAVA_HOME` / `mvn` 在
+        PATH 上的哪一个，与解释器不是同一个旋钮，也不该借这个参数表达。）
+        """
+
     @staticmethod
     def detect(repo: Path) -> bool:
         return (repo / "pom.xml").is_file()

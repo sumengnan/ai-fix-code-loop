@@ -14,7 +14,7 @@ from ..agents.fixer import SYSTEM_PROMPT, build_initial_messages, build_registry
 from ..agents.runner import consume
 from ..graph import AifixState, trace_of
 from ..violations import count_violations
-from .baseline import adapter_for
+from .baseline import adapter_from_state
 
 _EMPTY_FEEDBACK = (
     "你没有对任何文件做出修改。只说「已修复」是无效的 —— "
@@ -113,7 +113,7 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
     """
     cfg = state["config"]
     failure = state["_failures"][state["current"]]
-    adapter = adapter_for(state["adapter_name"])
+    adapter = adapter_from_state(state)
     raw = state.get("diagnosis")
     diagnosis = Diagnosis.model_validate(raw) if raw else None
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -8,8 +9,9 @@ from harness.sandbox.local import LocalSandbox
 from ..adapters.base import ProjectAdapter
 from ..adapters.junit import parse_junit
 from ..adapters.maven_adapter import MavenAdapter
-from ..adapters.pytest_adapter import PytestAdapter
-from ..graph import AifixState
+from ..adapters.pytest_adapter import (PytestAdapter, imports_outside_worktree,
+                                       resolve_test_python)
+from ..graph import AifixState, trace_of
 
 # 全项目唯一的适配器注册表。preflight_node 按插入顺序逐个 detect()，
 # adapter_for 按名字取，两种用法共用这一份数据 —— 曾经
@@ -30,11 +32,76 @@ ADAPTERS: dict[str, type[ProjectAdapter]] = {
 
 # 返回类型是协议而不是某个具体适配器：注册表里现在有两个实现，写死其中
 # 一个会让另一个在类型上「碰巧也能用」。
-def adapter_for(name: str) -> ProjectAdapter:
-    return ADAPTERS[name]()
+def adapter_for(name: str, python: str | None = None) -> ProjectAdapter:
+    """按名字取适配器。python 是跑测试用的解释器，None 表示各实现自己的默认。
+
+    注入走构造参数而不是改协议：`full_test_command()` 不接参数是协议里写死
+    的（报告写到哪、用什么命令都是构建体系自己的事），而 MavenAdapter 根本
+    不需要解释器。加一个方法参数要让两个实现和五个调用点一起跟上，加一个
+    构造参数只要注册表这一行。
+    """
+    return ADAPTERS[name](python=python)
 
 
-def detect_adapter(repo: Path) -> ProjectAdapter | None:
+def adapter_from_state(state: AifixState) -> ProjectAdapter:
+    """核心循环取适配器的**唯一**入口 —— 解释器在这里注入。
+
+    为什么不是各节点自己 `adapter_for(name)`：解释器要同时看配置和**源仓库**
+    （`state["repo"]`），而不是 worktree —— worktree 与评测的克隆里都没有
+    `.venv`（它没被 git 跟踪）。只有 state 同时握着这两样。
+
+    四个节点都必须走这里，漏掉一个的代价不对称：detect 只用 locate_source，
+    漏了看不出来；但 fix 漏掉的话，FixerAgent 手里的 RunTestsTool 会用另一个
+    解释器复跑 —— 模型看到的证据和 verify 的判定依据不是同一套环境，而两边
+    都不会报错。tests/test_interpreter.py 有一条对着源码的断言钉这件事。
+    """
+    return adapter_for(
+        state["adapter_name"],
+        python=resolve_test_python(Path(state["repo"]),
+                                   state["config"].test_python))
+
+
+def warn_if_patch_may_be_invisible(state: AifixState,
+                                   adapter: ProjectAdapter) -> None:
+    """跑 baseline 之前问一句：目标包会不会从 worktree **之外**导入。
+
+    换用目标项目自己的解释器换来的真实风险 —— 目标项目若把自己可编辑安装进
+    了那个 venv，`import <目标包>` 可能解析到源仓库那份**没打补丁**的代码，
+    于是每一轮 verify 验的都是原代码：不崩溃、不报错，只有「修好了」是假的。
+
+    只出声、不中止：这道探测是近似的（见 imports_outside_worktree），拿一个
+    可能误报的信号去拦住整个 run，会让用户为了跑起来而去关掉它，那比没有更糟。
+
+    写 stderr 而不是等报告：报告在整个 run 结束后才渲染，而这句话要在那之前
+    说出来才有用 —— 它要挡住的正是「跑了半小时、花了钱、结论是假的」。
+    trace 里另记一份事实，事后能查。
+    """
+    if not isinstance(adapter, PytestAdapter):
+        return                                  # Maven 不走 Python 的 import
+    trace_of(state).fact("test_python", adapter.python)
+    hits = imports_outside_worktree(adapter.python,
+                                    Path(state["worktree_path"]))
+    if not hits:
+        return
+    trace_of(state).fact("imports_outside_worktree",
+                         [{"module": m, "origin": o} for m, o in hits])
+    lines = "\n".join(f"    {m} → {o}" for m, o in hits)
+    print(
+        "⚠️  警告：下列顶层包在测试解释器里解析到了 worktree 之外，"
+        "本次验证很可能跑的是**没打补丁**的代码：\n"
+        f"{lines}\n"
+        f"    worktree：{state['worktree_path']}\n"
+        f"    测试解释器：{adapter.python}\n"
+        "    常见成因：目标项目以可编辑方式装进了这个解释器"
+        "（pip install -e .），而 pytest 没有把 worktree 的源码目录插到 "
+        "sys.path 更前面。\n"
+        "    修法：在目标项目的 pytest 配置里加 pythonpath，例如 "
+        'pyproject.toml 的 [tool.pytest.ini_options] 下 pythonpath = ["src"]。',
+        file=sys.stderr, flush=True)
+
+
+def detect_adapter(repo: Path,
+                   python: str | None = None) -> ProjectAdapter | None:
     """按注册表顺序探测这个仓库归谁管；没人认领返回 None。
 
     **全项目唯一的探测入口**，preflight_node 与 `aifix mine` 都走这里。
@@ -46,7 +113,7 @@ def detect_adapter(repo: Path) -> ProjectAdapter | None:
     """
     for cls in ADAPTERS.values():
         if cls.detect(Path(repo)):
-            return cls()
+            return cls(python=python)
     return None
 
 
@@ -140,7 +207,8 @@ async def baseline_node(state: AifixState) -> dict[str, Any]:
     run 以「修复 0 / 0、全绿、没活干」正常收场、退出码 0 —— 用户得到的是一句
     「你的仓库没问题」，而真相是测试压根没跑起来。
     """
-    adapter = adapter_for(state["adapter_name"])
+    adapter = adapter_from_state(state)
+    warn_if_patch_may_be_invisible(state, adapter)
     fs = await run_full_suite(Path(state["worktree_path"]), adapter,
                               require_report=True)
     ids = sorted(fs.ids)

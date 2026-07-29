@@ -9,7 +9,7 @@ from ..delivery import Worktree
 from ..graph import AifixState, trace_of
 from ..signals import analyze
 from ..verify import compare
-from .baseline import adapter_for, run_full_suite, run_scoped
+from .baseline import adapter_from_state, run_full_suite, run_scoped
 
 
 def _worktree(state: AifixState) -> Worktree:
@@ -46,7 +46,7 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
     cfg = state["config"]
     target = state["current"]
     wt = _worktree(state)
-    adapter = adapter_for(state["adapter_name"])
+    adapter = adapter_from_state(state)
     worktree_path = Path(state["worktree_path"])
 
     baseline = FailureSet({i: state["_failures"][i]

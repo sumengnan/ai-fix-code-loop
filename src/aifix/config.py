@@ -54,6 +54,22 @@ class AifixConfig(BaseSettings):
                     f"得到 {price!r}。分档表 [[上限,输入,输出], ...] 不是这个格式。")
         return v
 
+    # 跑**目标项目**测试用的解释器（`AIFIX_TEST_PYTHON`）。不配就自动探测
+    # 源仓库里的 `.venv/bin/python` / `venv/bin/python`，再找不到才退回
+    # aifix 自己的 `sys.executable`。
+    #
+    # 它存在的理由是可用性：写死 sys.executable 等于要求**目标项目的测试依赖
+    # 装在 aifix 自己的解释器里**，而真实项目从不满足这一条。实测拿 aifix 的
+    # venv 去跑 ai-harness-framework 的测试：11 个 collection error，一个用例
+    # 都没跑到；换它自己的 `.venv` 则 673 passed / 3 skipped。
+    #
+    # **配了它就要知道这个陷阱**：目标项目若把自己可编辑安装（pip install -e .）
+    # 进了那个解释器，`import <目标包>` 可能解析到**源仓库**而不是 worktree 里
+    # 那份打了补丁的代码 —— 测试照跑照绿，验证却完全失去意义。aifix 在 baseline
+    # 之前会做一次近似探测并出声（见 adapters/pytest_adapter.imports_outside_worktree），
+    # 但那是提醒，不是保证。
+    test_python: str | None = None
+
     budget_usd: float = 2.0
     budget_tokens: int = 500_000
     budget_wall_seconds: float = 1800.0

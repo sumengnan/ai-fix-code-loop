@@ -13,14 +13,14 @@ from ..agents.detector import SYSTEM_PROMPT, build_prompt, parse_diagnosis
 from ..agents.runner import consume
 from ..graph import AifixState, trace_of
 from ..signals import under_dirs
-from .baseline import adapter_for
+from .baseline import adapter_from_state
 
 
 async def detect_node(state: AifixState, client: Any = None) -> dict[str, Any]:
     """无工具、单步、强制 JSON。解析失败降级为 diagnosis=None。"""
     cfg = state["config"]
     failure = state["_failures"][state["current"]]
-    adapter = adapter_for(state["adapter_name"])
+    adapter = adapter_from_state(state)
     candidates = adapter.locate_source(failure, Path(state["worktree_path"]))
 
     loop = AgentLoop(
