@@ -207,11 +207,22 @@ def ingest(repo: Path | str) -> int:
     幂等：同一批产物灌任意多次，表里的行数不变。因此返回值是处理数而不是
     新增数 —— 「这次多灌进去几个新 run」需要先查一次库才知道，而调用方真正
     关心的是「这个仓库里有几个 run 被覆盖到了」。
+
+    返回 0 时**不产生任何磁盘副作用**：库不建、已有的库也不动。
     """
     repo = Path(repo)
     runs_dir = repo / ".aifix" / "runs"
     dirs = sorted(d for d in runs_dir.iterdir()
                   if (d / "facts.jsonl").is_file()) if runs_dir.is_dir() else []
+    if not dirs:
+        # 无事可灌就**不要建库**。`_connect` 会 mkdir + connect，空跑一次
+        # 也足以把文件造出来，而 `aifix stats` 只认「db 文件在不在」：库一旦
+        # 存在，「还没灌过库，先去 ingest」那句提示就永远不再出现，取而代之
+        # 的是三个空小节 + 退出码 0 —— 正是 `_cmd_stats` 明写要避免的读法。
+        # `--repo` 打错一次就够在那个错路径上永久制造这个假象。
+        # 注意是「不碰」而不是「先删再看要不要建」：run 目录是可以随时清理的
+        # 临时产物，这张表是长期资产，清掉产物重灌不该抹掉历史。
+        return 0
     con = _connect(repo / DB_RELPATH)
     try:
         for d in dirs:

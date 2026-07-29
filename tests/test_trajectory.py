@@ -1,6 +1,6 @@
 """跨 run 轨迹库的验收：真产物进去，可聚合的表出来。
 
-除两条标了「构造目录」的用例外，所有 `.aifix/runs/*` 都是脚本化假客户端
+除标了「构造目录」的那几条用例外，所有 `.aifix/runs/*` 都是脚本化假客户端
 **真跑** `run_once` 落下来的产物。手写 facts.jsonl 只能证明我们对自己的
 理解自洽 —— 它对不上真实产物时，测试全绿而功能是坏的。
 """
@@ -429,3 +429,51 @@ def test_没有产物目录时灌库不报错(tmp_path: Path) -> None:
     assert trajectory.ingest(tmp_path) == 0
     assert trajectory.query_stats(tmp_path) == {
         "by_adapter": {}, "guard_hits": [], "signal_runs": []}
+
+
+def test_无事可灌时不建库(tmp_path: Path) -> None:
+    """没有可灌的 run 就不该留下一个空 db。
+
+    留下空 db 会把 `aifix stats` 从「还没灌过库，先去 ingest」翻成三个空
+    小节 + 退出码 0 —— 而那正是 `_cmd_stats` 明写要避免的读法（「渲染一张
+    空表会被读成『这个仓库没跑过 run』」）。`--repo` 打错一次就会在错路径
+    上永久制造这个假象。
+    """
+    db = tmp_path / trajectory.DB_RELPATH
+
+    # 目录完全空：连 .aifix/ 都不该建出来
+    assert trajectory.ingest(tmp_path) == 0
+    assert not db.exists()
+
+    # runs/ 在、但里面没有一个带 facts.jsonl 的目录（半路被删/建了一半）
+    (tmp_path / ".aifix" / "runs" / "空壳").mkdir(parents=True)
+    assert trajectory.ingest(tmp_path) == 0
+    assert not db.exists()
+
+    # 区分度：真有可灌的 run 时库必须建出来，否则上面两条恒真
+    (tmp_path / ".aifix" / "runs" / "r1").mkdir()
+    (tmp_path / ".aifix" / "runs" / "r1" / "facts.jsonl").write_text(
+        '{"run_id": "r1", "key": "verdict", "value": "better"}\n',
+        encoding="utf-8")
+    assert trajectory.ingest(tmp_path) == 1
+    assert db.is_file()
+
+
+def test_无事可灌时不删已有的库(tmp_path: Path) -> None:
+    """产物目录被清掉之后重灌，不该把攒下来的历史一起抹掉。
+
+    「不建库」必须是「不碰库」，不能顺手实现成「删掉再看要不要建」——
+    run 目录是随时可以清理的临时产物，这张表才是长期资产。
+    """
+    runs = tmp_path / ".aifix" / "runs"
+    (runs / "r1").mkdir(parents=True)
+    (runs / "r1" / "facts.jsonl").write_text(
+        '{"run_id": "r1", "key": "verdict", "value": "better"}\n',
+        encoding="utf-8")
+    assert trajectory.ingest(tmp_path) == 1
+
+    shutil.rmtree(runs)
+    assert trajectory.ingest(tmp_path) == 0
+    with _db(tmp_path) as con:
+        assert con.execute(
+            "SELECT run_id FROM facts").fetchall() == [("r1",)]

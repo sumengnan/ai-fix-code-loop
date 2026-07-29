@@ -114,15 +114,13 @@ aifix 跨 run 统计 · /private/tmp/aifixdoc/.aifix/trajectory.db
   a1b2c3d4：1 条
 ```
 
-### 两条要记住的性质
+### 三条要记住的性质
 
 **幂等。** 同一批产物灌任意多次，表里的行数不变（先删后插：`run_id` 不是 `facts` 的主键，`INSERT OR REPLACE` 对它无能为力；少了那一句，重灌一次所有聚合数字就翻一倍，不报错、不崩溃，只是从此以后每个数都是错的）。所以 `ingest` 报的是**本次处理**的 run 数，不是新增数 —— 重灌同一批仍报同一个数字，这正是「重灌安全」看得见的样子。
 
 **不在 run 结束时自动落库。** 那等于给核心循环加一条可能失败的写路径 —— 磁盘满、db 被别的进程锁住、schema 对不上，任何一个都会把「测试已经修好、补丁已经提交到交付分支」的一次 run 变成一次失败。这张表是**事后诊断用的**，晚几分钟没有代价。
 
-### 已知的一处不一致
-
-`aifix ingest` 即使一个 run 都没找到，也会**建出一个空的 `trajectory.db`**（`ingest()` 无条件调 `_connect`）。后果是：`--repo` 打错一次之后，`aifix stats --repo <同一个错路径>` 不再给那句有用的提示，而是渲染三个空小节。
+**无事可灌就不建库。** 一个 run 都没找到时 `ingest()` 直接返回，不碰磁盘 —— 「db 文件在不在」是 `aifix stats` 唯一的判据，凭空建出来的空库会把「还没灌过库，先去 ingest」那句提示永久换成三个空小节 + 退出码 0，而那正是下面要说的那件事。
 
 ```console
 # 全新目录，还没 ingest 过
@@ -135,16 +133,17 @@ $ echo $?
 $ aifix ingest --repo /tmp/aifixfresh
 没有可灌的 run：/private/tmp/aifixfresh/.aifix/runs 下没有带 facts.jsonl 的目录。
 
-# 空库已经被建出来了
+# 没有留下空库，提示照旧
 $ aifix stats --repo /tmp/aifixfresh
-aifix 跨 run 统计 · /private/tmp/aifixfresh/.aifix/trajectory.db
-
-── 按适配器 ──
-  （库里还没有 run 记录）
-…
+还没有灌过库：/private/tmp/aifixfresh/.aifix/trajectory.db 不存在。
+  先跑 `aifix ingest --repo /tmp/aifixfresh`，再回来看统计。
+$ echo $?
+1
 ```
 
-读那一侧是克制的（`query_stats` 对不存在的库返回空结果，**不顺手建一个空库出来**），写那一侧在无事可写时破坏了这份克制。这正是 `_cmd_stats` 的注释想避免的读法：「渲染一张空表会被读成『这个仓库没跑过 run』，而事实是没灌过库」。**空表不代表没跑过 run，只代表没灌过库** —— 在修掉之前，看到空表先确认 `--repo` 指对了。
+读写两侧的克制必须成对：`query_stats` 对不存在的库返回空结果而**不顺手建一个空库出来**，写那一侧在无事可写时也不能把它抵消掉。触发路径很日常 —— `--repo` 打错一次，此后那个错路径上的 `stats` 就永远给三个空小节，再也不提示你去 ingest。这正是 `_cmd_stats` 的注释想避免的读法：「渲染一张空表会被读成『这个仓库没跑过 run』，而事实是没灌过库」。**空表不代表没跑过 run，只代表库里还没有 run 记录。**
+
+「不建库」是「不碰库」，不是「先删再看要不要建」：run 目录是随时可以清理的临时产物，这张表是长期资产，清掉产物再灌一次不会抹掉已有历史（`tests/test_trajectory.py::test_无事可灌时不删已有的库` 钉住这一条）。
 
 ---
 
