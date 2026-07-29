@@ -205,6 +205,67 @@ async def test_missing_report_raises_when_required(buggy_repo):
                          require_report=True)
 
 
+class _ZeroCaseAdapter(PytestAdapter):
+    """收集阶段整轮中止：pytest 退 4，写出一份 `tests="0"` 的报告。
+
+    命令逐字取自实测（pytest 9.1.1，2026-07-29）—— 给一个不存在的 node id
+    就是这个形状：报告文件**存在**，里面一个 <testcase> 都没有。
+    """
+
+    def _cmd(self, report: str) -> list[str]:
+        return [sys.executable, *self._BASE, f"--junitxml={report}",
+                "tests/test_calc.py::压根不存在的用例"]
+
+    def full_test_command(self) -> list[str]:
+        return self._cmd(self.REPORT_NAME)
+
+    def scoped_test_command(self, test_ids) -> list[str]:
+        return self._cmd(self.SCOPED_REPORT_NAME)
+
+
+async def test_a_report_with_zero_cases_is_not_all_green(buggy_repo):
+    """报告存在但一个用例都没跑 —— 与「跑完了、全绿」必须分开。
+
+    `require_report` 只查「有没有报告文件」，挡不住这一种：pytest 在收集阶段
+    整轮中止（无效 node id、conftest 抛异常、依赖缺失）时退 4，**并写出一份
+    `tests="0"` 的报告**。文件在，检查放行，parse_junit 解出空集合，于是
+    baseline 读成「全绿」、verify 读成「补丁修好了一切」—— 正是 require_report
+    这道闸要挡的事，只是换了个形状绕过去。
+
+    docs/superpowers/specs/2026-07-28-m4-conclusive-design.md 第 62 行早就
+    记着这个形状，一直没有对应的闸。
+    """
+    with pytest.raises(RuntimeError, match="一个用例都没跑"):
+        await run_full_suite(buggy_repo, _ZeroCaseAdapter(),
+                             require_report=True)
+    with pytest.raises(RuntimeError, match="一个用例都没跑"):
+        await run_scoped(buggy_repo, _ZeroCaseAdapter(), ["随便一个"],
+                         require_report=True)
+
+
+async def test_zero_case_and_missing_report_say_different_things(buggy_repo):
+    """两种形状的诊断路径完全不同，消息不能混。
+
+    没有报告 → 进程没跑完（超时被杀 / 崩溃 / 命令根本没执行起来）。
+    报告为空 → 进程跑完了并正常退出，是**收集**没成功（node id 无效、
+    conftest 抛异常、测试依赖缺失）。给错方向的排查提示比不给更费时间。
+    """
+    with pytest.raises(RuntimeError) as missing:
+        await run_full_suite(buggy_repo, _SilentAdapter(), require_report=True)
+    with pytest.raises(RuntimeError) as empty:
+        await run_full_suite(buggy_repo, _ZeroCaseAdapter(),
+                             require_report=True)
+    assert "未产出任何 JUnit 报告" in str(missing.value)
+    assert "收集" in str(empty.value)
+    assert str(missing.value) != str(empty.value)
+
+
+async def test_zero_case_report_is_still_tolerated_by_default(buggy_repo):
+    """默认档不变：非 required 的调用方拿到空集合，不抛。"""
+    fs = await run_full_suite(buggy_repo, _ZeroCaseAdapter())
+    assert fs.ids == set() and set(fs.ran) == set()
+
+
 async def test_missing_report_message_names_no_particular_file(buggy_repo):
     """报告可以有多份（Maven surefire 每个测试类一份）。
 

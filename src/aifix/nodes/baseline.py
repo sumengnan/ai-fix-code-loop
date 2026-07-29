@@ -220,8 +220,25 @@ def collection_error_abort(ids: list[str],
     ])
 
 
-def _check_report(worktree: Path, paths: list[Path], required: bool) -> None:
-    """required 时至少要有一份报告，否则抛 —— 「没跑成」不能冒充「跑完了、全绿」。
+def _check_report(worktree: Path, paths: list[Path],
+                  ran: frozenset[str], required: bool) -> None:
+    """required 时报告要存在**且真的跑了用例**，否则抛。
+
+    「没跑成」不能冒充「跑完了、全绿」，而它有两种形状，光查文件在不在只挡得住
+    第一种：
+
+    - **一份报告都没有** —— 进程没跑完：超时被杀、崩溃、命令根本没执行起来。
+    - **报告在，里面零个用例** —— 进程正常退出了，是收集没成功：node id 无效、
+      conftest 抛异常、测试依赖缺失。pytest 此时退 4 并写出一份 `tests="0"` 的
+      报告（实测，pytest 9.1.1）。文件存在，旧的检查放行，parse_junit 解出空
+      集合，于是 baseline 读成「全绿」、verify 读成「补丁修好了一切」——
+      这道闸要挡的事换个形状就绕过去了。
+
+    两种形状的排查方向完全不同，消息也分开：给错方向的提示比不给更费时间。
+
+    「零个用例」与「这个仓库真的没有测试」确实分不开，此处**有意把后者也拦下**：
+    适配器已经认领了这个仓库（`tests/` 或 pyproject.toml 存在），一个用例都跑
+    不起来时，「你的仓库全绿」是一句比中止更糟的答复。
 
     parse_junit 对缺失报告的处理是安全跳过并返回空集合。这个默认曾经覆盖到
     核心循环，理由写的是「少一份报告不该让整个 run 崩掉，下一轮 verify 会重新
@@ -242,6 +259,11 @@ def _check_report(worktree: Path, paths: list[Path], required: bool) -> None:
             f"测试未产出任何 JUnit 报告（worktree={worktree}）："
             "测试进程没能正常跑完（超时被杀 / 崩溃 / 沙箱执行失败），"
             "本次结果不可信")
+    if required and not ran:
+        raise RuntimeError(
+            f"测试报告里一个用例都没跑（worktree={worktree}）："
+            "进程正常退出了，是**收集**没成功（node id 无效 / conftest 抛异常 / "
+            "测试依赖缺失），本次结果不可信")
 
 
 async def _rm_reports(sb: LocalSandbox, adapter: ProjectAdapter,
@@ -276,8 +298,10 @@ async def run_full_suite(worktree: Path, adapter: ProjectAdapter,
     try:
         await sb.exec(adapter.full_test_command(), timeout)
         paths = adapter.report_paths(worktree)
-        _check_report(worktree, paths, require_report)
-        return parse_junit(paths, adapter.make_test_id)
+        # 先解析再检查：「跑了几个用例」只有报告内容知道，文件在不在答不了
+        fs = parse_junit(paths, adapter.make_test_id)
+        _check_report(worktree, paths, fs.ran, require_report)
+        return fs
     finally:
         await _rm_reports(sb, adapter, worktree, scoped=False)
         await sb.close()
@@ -295,8 +319,9 @@ async def run_scoped(worktree: Path, adapter: ProjectAdapter,
     try:
         await sb.exec(adapter.scoped_test_command(test_ids), timeout)
         paths = adapter.report_paths(worktree, scoped=True)
-        _check_report(worktree, paths, require_report)
-        return parse_junit(paths, adapter.make_test_id)
+        fs = parse_junit(paths, adapter.make_test_id)
+        _check_report(worktree, paths, fs.ran, require_report)
+        return fs
     finally:
         await _rm_reports(sb, adapter, worktree, scoped=True)
         await sb.close()
