@@ -5,7 +5,8 @@ from dataclasses import dataclass, field
 from typing import AsyncIterator, Callable
 
 from harness.events import (Event, ModelUsage, RunError, TextDelta,
-                            ToolStarted)
+                            ToolFinished, ToolStarted)
+from harness.types import ToolCall, ToolResult
 
 
 @dataclass
@@ -32,22 +33,36 @@ class AgentOutcome:
         return self.error is None
 
 
-async def consume(stream: AsyncIterator[Event],
-                  cost_cap: float | None = None,
-                  on_tool: Callable[[str], None] | None = None) -> AgentOutcome:
+async def consume(
+        stream: AsyncIterator[Event],
+        cost_cap: float | None = None,
+        on_tool: Callable[[ToolCall], None] | None = None,
+        on_tool_done: Callable[[ToolCall, ToolResult], None] | None = None,
+) -> AgentOutcome:
     """消费整条事件流。保留全部事件供 trace 使用。
 
     cost_cap：累计成本越过该值即停止消费并关闭生成器。
 
-    on_tool：每次**工具调用**回调一次，参数是工具名。给进度显示用 —— fix 是
-    一次 run 里最长的一段（默认最多 25 步，每步可能读码、搜索、打补丁、跑
-    目标用例），只在它结束后出声的话，最需要心跳的那几分钟仍然是空屏。
+    on_tool / on_tool_done：工具调用的开始与结束各回调一次，给进度显示用。
+    两个都要，因为它们答的是两个问题：
+
+    - `on_tool` 听 `ToolStarted`，答「它现在在干什么」。fix 是一次 run 里最长
+      的一段（默认最多 25 步），只在结束时出声的话，最需要心跳的那几分钟仍然
+      是空屏 —— 而 run_tests 一跑就是几十秒。
+    - `on_tool_done` 听 `ToolFinished`，答「成了还是砸了、为什么砸」。这个只有
+      结果事件知道。实跑过的一次 run：23 次调用里 5 次是错的（诊断指了个不存在
+      的文件、补丁 check 不过、跑了失败列表外的用例），不听结束事件的话，屏幕
+      上它们和成功的长得一模一样。
+
+    结束回调**带上发起时的那次调用**：参数只在 `ToolStarted` 上，`ToolFinished`
+    只有一个 tool_call_id，光凭它渲染出来的行只剩一个工具名。没见过开始的
+    结束事件直接跳过（不该发生，但宁可少报一条也不凭空造一条）。
+
     听的是 `ToolStarted`，**不是 `ToolCall`** —— 后者是消息里的数据结构，
     从不作为事件出现在流上。这一条踩过：单元测试自己构造 ToolCall 喂进来，
     测试全绿而真跑一步都不报。实测一次真 run 的 events.jsonl：
     ToolStarted 33 条、ToolFinished 33 条、ToolCallRequested 30 条，
-    ToolCall **0 条**。听 ToolFinished 也不对 —— 那是工具跑完才报，而心跳
-    的意义正是在工具**跑着的时候**让人知道它在跑（run_tests 一跑几十秒）。
+    ToolCall **0 条**。
 
     契约是「越线之后不再发起新的模型调用」，不是「绝不超过一分钱」——
     成本只有在调用返回后才知道（ModelUsage 到达的那一刻），所以越线时
@@ -55,11 +70,18 @@ async def consume(stream: AsyncIterator[Event],
     """
     parts: list[str] = []
     out = AgentOutcome()
+    # 发起过的调用，供结束事件按 id 认领自己的参数
+    calls: dict[str, ToolCall] = {}
     async for ev in stream:
         out.events.append(ev)
         if isinstance(ev, ToolStarted):
+            calls[ev.tool_call.id] = ev.tool_call
             if on_tool is not None:
-                on_tool(ev.tool_call.name)
+                on_tool(ev.tool_call)
+        elif isinstance(ev, ToolFinished):
+            call = calls.pop(ev.result.tool_call_id, None)
+            if on_tool_done is not None and call is not None:
+                on_tool_done(call, ev.result)
         elif isinstance(ev, TextDelta):
             parts.append(ev.text)
         elif isinstance(ev, ModelUsage):

@@ -183,3 +183,15 @@ async def test_the_fix_phase_emits_a_real_heartbeat(buggy_repo):
     assert steps[0]["tool"] == "apply_patch"
     # 步号从 1 起、连续递增：屏幕上出现两段「第 1 步」会读成重新开始了
     assert [s["step"] for s in steps] == list(range(1, len(steps) + 1))
+    # 参数要带上：光有工具名分不出它在改哪个文件
+    assert "diff" in steps[0]["arguments"]
+
+    # 成败同理，而且只有 ToolFinished 知道 —— 这一条与上面是同一个错误形状的
+    # 两侧：监听错了事件类型的话，单元测试照样绿，真跑时屏幕上永远没有勾也
+    # 没有叉，成功和失败长得一模一样。
+    done = [kw for k, kw in prog.calls if k == "agent_step_done"]
+    assert done, f"没有一条工具结果被报出来：{prog.kinds()}"
+    assert done[0]["tool"] == "apply_patch" and done[0]["ok"] is True
+    assert done[0]["result"], "结果正文要带上，失败时它就是原因"
+    # 结束那条复用自己那次调用的步号，不是另起一套编号
+    assert [d["step"] for d in done] == [s["step"] for s in steps]
