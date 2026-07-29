@@ -240,3 +240,37 @@ def test_missing_event_path_is_a_readable_error(tmp_path, monkeypatch, capsys):
         _cmd_issue(args)
     assert e.value.code == 1
     assert "GITHUB_EVENT_PATH" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- trace 归档
+
+async def test_the_trace_is_archived_after_a_delivery(tmp_path):
+    seen = []
+    fakes, _ = _fakes()
+    gh = _Gh()
+    (tmp_path / "tests").mkdir(exist_ok=True)
+
+    def _pub(repo, run_id, **k):
+        seen.append(run_id)
+        return True
+
+    await handle(_payload(), tmp_path, AifixConfig(), gh, publish=_pub, **fakes)
+    assert seen, "run 结束后没有归档 trace —— runner 上它会随机器一起消失"
+    assert "trace" in gh.statuses[-1][1]
+
+
+async def test_a_failed_archive_does_not_break_the_delivery(tmp_path):
+    """补丁已经推上去、PR 已经开了。为一次归档失败把 job 弄红，等于让人
+    以为修复没成功 —— 而它成功了。"""
+    fakes, _ = _fakes()
+    gh = _Gh()
+    (tmp_path / "tests").mkdir(exist_ok=True)
+
+    def _boom(repo, run_id, **k):
+        raise RuntimeError("远端拒绝了")
+
+    res = await handle(_payload(), tmp_path, AifixConfig(), gh,
+                       publish=_boom, **fakes)
+    assert res.exit_code == 0 and res.path == "delivered"
+    assert gh.prs, "PR 仍然要开出来"
+    assert "归档失败" in gh.statuses[-1][1], "但必须出声"

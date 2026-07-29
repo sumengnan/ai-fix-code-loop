@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 from ..config import AifixConfig
 from ..delivery import COMMIT_EMAIL, COMMIT_NAME
+from ..traces import TRACES_BRANCH
 from ..nodes.report import count_fixed
 from .event import authorize
 from .github import GitHubClient
@@ -73,6 +74,7 @@ async def handle(
     gh: GitHubClient,
     *,
     reproduce_fn: Callable[..., Any] | None = None,
+    publish: Callable[..., bool] | None = None,
     red_check_fn: Callable[..., Any] | None = None,
     run_fn: Callable[..., Any] | None = None,
     git: Callable[..., str] = _git,
@@ -86,9 +88,11 @@ async def handle(
     from ..cli import run_once
     from ..nodes.baseline import detect_adapter
     from ..reproduce import red_check, reproduce, write_reproduction
+    from ..traces import publish_traces
     from ..adapters.pytest_adapter import resolve_test_python
 
     reproduce_fn = reproduce_fn or reproduce
+    publish = publish or publish_traces
     red_check_fn = red_check_fn or red_check
     run_fn = run_fn or run_once
 
@@ -142,7 +146,8 @@ async def handle(
         f"test: 复现 #{ev.number} —— {ev.title}", "--", r.test_file)
 
     # ---------------------------------------------------------- 核心循环
-    state = await run_fn(repo, config, run_id=uuid.uuid4().hex[:8],
+    run_id = uuid.uuid4().hex[:8]
+    state = await run_fn(repo, config, run_id=run_id,
                          only_test=r.target_test_id)
 
     # run_once 内部已经保证「报告先落地再返回」（见 cli.run_once 的 except），
@@ -157,7 +162,19 @@ async def handle(
              else f"[复现已就位，未修复] {ev.title} (#{ev.number})")
     url = gh.create_pr(head=branch, title=title, body=body)
 
-    gh.upsert_status(ev.number, _status(state, fixed, crashed, url))
+    # trace 落到孤儿分支上 —— runner 是临时的，不推就全没了（见 aifix.traces）。
+    #
+    # **失败不能影响交付**：补丁已经推上去、PR 已经开了，为了一次归档失败把
+    # 整个 job 弄红，等于让人以为修复没成功。出声但不改结果。
+    archived = ""
+    try:
+        if publish(repo, run_id):
+            archived = f"\n- trace：`{TRACES_BRANCH}` 分支的 `runs/{run_id}/`"
+    except Exception as e:                      # noqa: BLE001 —— 见上
+        archived = f"\n- trace 归档失败（不影响本次交付）：{type(e).__name__}：{e}"
+
+    gh.upsert_status(ev.number,
+                     _status(state, fixed, crashed, url) + archived)
     return HandleResult(1 if crashed else 0,
                         "crashed" if crashed else "delivered", url)
 

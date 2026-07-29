@@ -201,8 +201,13 @@ def _started_at(run_dir: Path) -> str:
         run_dir.stat().st_mtime, timezone.utc).isoformat(timespec="seconds")
 
 
-def ingest(repo: Path | str) -> int:
+def ingest(repo: Path | str, runs_dir: Path | str | None = None) -> int:
     """扫 `<repo>/.aifix/runs/*/facts.jsonl` 落库，返回**本次处理**的 run 数。
+
+    `runs_dir` 覆盖扫描位置，库仍然落在 `<repo>/.aifix/trajectory.db`。它是为
+    **Actions 上的产物离散**准备的：runner 是临时的，每次 run 各自消失，那个
+    默认目录下永远只有一个 run，跨 run 汇总失去意义。把 `aifix/traces` 分支
+    clone 下来指到这里，历史就重新连成一片（见 aifix.traces）。
 
     幂等：同一批产物灌任意多次，表里的行数不变。因此返回值是处理数而不是
     新增数 —— 「这次多灌进去几个新 run」需要先查一次库才知道，而调用方真正
@@ -211,7 +216,7 @@ def ingest(repo: Path | str) -> int:
     返回 0 时**不产生任何磁盘副作用**：库不建、已有的库也不动。
     """
     repo = Path(repo)
-    runs_dir = repo / ".aifix" / "runs"
+    runs_dir = Path(runs_dir) if runs_dir else repo / ".aifix" / "runs"
     dirs = sorted(d for d in runs_dir.iterdir()
                   if (d / "facts.jsonl").is_file()) if runs_dir.is_dir() else []
     if not dirs:
