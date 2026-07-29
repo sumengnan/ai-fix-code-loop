@@ -68,7 +68,8 @@ def render(run_dir: Path, step: int | None = None,
             head.append(f"没有第 {step} 步：这次 run 共 {len(steps)} 步。")
             return "\n".join(head) + "\n"
         head.append(f"（已按 step={step} 过滤；去掉这个参数可看完整时间轴与领域事实）")
-        body = _render_step(step, steps[step - 1], full, max_chars)
+        evs = steps[step - 1]
+        body = _render_step(step, evs, full, max_chars, _step_key(evs))
         return "\n".join(head) + "\n\n" + body
 
     if events and facts and not any("failure" in e for e in events):
@@ -82,9 +83,28 @@ def render(run_dir: Path, step: int | None = None,
                     "领域事实按自身归属分组列在时间轴之后。")
 
     parts = ["\n".join(head)]
-    for i, evs in enumerate(steps, 1):
-        parts.append(_render_step(i, evs, full, max_chars))
-    parts.extend(_render_facts(facts, full, max_chars))
+    blocks = _fact_blocks(facts, full, max_chars)
+
+    # 开头那一批 run 级事实（baseline_failures、dry_run）留在最前面：它们是
+    # 这次 run 的前提，不属于任何一次尝试，按产物原序排在时间轴之前。
+    while blocks and blocks[0][0] == (None, None):
+        parts.append(blocks.pop(0)[1])
+
+    for key, group in _group_steps(steps):
+        for index, evs in group:
+            parts.append(_render_step(index, evs, full, max_chars, key))
+        # 这一段步骤对应的事实紧跟其后 —— 计划与规格都要求「领域事实按其所
+        # 属的 failure 与 attempt 插进对应位置」。全堆在末尾时，第一个
+        # failure 的 verdict 排在第二个 failure 的步骤之后，读的人得在两处
+        # 之间来回翻才能把「这次尝试做了什么」和「判成了什么」对上。
+        # (None, None) 不参与配对：老产物的步骤全是这个 key，拿它去认领
+        # run 级事实会把中止原因插到时间轴中间，那是按位置猜出来的假顺序。
+        if key != (None, None):
+            matched = [t for k, t in blocks if k == key]
+            blocks = [(k, t) for k, t in blocks if k != key]
+            parts.extend(matched)
+    # 认领不掉的：收尾的 run 级事实，以及老产物里没有对应步骤的那些
+    parts.extend(text for _, text in blocks)
     return "\n\n".join(parts) + "\n"
 
 
@@ -150,6 +170,35 @@ def _split_steps(events: list[dict]) -> list[list[dict]]:
     return steps
 
 
+def _step_key(events: list[dict]) -> tuple:
+    """这一步属于哪个 failure 的第几次尝试。
+
+    取本步**第一条带归属的事件**：一段 AgentLoop 整个跑在同一个
+    failure_span / attempt_span 里，所以同一步内的事件归属一致；缺字段的是
+    M4 之前的产物，返回 (None, None) 表示「不知道」，而不是猜一个出来。
+    """
+    for ev in events:
+        if "failure" in ev or "attempt" in ev:
+            return ev.get("failure"), ev.get("attempt")
+    return (None, None)
+
+
+def _group_steps(steps: list[list[dict]]) -> list[tuple[tuple, list]]:
+    """把步骤按归属切成连续的几段，段内保留全局步号。
+
+    按**连续**分组而不是按 key 收拢：同一个 failure 的两次尝试之间隔着别的
+    事件时，收拢会把时间轴的先后顺序抹掉 —— 而复盘要看的正是先后顺序。
+    """
+    groups: list[tuple[tuple, list]] = []
+    for i, evs in enumerate(steps, 1):
+        key = _step_key(evs)
+        if groups and groups[-1][0] == key:
+            groups[-1][1].append((i, evs))
+        else:
+            groups.append((key, [(i, evs)]))
+    return groups
+
+
 # ---------- 渲染 ----------
 
 def _clip(text: str, full: bool, max_chars: int) -> str:
@@ -209,8 +258,9 @@ def _fmt_usage(data: dict) -> str:
     return " · ".join(parts)
 
 
-def _render_step(index: int, events: list[dict], full: bool, max_chars: int) -> str:
-    lines = [f"{_HR} 步骤 {index} {_HR}"]
+def _render_step(index: int, events: list[dict], full: bool, max_chars: int,
+                 key: tuple = (None, None)) -> str:
+    lines = [f"{_HR} 步骤 {index}{_attr_suffix(key)} {_HR}"]
     # 同一个 tool_call 的参数在 ToolCallRequested 与 ToolStarted 里各有一份。
     # 一个几千字的补丁印两遍只是把输出撑长，所以第二次只报名字；但万一某条
     # 路径只发 ToolStarted，参数不能就这么丢了，于是按 id 记一下印过没有。
@@ -268,32 +318,44 @@ def _fact_group(fact: dict) -> tuple:
     return fact.get("failure"), fact.get("attempt")
 
 
-def _fact_title(key: tuple) -> str:
+def _attr_suffix(key: tuple) -> str:
+    """归属的统一写法。步骤标题与事实标题共用一份 —— 两处各写一份措辞，
+    读的人得先确认这两种写法说的是不是同一件事。"""
     failure, attempt = key
     if failure is None:
+        return ""
+    if attempt is None:
+        return f" · {failure}"
+    return f" · {failure} · 第 {attempt} 次尝试"
+
+
+def _fact_title(key: tuple) -> str:
+    if key[0] is None:
         # baseline_failures、abort、dry_run 这些是 run 级的，不挂在任何一次
         # 尝试上。只渲染挂在 attempt 上的那些，恰恰会漏掉中止原因。
         return f"{_HR} 事实 · run 级 {_HR}"
-    if attempt is None:
-        return f"{_HR} 事实 · {failure} {_HR}"
-    return f"{_HR} 事实 · {failure} · 第 {attempt} 次尝试 {_HR}"
+    return f"{_HR} 事实{_attr_suffix(key)} {_HR}"
 
 
-def _render_facts(facts: list[dict], full: bool, max_chars: int) -> list[str]:
-    """按 (failure, attempt) 归组。分组边界取 facts.jsonl 的原始先后顺序：
-    run 级事实前后各有一批（开头 baseline_failures、结尾 abort），保持原序
-    才不会把中止原因挪到最前面去。"""
-    blocks: list[str] = []
+def _fact_blocks(facts: list[dict], full: bool,
+                 max_chars: int) -> list[tuple[tuple, str]]:
+    """按 (failure, attempt) 归组，连块带 key 一起返回 —— key 是 render 把
+    每一块插回对应位置的依据。
+
+    分组边界取 facts.jsonl 的原始先后顺序：run 级事实前后各有一批（开头
+    baseline_failures、结尾 abort），保持原序才不会把中止原因挪到最前面去。
+    """
+    blocks: list[tuple[tuple, str]] = []
     cur_key: tuple | None = None
     lines: list[str] = []
     for f in facts:
         key = _fact_group(f)
         if key != cur_key:
             if lines:
-                blocks.append("\n".join(lines))
+                blocks.append((cur_key, "\n".join(lines)))
             cur_key, lines = key, [_fact_title(key)]
         lines.append("  " + _block(str(f.get("key")),
                                    _fmt_value(f.get("value")), full, max_chars))
-    if lines:
-        blocks.append("\n".join(lines))
+    if lines and cur_key is not None:
+        blocks.append((cur_key, "\n".join(lines)))
     return blocks

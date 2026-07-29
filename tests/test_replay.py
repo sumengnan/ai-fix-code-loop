@@ -204,3 +204,123 @@ def test_repo_stays_clean(buggy_repo):
     after = subprocess.run(["git", "status", "--porcelain"], cwd=buggy_repo,
                            capture_output=True, text=True).stdout
     assert before == after
+
+
+# —— 多 failure 的 run：归属必须真的被用起来 ——
+#
+# 上面每一条用例都只有一个 failure，于是「全部事实堆在整条时间轴之后」和
+# 「事实插到对应位置」渲染出来一模一样 —— 一个 failure 的 run 分不出这两种
+# 实现。计划与规格都写明另一种做法（把领域事实按其所属的 failure 与 attempt
+# 插进对应位置），判据只能是多 failure 的 run。
+
+_TWO_BUGS = '''def add(a, b):
+    return a - b
+
+
+def sub(a, b):
+    return a + b
+'''
+
+_TWO_TESTS = '''from calc import add, sub
+
+
+def test_add():
+    assert add(2, 3) == 5
+
+
+def test_sub():
+    assert sub(5, 3) == 2
+'''
+
+# 尾部留一行上下文：文件后面还有内容时，不带尾部上下文的 hunk 会被 git 当成
+# 「一直延伸到文件末尾」，git apply --check 直接判 patch does not apply。
+_FIX_ADD = (
+    "--- a/calc.py\n"
+    "+++ b/calc.py\n"
+    "@@ -1,3 +1,3 @@\n"
+    " def add(a, b):\n"
+    "-    return a - b\n"
+    "+    return a + b\n"
+    " \n"
+)
+
+_FIX_SUB = (
+    "--- a/calc.py\n"
+    "+++ b/calc.py\n"
+    "@@ -4,3 +4,3 @@\n"
+    " \n"
+    " def sub(a, b):\n"
+    "-    return a + b\n"
+    "+    return a - b\n"
+)
+
+_TID_ADD = "tests/test_calc.py::test_add"
+_TID_SUB = "tests/test_calc.py::test_sub"
+
+
+@pytest.fixture
+def two_failure_run_dir(tmp_path) -> Path:
+    repo = tmp_path / "two"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "calc.py").write_text(_TWO_BUGS, encoding="utf-8")
+    (repo / "tests" / "test_calc.py").write_text(_TWO_TESTS, encoding="utf-8")
+    (repo / "pytest.ini").write_text(
+        "[pytest]\npythonpath = .\n", encoding="utf-8")
+    for args in (("init", "-q", "-b", "main"),
+                 ("config", "user.email", "t@example.com"),
+                 ("config", "user.name", "t"), ("add", "-A"),
+                 ("commit", "-q", "-m", "init")):
+        subprocess.run(["git", *args], cwd=repo, check=True,
+                       capture_output=True)
+    return repo
+
+
+async def _two_failure_run(repo: Path) -> Path:
+    await run_once(
+        repo, AifixConfig(max_attempts=1), run_id="two",
+        detector_client=_Scripted([_text(_DIAG)]),
+        fixer_client=_Scripted([
+            _tool("apply_patch", json.dumps({"diff": _FIX_ADD})),
+            _text("已修复"),
+            _tool("apply_patch", json.dumps({"diff": _FIX_SUB})),
+            _text("已修复")]))
+    return repo / ".aifix" / "runs" / "two"
+
+
+async def test_every_step_says_which_failure_and_attempt_it_belongs_to(
+        two_failure_run_dir):
+    """一条无标记的扁平时间轴，读的人只能按位置猜「这是哪个用例的第几次尝试」。
+
+    归属现在真的写在每条事件上了（RunTrace.record_events 并入 _current），
+    渲染侧不用它，等于把它扔了。
+    """
+    out = render(await _two_failure_run(two_failure_run_dir), max_chars=60)
+
+    headers = [ln for ln in out.splitlines() if ln.startswith("── 步骤")]
+    assert len(headers) > 2, f"至少要有两个 failure 的步骤：{headers}"
+    unmarked = [h for h in headers if _TID_ADD not in h and _TID_SUB not in h]
+    assert not unmarked, f"这些步骤没写归属：{unmarked}"
+    assert any(_TID_ADD in h for h in headers)
+    assert any(_TID_SUB in h for h in headers)
+    assert all("第 1 次尝试" in h for h in headers), headers
+
+
+async def test_facts_are_inserted_where_they_belong_not_piled_up_at_the_end(
+        two_failure_run_dir):
+    """事实插到对应位置 —— 见计划 §237 与规格 §125。
+
+    全堆在末尾时，第一个 failure 的 verdict 排在第二个 failure 的步骤之后，
+    读的人要在两处之间来回翻才能把「这次尝试做了什么」和「判成了什么」对上。
+    """
+    out = render(await _two_failure_run(two_failure_run_dir), max_chars=60)
+
+    headers = [ln for ln in out.splitlines() if ln.startswith("── 步骤")]
+    first_sub_step = min(out.index(h) for h in headers if _TID_SUB in h)
+    last_add_step = max(out.index(h) for h in headers if _TID_ADD in h)
+    add_facts = out.index(f"── 事实 · {_TID_ADD}")
+
+    assert last_add_step < add_facts < first_sub_step, (
+        "test_add 的事实必须夹在它自己的步骤之后、test_sub 的步骤之前")
+    # run 级事实仍在（中止原因就挂在那儿），且开头那批保持原序排在最前
+    assert "baseline_failures" in out
+    assert out.index("baseline_failures") < first_sub_step
