@@ -94,6 +94,85 @@ def report_paths(self, worktree: Path, scoped: bool = False) -> list[Path]: ...
 
 ---
 
+## 4b. 裂缝清单
+
+规格的核心论点是：**一个只有单一实现的接口，无法区分「抽象对」和「抽象恰好长得像那一个实现」**。`MavenAdapter` 是第二个实现，它撞出来的每一处裂缝都是这个论点的证据。截至目前六处，全部已修，全部有真跑 `mvn` 的验收。
+
+| # | 位置 | 症状 |
+|---|---|---|
+| 1 | `report_glob() -> str` | 报告位置是一组路径不是一个（surefire 每个测试类一份），见 §4 |
+| 2 | `preflight` 的第二份注册表 | `MavenAdapter` 登记了却永远探测不到，加了等于没加 |
+| 3 | `split_paths` 的源文件后缀写死 `.py` | `gold_files` 恒空 → `is_candidate` 恒 `False` |
+| 4 | `verify_commit` 的 scope 写死 `.py` | 见下 |
+| 5 | `verify_commit` 用 `"::" not in i` 判文件级 id | 见下 |
+| 6 | `_cmd_mine` 写死 `PytestAdapter()` | 见下 |
+
+**六处里有五处的症状是同一种：静默产出 0 个任务，不报任何错。** 这不是巧合——挖掘链路上每一步的失败模式都是「筛掉」，而筛空与「这个仓库最近没有红转绿的提交」这个正常结果长得一模一样。写新适配器时，这条链路上的每一处判据都要问一遍「它是不是在用 pytest 的语法回答一个通用问题」。
+
+### 裂缝 4：`verify_commit` 的 scope 写死 `.py`
+
+```python
+scope = [p for p in test_files if PurePosixPath(p).suffix == ".py"]
+if not scope:
+    return []
+```
+
+Maven 任务的 `test_files` 全是 `.java` → `scope` 为空 → 在 `materialize` **之前**就 `return []`。实测：`mine_tasks` 对一个真有红转绿提交的 Maven 仓库产出 0 个任务，`on_progress` 收到 `(sha, 0, None)`，`mvn` 一次都没起，全程 0.94 秒。
+
+**不能简单换成 `source_suffixes()` 或添一个 `.java`**：`scope` 原样进 `adapter.scoped_test_command`，而 surefire 的 `-Dtest=` 只认全限定类名，不认路径——喂路径进去不报错，安静地一个用例都不跑。
+
+**修法**：新增协议成员 `test_selectors(test_files) -> list[str]`，把「本次 commit 改动过的测试文件路径」翻译成「本适配器的 scoped 命令认得的选择器」。
+
+- `PytestAdapter`：路径就是选择器，滤掉非 `.py`（测试目录下的夹具不能进 pytest 命令行）后原样返回
+- `MavenAdapter`：`src/test/java/demo/CalcTest.java` → `demo.CalcTest`
+
+已实测（surefire 3.2.5）：`-Dtest=demo.CalcTest`（不带 `#方法`）确实只跑那个类。
+
+**顺带发现，同属一处**：surefire 对「测试类初始化就抛异常」只发一条 `<testcase name="" classname="demo.BootTest">` 带 `<error>`，两个 `@Test` 方法一条都不发——这是 pytest 侧「测试文件导入失败发一条文件级 `<error>`」的对应物，而 `make_test_id` 只处理了 `classname` 为空、没处理 `name` 为空，拼出 `demo.BootTest#`。已实测 `-Dtest=demo.CalcTest#` 被 surefire 读成**没有过滤条件**，把整个套件跑一遍——复跑的报告里于是躺着无关类的失败。改成裸类名，那才是合法选择器。
+
+### 裂缝 5：`"::"` 是 pytest 的语法
+
+`verify_commit` 有三处拿 `"::" not in i` 判「这是不是一个文件级 id」（收集错误产出的、指向整个测试文件的 id），`_file_went_green` 里则是 `i.startswith(file_id + "::")`。
+
+`MavenAdapter.make_test_id` 产出的是 `demo.CalcTest#addWorks`，**一个 `::` 都没有**。于是**每一个** Maven id 都被判成「文件级 id」，`_file_went_green` 拿 `startswith("demo.CalcTest#addWorks::")` 去匹配，永远匹配不到 → 恒返回 `False` → 复跑那一步把整批候选清空 → `verify_commit` 返回 `[]`。
+
+实测确认（构造 `FailureSet` 直接调 `_file_went_green`）：两个 Maven id 全判 `False`，阶段 3 过滤后 `cand` 是空集。
+
+**这一处比裂缝 4 更隐蔽**：修好裂缝 4 之后 `mvn` 会真的跑起来、跑满四个阶段，屏幕上一切正常，结果仍然是 0 个任务。
+
+**修法**：判据同样交给适配器，新增两个协议成员——
+
+```python
+def is_file_level_id(self, test_id: str) -> bool: ...
+def cases_under(self, file_id: str, test_ids: frozenset[str]) -> set[str]: ...
+```
+
+| | `is_file_level_id` | `cases_under` |
+|---|---|---|
+| `PytestAdapter` | `"::" not in test_id` | 前缀 `文件::` |
+| `MavenAdapter` | `"#" not in test_id` | 前缀 `类#` |
+
+两侧都比**带分隔符的前缀**而不是裸 `startswith`：`tests/test_xyz.py::t` 不属于 `tests/test_x.py`，`demo.CalcTestHelper#x` 不属于 `demo.CalcTest`。
+
+这一处让 Maven 侧「测试类在 C^ 初始化失败、在 C 正常」这一整类候选也留得住，正如 pytest 侧的「测试文件在 C^ 导入失败」那一类（实测本仓库 65 个候选 commit 里 32 个是那个形状）。
+
+### 裂缝 6：`aifix mine` 写死 `PytestAdapter()`
+
+裂缝 2 的同一个形状，只是换了个入口：`_cmd_mine` 直接 `PytestAdapter()`，于是**适配层里为 Maven 补的每一处缺口都在这一行之后，全都到不了**。修法是把探测收进 `baseline.detect_adapter` 这唯一一份，`preflight_node` 与 `mine` 共用；认领不了的仓库当场退出，而不是拿一个猜的适配器接着跑几十分钟。
+
+### 已登记、不修的两处
+
+两者都是**算子层自己的限制**，不是适配层的遗漏，代码里已有注释说明：
+
+- `eval/mutate.py`：人造变异靠 Python 的 `ast` 定位，`_test_index` 按 `::` 分组、`git ls-files -- '*.py'`、`split_paths(..., (".py",))` 全部写死。换成 `adapter.source_suffixes()` 只会把 `.java` 喂进 `ast.parse`。**变异任务今天只对 Python 工程成立**
+- `signals.py`：`public_symbols` / `module_state` 是 Python AST 分析，非 `.py` 的文件跳过。Java 补丁拿不到「删了公开符号」「新增模块级可变状态」这两个信号，但照样进 `files_outside_suspect`
+
+### 验收
+
+**「产出了 N 条记录」证明不了任何事。** `tests/test_maven_mining.py` 造一个两提交的真 Maven git 仓库跑完整的 `mine_tasks`（四个阶段，五次真 `mvn`），断言产出的任务数 > 0、`target_test` 形如 `demo.CalcTest#addWorks`、`gold_files` 是 `src/main/java/` 下的 `.java`，最后把任务 `prepare_task_repo` 到临时目录**真跑一次全量**，确认 `target_test` 确实在失败集里、而同类的另一个用例是绿的。
+
+---
+
 ## 5. `MavenAdapter`
 
 | 成员 | 实现 |
@@ -105,7 +184,10 @@ def report_paths(self, worktree: Path, scoped: bool = False) -> list[Path]: ...
 | `report_paths(worktree, scoped=False)` | `sorted(worktree.glob("target/surefire-reports/TEST-*.xml"))`，忽略 `scoped` |
 | `test_dirs()` | `["src/test"]` |
 | `source_suffixes()` | `(".java",)` |
-| `make_test_id(classname, name, file)` | `f"{classname}#{name}"`（surefire 的 `-Dtest=` 语法） |
+| `test_selectors(test_files)` | `src/test/java/demo/CalcTest.java` → `demo.CalcTest`，见 §4b 裂缝 4 |
+| `make_test_id(classname, name, file)` | `f"{classname}#{name}"`；`name` 为空（类初始化失败）时是裸类名，见 §4b |
+| `is_file_level_id(test_id)` | `"#" not in test_id`，见 §4b 裂缝 5 |
+| `cases_under(file_id, test_ids)` | 前缀 `类#`，见 §4b 裂缝 5 |
 | `locate_source(failure, repo)` | 见下 |
 
 两个成员的签名与上面 §4 保持一致：命令**不接收报告路径**（表头里也不许再写 `full_test_command(report)`），报告位置由 `report_paths()` 单独回答。
