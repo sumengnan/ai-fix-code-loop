@@ -115,6 +115,22 @@ class PytestAdapter:
         path = "/".join(parts[:i]) + ".py"
         return "::".join([path, *parts[i:], name])
 
+    def is_file_level_id(self, test_id: str) -> bool:
+        """收集错误发出的 id 就是文件路径本身，用例 id 一定带 `::`。
+
+        见 make_test_id 的第 1 种形状：整个文件没能导入时 pytest 发一条
+        文件级 <error>，可重跑的 node id 是文件路径，不能拼 `::`。
+        """
+        return "::" not in test_id
+
+    def cases_under(self, file_id: str, test_ids: frozenset[str]) -> set[str]:
+        """比的是 `文件::`，不是裸 startswith。
+
+        裸前缀会把 `tests/test_xyz.py::t` 算进 `tests/test_x.py` 名下 ——
+        那个文件红着，这个文件就永远判不出「整体变绿」。
+        """
+        return {i for i in test_ids if i.startswith(file_id + "::")}
+
     def locate_source(self, failure: Failure, repo: Path) -> list[SourceCandidate]:
         """从 traceback 抽出 repo 内部帧，最深的排最前。"""
         repo_real = str(Path(repo).resolve())

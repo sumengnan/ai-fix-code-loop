@@ -314,6 +314,28 @@ def test_test_selectors_reject_the_pytest_shaped_input():
     assert MavenAdapter().test_selectors(["tests/test_calc.py"]) == []
 
 
+def test_class_level_ids_are_the_ones_without_a_method():
+    """`demo.CalcTest` 是类级 id，`demo.CalcTest#addWorks` 是用例 id。
+
+    这条判定过去写死在 eval/mine 里，判据是 `"::" not in i` —— 那是 pytest
+    的语法，Maven 的 id 一个 `::` 都没有，于是**每一个** Maven id 都被判成
+    「文件级」。
+    """
+    a = MavenAdapter()
+    assert a.is_file_level_id("demo.CalcTest") is True
+    assert a.is_file_level_id("demo.CalcTest#addWorks") is False
+
+
+def test_cases_under_a_class_id_are_matched_by_the_hash():
+    """`demo.CalcTest` 名下的方法，而不是 `demo.CalcTestHelper` 的。"""
+    a = MavenAdapter()
+    ids = frozenset({"demo.CalcTest#addWorks", "demo.CalcTest#alsoPasses",
+                     "demo.CalcTestHelper#x", "demo.CalcTest"})
+    assert a.cases_under("demo.CalcTest", ids) == {
+        "demo.CalcTest#addWorks", "demo.CalcTest#alsoPasses"}
+    assert a.cases_under("demo.OtherTest", ids) == set()
+
+
 def test_report_paths_is_empty_when_nothing_ran(tmp_path):
     """报告缺失返回空列表，不抛 —— require_report 那一层才负责判定。"""
     assert MavenAdapter().report_paths(tmp_path) == []

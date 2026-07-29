@@ -107,6 +107,32 @@ def test_test_selectors_is_empty_when_only_fixtures_changed():
     assert PytestAdapter().test_selectors(["tests/data/golden.json"]) == []
 
 
+def test_file_level_ids_are_the_ones_without_a_node_separator():
+    """收集错误产出的 id 就是文件路径本身，用例 id 带 `::`。
+
+    这条判定过去写死在 eval/mine 里（`"::" not in i`），而 `::` 是 pytest
+    的语法。回归钉：搬进适配器之后 pytest 侧必须逐点不变。
+    """
+    a = PytestAdapter()
+    assert a.is_file_level_id("tests/test_x.py") is True
+    assert a.is_file_level_id("tests/test_x.py::test_a") is False
+    assert a.is_file_level_id("tests/test_x.py::TestBar::test_a") is False
+
+
+def test_cases_under_a_file_id_are_matched_by_the_node_separator():
+    """`tests/test_x.py` 名下的用例，而不是碰巧同前缀的另一个文件。
+
+    裸 startswith 会把 `tests/test_xyz.py::t` 也算进来 —— 那个文件红着，
+    这个文件就永远判不出「整体变绿」。
+    """
+    a = PytestAdapter()
+    ids = frozenset({"tests/test_x.py::test_a", "tests/test_x.py::test_b",
+                     "tests/test_xyz.py::test_c", "tests/test_x.py"})
+    assert a.cases_under("tests/test_x.py", ids) == {
+        "tests/test_x.py::test_a", "tests/test_x.py::test_b"}
+    assert a.cases_under("tests/test_none.py", ids) == set()
+
+
 def test_locate_source_picks_deepest_repo_frame(buggy_repo):
     trace = (
         'Traceback (most recent call last):\n'

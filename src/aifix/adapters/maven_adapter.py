@@ -122,6 +122,20 @@ class MavenAdapter:
             return name
         return f"{classname}#{name}" if name else classname
 
+    def is_file_level_id(self, test_id: str) -> bool:
+        """类级 id 就是裸的全限定类名，用例 id 一定带 `#方法`。
+
+        见 make_test_id：surefire 对「类初始化就炸了」只发一条 name 为空的
+        <testcase>，合成出来的 id 是裸类名，也正好是个合法的 `-Dtest=`
+        选择器（跑整个类）。
+        """
+        return "#" not in test_id
+
+    def cases_under(self, file_id: str, test_ids: frozenset[str]) -> set[str]:
+        """比的是 `类#`，不是裸 startswith：`demo.CalcTestHelper#x` 不属于
+        `demo.CalcTest`。"""
+        return {i for i in test_ids if i.startswith(file_id + "#")}
+
     def locate_source(self, failure: Failure, repo: Path) -> list[SourceCandidate]:
         """从 Java 堆栈抽出 src/main/java 下的帧，最深的排最前。
 

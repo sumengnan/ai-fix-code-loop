@@ -93,4 +93,20 @@ class ProjectAdapter(Protocol):
 
     def make_test_id(self, classname: str, name: str, file: str | None) -> str: ...
 
+    # 这个 id 指的是一整个测试文件 / 测试类，而不是单个用例吗。
+    # 收集阶段整体失败时报告里发的就是这种 id：pytest 的测试文件导入失败发
+    # 一条文件级 <error>（id 是文件路径），surefire 的测试类初始化失败发一条
+    # name 为空的 <testcase>（id 是裸类名）。挖任务时「测试文件在 C^ 起不来、
+    # 在 C 正常」是一整类候选，认不出这种 id 就会把它们静默丢掉。
+    # 判据必须由适配器给：`eval/mine` 曾写死 `"::" not in i`，而 `::` 是
+    # pytest 的语法 —— Maven 的 id 一个都没有，于是**每一个** Maven id 都被
+    # 判成文件级，候选集在复跑那一步被整批清空，verify_commit 返回 [] 且不
+    # 报错。
+    def is_file_level_id(self, test_id: str) -> bool: ...
+
+    # 一个文件级 id 名下有哪些用例 id。用来判断「这个文件/类在另一侧整体
+    # 变绿了」——「至少跑到一个且全都没红」。同样是语法问题：pytest 靠
+    # `文件::用例`，surefire 靠 `类#方法`。
+    def cases_under(self, file_id: str, test_ids: frozenset[str]) -> set[str]: ...
+
     def locate_source(self, failure: Failure, repo: Path) -> list[SourceCandidate]: ...

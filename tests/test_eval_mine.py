@@ -466,7 +466,8 @@ def test_file_went_green_needs_at_least_one_case_that_actually_ran():
     from aifix.eval.mine import _file_went_green
 
     all_skipped = FailureSet(failures={}, ran=frozenset())
-    assert _file_went_green("tests/test_x.py", all_skipped) is False
+    assert _file_went_green("tests/test_x.py", all_skipped,
+                            PytestAdapter()) is False
 
 
 def test_file_went_green_is_false_when_some_case_still_fails():
@@ -479,12 +480,13 @@ def test_file_went_green_is_false_when_some_case_still_fails():
         failures={bad: Failure(test_id=bad, classname="tests.test_x",
                                name="test_b", message="", trace="")},
         ran=frozenset({"tests/test_x.py::test_a", bad}))
-    assert _file_went_green("tests/test_x.py", partial) is False
+    assert _file_went_green("tests/test_x.py", partial,
+                            PytestAdapter()) is False
     # 另一侧要有区分度：同样的形状去掉那条失败就该是 True，否则这个断言
     # 恒成立也看不出来
     ok = FailureSet(failures={},
                     ran=frozenset({"tests/test_x.py::test_a", bad}))
-    assert _file_went_green("tests/test_x.py", ok) is True
+    assert _file_went_green("tests/test_x.py", ok, PytestAdapter()) is True
 
 
 async def test_empty_scope_returns_before_materializing(history_repo, tmp_path,
@@ -584,6 +586,112 @@ async def test_scope_is_translated_into_adapter_selectors(
                               [_JAVA_TEST], MavenAdapter(), tmp_path / "v")
     assert got == []
     assert seen == [["demo.CalcTest"]], seen
+
+
+def _maven_stages(stages):
+    """按调用次序回放一串 FailureSet，供 verify_commit 的四个阶段消费。
+
+    喂的是 surefire 真实产出的 id 形状（见 tests/test_maven_adapter.py 里
+    那几条真跑 mvn 的实测），verify_commit 里的判定才是被测对象。
+    """
+    from aifix.adapters.base import Failure, FailureSet
+
+    def fs(failed, ran):
+        return FailureSet(
+            failures={i: Failure(test_id=i, classname="", name="",
+                                 message="", trace="") for i in failed},
+            ran=frozenset(ran))
+
+    return [fs(f, r) for f, r in stages]
+
+
+async def test_maven_case_ids_are_not_mistaken_for_class_level_ids(
+        java_history_repo, tmp_path, monkeypatch):
+    """`::` 是 pytest 的语法，拿它判「文件级 id」会把整个 Maven 候选集清空。
+
+    Maven 的 id 形如 `demo.CalcTest#addWorks`，一个 `::` 都没有。按
+    `"::" not in i` 判，**每一个** Maven id 都是文件级的，随后
+    _file_went_green 拿 startswith("demo.CalcTest#addWorks::") 去匹配，
+    永远匹配不到 → 恒 False → 阶段 3 的过滤把整批候选清空 → verify_commit
+    返回 []，且不报一个错，与「这个 commit 没有可用用例」无法区分。
+    """
+    import aifix.eval.mine as mine
+
+    scoped = _maven_stages([
+        # 阶段 1：C^ 源码 + C 测试 —— addWorks 红，zeroIsStable 绿
+        ({"demo.CalcTest#addWorks"},
+         {"demo.CalcTest#addWorks", "demo.CalcTest#zeroIsStable"}),
+        # 阶段 2：C 处全绿
+        (set(), {"demo.CalcTest#addWorks", "demo.CalcTest#zeroIsStable"}),
+        # 阶段 3：复跑候选，绿
+        (set(), {"demo.CalcTest#addWorks"}),
+    ])
+    full = _maven_stages([
+        ({"demo.CalcTest#addWorks"},
+         {"demo.CalcTest#addWorks", "demo.CalcTest#zeroIsStable"}),
+    ])
+    calls = {"scoped": 0, "full": 0}
+
+    async def fake_scoped(worktree, adapter, test_ids, **kw):
+        calls["scoped"] += 1
+        return scoped[calls["scoped"] - 1]
+
+    async def fake_full(worktree, adapter, **kw):
+        calls["full"] += 1
+        return full[calls["full"] - 1]
+
+    monkeypatch.setattr(mine, "run_scoped", fake_scoped)
+    monkeypatch.setattr(mine, "run_full_suite", fake_full)
+
+    h = java_history_repo
+    got = await verify_commit(str(h["path"]), h["commit"], h["base"],
+                              [_JAVA_TEST], MavenAdapter(), tmp_path / "v")
+    # 防空转：四个阶段必须都真的走到了，否则「返回了那一条」可能是
+    # 提前返回撞上的
+    assert calls == {"scoped": 3, "full": 1}, calls
+    assert got == ["demo.CalcTest#addWorks"], got
+
+
+async def test_maven_class_level_id_survives_when_the_class_goes_green(
+        java_history_repo, tmp_path, monkeypatch):
+    """类级 id（初始化失败）也要能被识别出来 —— 不能只是「一律不是文件级」。
+
+    没有这一条，一个把 is_file_level_id 写成恒 False 的实现照样能过上面
+    那条：Maven 侧「测试类在 C^ 初始化失败、在 C 正常」这一整类候选会被
+    静默丢掉，正如 pytest 侧曾经丢掉「文件在 C^ 导入失败」那一类。
+
+    形状取自实测：surefire 对类初始化失败只发一条 name 为空的 testcase，
+    合成出的 id 是裸类名 `demo.BootTest`（见 tests/test_maven_adapter.py）。
+    """
+    import aifix.eval.mine as mine
+
+    scoped = _maven_stages([
+        # 阶段 1：整个类在 C^ 初始化就炸，只发一条类级 id
+        ({"demo.BootTest"}, {"demo.BootTest"}),
+        # 阶段 2：C 处类正常，发的是两个方法，类级 id 根本不出现
+        (set(), {"demo.BootTest#a", "demo.BootTest#b"}),
+        # 阶段 3：拿类级 id 当选择器复跑（-Dtest=demo.BootTest 是合法的）
+        (set(), {"demo.BootTest#a", "demo.BootTest#b"}),
+    ])
+    full = _maven_stages([({"demo.BootTest"}, {"demo.BootTest"})])
+    calls = {"scoped": 0, "full": 0}
+
+    async def fake_scoped(worktree, adapter, test_ids, **kw):
+        calls["scoped"] += 1
+        return scoped[calls["scoped"] - 1]
+
+    async def fake_full(worktree, adapter, **kw):
+        calls["full"] += 1
+        return full[calls["full"] - 1]
+
+    monkeypatch.setattr(mine, "run_scoped", fake_scoped)
+    monkeypatch.setattr(mine, "run_full_suite", fake_full)
+
+    h = java_history_repo
+    got = await verify_commit(str(h["path"]), h["commit"], h["base"],
+                              [_JAVA_TEST], MavenAdapter(), tmp_path / "v")
+    assert calls == {"scoped": 3, "full": 1}, calls
+    assert got == ["demo.BootTest"], got
 
 
 def _commit(repo, msg: str) -> None:

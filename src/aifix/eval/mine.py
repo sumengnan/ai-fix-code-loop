@@ -15,7 +15,7 @@ import shutil
 import subprocess
 from pathlib import Path, PurePosixPath
 
-from ..adapters.pytest_adapter import PytestAdapter
+from ..adapters.base import ProjectAdapter
 from ..nodes.baseline import run_full_suite, run_scoped
 from ..signals import under_dirs
 from .task import Task
@@ -113,7 +113,7 @@ def _parent(repo: str, commit: str) -> str | None:
 
 
 async def verify_commit(repo: str, commit: str, base_commit: str,
-                        test_files: list[str], adapter: PytestAdapter,
+                        test_files: list[str], adapter: ProjectAdapter,
                         workdir: Path) -> list[str]:
     """返回「在 C^ 处红、在 C 处绿」的用例；不成立返回 []。
 
@@ -192,7 +192,8 @@ async def verify_commit(repo: str, commit: str, base_commit: str,
     # 在 C^ 导入失败、在 C 正常」整类候选静默丢掉。实测本仓库 65 个候选
     # commit 里 32 个新增了测试文件，那正是这一类。
     cand |= {i for i in (red.ids - green.ids)
-             if "::" not in i and _file_went_green(i, green)}
+             if adapter.is_file_level_id(i) and _file_went_green(i, green,
+                                                                adapter)}
     if not cand:
         return []
     # 再单跑一遍这几个用例：顺序依赖与状态污染会让「碰巧这一次绿了」混进来。
@@ -203,7 +204,8 @@ async def verify_commit(repo: str, commit: str, base_commit: str,
     # 无效路径导致 pytest 整轮中止，recheck.ids 会是空集，
     # `cand - recheck.ids` 就把整批候选误判成复跑全绿而放行。
     cand = {i for i in cand
-            if (_file_went_green(i, recheck) if "::" not in i
+            if (_file_went_green(i, recheck, adapter)
+                if adapter.is_file_level_id(i)
                 else (i in recheck.ran and i not in recheck.ids))}
     if not cand:
         return []
@@ -225,17 +227,22 @@ async def verify_commit(repo: str, commit: str, base_commit: str,
     return sorted(cand & red_full.ids)
 
 
-def _file_went_green(file_id: str, fs) -> bool:
+def _file_went_green(file_id: str, fs, adapter: ProjectAdapter) -> bool:
     """文件级 id 在 fs 这一侧「该文件的用例至少跑到一个且全部通过」。
 
     要求「至少跑到一个」而不只是「没有失败」：文件根本没被收集时同样
     没有失败，那不是变绿。
+
+    「哪些用例属于这个文件级 id」问适配器要。这里曾写死
+    `startswith(file_id + "::")` —— `::` 是 pytest 的语法，Maven 的
+    `demo.CalcTest#addWorks` 拼出来的是 `demo.CalcTest#addWorks::`，永远
+    匹配不到，恒返回 False。
     """
-    cases = {i for i in fs.ran if i.startswith(file_id + "::")}
+    cases = adapter.cases_under(file_id, fs.ran)
     return bool(cases) and not (cases & fs.ids)
 
 
-async def mine_tasks(repo: str, adapter: PytestAdapter, limit: int = 50,
+async def mine_tasks(repo: str, adapter: ProjectAdapter, limit: int = 50,
                      max_tasks: int = 10, workdir: Path | None = None,
                      on_progress=None) -> list[Task]:
     """扫最近 limit 个提交，产出至多 max_tasks 个任务。
