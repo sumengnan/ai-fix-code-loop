@@ -418,3 +418,39 @@ def test_issue_handle_refuses_a_usd_budget_without_a_price_map(
     with pytest.raises(SystemExit) as e:
         _cmd_issue(args)
     assert "价格表" in str(e.value)
+
+
+async def test_the_wall_clock_spent_on_reproduce_is_deducted_too(tmp_path):
+    """墙钟与美元、token 同理 —— 复现那一步耗掉的时间也不在闸内。
+
+    不扣的话，workflow 里那条不变式会被击穿：`AIFIX_BUDGET_WALL_SECONDS=3600`
+    配 `timeout-minutes: 90`（5400 秒），复现 3600 + 修复 3600 = 7200 > 5400，
+    **软闸赶不在硬杀前面**。而硬杀是直接杀进程：run_once 里那个「保证报告先
+    落地」的 except 执行不到，跑了一个半小时什么都留不下。
+    """
+    import asyncio
+
+    seen = {}
+
+    async def _reproduce(*a, **k):
+        await asyncio.sleep(0.05)
+        return ReproduceOutcome(_REPRO, tokens=5)
+
+    async def _red(*a, **k):
+        # 红检跑的是真测试，同样要计入 —— 只掐模型那一段会漏掉一大半
+        await asyncio.sleep(0.05)
+        return True, ""
+
+    async def _run(repo, config, **k):
+        seen["wall"] = config.budget_wall_seconds
+        return _state()
+
+    fakes, _ = _fakes()
+    fakes["reproduce_fn"], fakes["red_check_fn"], fakes["run_fn"] = (
+        _reproduce, _red, _run)
+    cfg = AifixConfig(budget_wall_seconds=100.0)
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    await handle(_payload(), tmp_path, cfg, _Gh(), **fakes)
+    # 两段各 0.05 秒都得算进去。只扣模型那一段的话，这里会 > 99.95
+    assert seen["wall"] < 99.9, "复现与红检耗掉的墙钟没有从后面的额度里扣"
+    assert seen["wall"] >= 99.0, "扣多了 —— 只该扣真正花掉的那点"

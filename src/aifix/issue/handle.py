@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -130,6 +131,9 @@ async def handle(
         return HandleResult(0, "no_repro")
 
     # ---------------------------------------------------------- 复现
+    # 从这里开始计时，一直算到 run_once 之前 —— 红检跑的是真测试，耗时不是
+    # 可以忽略的量，只掐模型调用那一段等于漏掉一大半。
+    t0 = time.monotonic()
     out = await reproduce_fn(repo, adapter, config, ev.title, ev.body)
     r = out.reproduction
     if r is None or not r.can_reproduce:
@@ -174,9 +178,16 @@ async def handle(
     #
     # 夹到 0，不允许负数：负数会让「还剩多少」的比较全部反向，那时闸最该拦住
     # 的一刻恰好完全不拦（与 fix_node 里 `0.0 or None` 那处同类）。
+    # 墙钟同理，而且**它是三层里最要紧的一层**：workflow 靠
+    # `AIFIX_BUDGET_WALL_SECONDS < timeout-minutes` 保证软闸先于硬杀响。不扣
+    # 的话两段各拿一份完整额度，加起来可能越过 Actions 的硬超时 —— 而硬超时是
+    # 直接杀进程，run_once 里那个「保证报告先落地」的 except 执行不到，跑了一
+    # 个半小时什么都留不下。红检那一步跑的是真测试，耗时不是可以忽略的量。
     run_config = config.model_copy(update={
         "budget_usd": max(0.0, config.budget_usd - out.cost_usd),
-        "budget_tokens": max(0, config.budget_tokens - out.tokens)})
+        "budget_tokens": max(0, config.budget_tokens - out.tokens),
+        "budget_wall_seconds": max(
+            0.0, config.budget_wall_seconds - (time.monotonic() - t0))})
 
     run_id = uuid.uuid4().hex[:8]
     state = await run_fn(repo, run_config, run_id=run_id,
