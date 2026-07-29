@@ -23,7 +23,11 @@ dependencies = [
 aifix = "aifix.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+# pyyaml 是 tests/test_workflow.py 用的：那份测试把 .github 里几条**安全控制**
+# 钉住（谁能触发、issue 作者是不是本人、权限清单）。它此前只是靠 langgraph 传
+# 递进来的隐式依赖 —— 与 pydantic 当初那处同一个形状：上游哪天不再依赖它，
+# 掉的不是一个测试，是那几条守卫再也没人看着了。
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "pyyaml>=6.0"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

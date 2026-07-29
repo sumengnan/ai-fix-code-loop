@@ -1,0 +1,94 @@
+# 一条 `/aifix` 评论 → 一个 PR。
+#
+# **这个文件必须待在默认分支上**：GitHub 只从默认分支加载 issue_comment 的
+# workflow。在特性分支上改它是调不通的 —— 而且不报错，只是永远不触发。
+#
+# 逻辑刻意全在 Python 里（`aifix issue handle`），这里只是个壳：改 YAML 要合进
+# 默认分支才能测，改 Python 拿一份假 event JSON 在本地就能跑完整条链路。
+name: aifix
+
+on:
+  issue_comment:
+    types: [created]
+
+# 同一个 issue 同时只跑一个。手滑连点两次 = 两倍开销，而且两个 run 会抢同一
+# 个 worktree 路径。
+concurrency:
+  group: aifix-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    # 便宜的前置过滤：绝大多数评论事件在这里就被挡掉，一秒 runner 都不花。
+    # 权威判定在 aifix.issue.event.authorize 里（还要挡 PR、bot、编辑过的评论、
+    # 命令不在第一行）。两处都要，不是重复 —— 这里挡不住的由代码挡。
+    #
+    # 三条判据缺一不可，尤其是第二条：只限制**触发者**挡不住提示注入。攻击
+    # 路径是「外人提一个藏了指令的 issue，等仓库主觉得该修、顺手打上 /aifix」，
+    # 而仓库主本来就想修 bug，那一步门槛低得可怜。
+    if: >
+      github.event.comment.author_association == 'OWNER' &&
+      github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.comment.body, '/aifix')
+
+    runs-on: ubuntu-latest
+    # 必须显著大于 AIFIX_BUDGET_WALL_SECONDS。Actions 的超时是**杀进程**：
+    # run_once 里那个「保证报告先落地」的 except 分支根本执行不到，跑了一小时
+    # 什么都留不下。让 aifix 自己的墙钟闸先响，硬杀只是兜底。
+    timeout-minutes: 90
+
+    # 显式写全。不写的话仓库默认可能是宽松的，而「我以为它是最小权限」是这类
+    # 事故最常见的开头。
+    permissions:
+      contents: write          # 推交付分支与 aifix/traces
+      issues: write            # 状态评论、reaction
+      pull-requests: write     # 开 PR
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 要完整历史：交付分支是从 HEAD 长出来的新分支，从浅克隆推新分支
+          # 在部分场景下会被拒（shallow update not allowed）。这个仓库不大，
+          # 换几秒 checkout 买掉一整类只在生产出现的失败。
+          fetch-depth: 0
+
+      # ↓↓↓ 目标项目自己的测试环境。把你 ci.yml 里那段原样搬过来即可。
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      # ↑↑↑
+
+      - run: uv run aifix issue handle
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          AIFIX_FIXER__MODEL: deepseek-v4-pro
+          AIFIX_FIXER__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
+          AIFIX_FIXER__API_KEY: ${{ secrets.AIFIX_API_KEY }}
+          AIFIX_DETECTOR__MODEL: deepseek-v4-flash
+          AIFIX_DETECTOR__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
+          AIFIX_DETECTOR__API_KEY: ${{ secrets.AIFIX_API_KEY }}
+
+          # 价格表用 variable 不用 secret：它不是机密，而放进 secret 会被日志
+          # 遮蔽成 ***，你反而看不出它配没配对 —— 而没配价格表的后果是美元闸
+          # 永远不触发。这个项目为「假的 $0.00」栽过三次。
+          AIFIX_PRICE_MAP: ${{ vars.AIFIX_PRICE_MAP }}
+
+          # 显式配，别靠探测：runner 上 clone 出来没有 .venv，自动探测落空会
+          # 退回 aifix 自己的解释器，然后是一整批 collection error —— 见
+          # `fix(eval): 评测照着克隆探解释器，探不到`。
+          AIFIX_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
+
+          AIFIX_BUDGET_USD: "0.50"
+          AIFIX_BUDGET_WALL_SECONDS: "3600"
+
+      # 崩了才最需要它。`if: always()` 不是可选的 —— job 失败时不上传，等于
+      # 恰好在最需要诊断数据的那一次把它扔了。
+      #
+      # 这里是**全量**（含体积大的 events.jsonl），供 aifix replay。
+      # facts + report 另有一条永久去处（aifix/traces 分支），由 handle 自己推。
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aifix-trace-${{ github.event.issue.number }}-${{ github.run_id }}
+          path: .aifix/runs/
+          retention-days: 90

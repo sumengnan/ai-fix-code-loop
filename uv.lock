@@ -32,6 +32,7 @@ dependencies = [
 dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
@@ -46,6 +47,7 @@ requires-dist = [
 dev = [
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=0.23" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]
