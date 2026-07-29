@@ -4,31 +4,66 @@
 
 | 文件 | 是什么 |
 |---|---|
-| `tasks-ai-harness-framework.jsonl` | 12 个任务，`aifix mine` 从 [ai-harness-framework](https://github.com/sumengnan/ai-harness-framework) 的 git history 挖出来的（`--limit 60 --max-tasks 12`）。每个任务自带 ground truth：`gold_files` 是那个把测试从红修到绿的 commit 改过的源文件 |
-| `results-deepseek-v4-flash.jsonl` | 用 `deepseek-v4-flash` 跑一轮的逐任务明细 |
+| `tasks-two-repos.jsonl` | 39 个任务，`aifix mine` 从两个仓库的 git history 挖出来：[ai-harness-framework](https://github.com/sumengnan/ai-harness-framework) 14 个 + ai-learning-helper 25 个。每个任务自带 ground truth：`gold_files` 是那个把测试从红修到绿的 commit 改过的源文件 |
+| `results-deepseek-v4-flash-39.jsonl` | 用 `deepseek-v4-flash` 跑一轮的逐任务明细（2026-07-29，$15.97 / 1568 万 tokens） |
+
+## 结果
+
+```
+| 模型 | 来源 | 任务数 | 定位准确率 | 修复成功率 | 平均成本 | 平均 tokens | 越界 | 可疑信号 | 评测故障 |
+| deepseek-v4-flash | mined | 37 | 51% (19/37, 95%CI 36%–67%) | 27% (10/37, 95%CI 15%–43%) | $0.4316 | 423,693 | 0 | 0 | 2 |
+```
+
+按仓库拆开，差别比合起来看更有信息量：
+
+| 仓库 | 有效任务 | 修复成功率 | 定位准确率 | 均价 |
+|---|---|---|---|---|
+| ai-harness-framework | 14 | **43%** (6/14, CI 21%–67%) | 43% (6/14, CI 21%–67%) | $0.435 |
+| ai-learning-helper | 23 | **17%** (4/23, CI 7%–37%) | 57% (13/23, CI 37%–74%) | $0.429 |
+
+两点：
+
+1. **换到更大的代码库上，修复率掉了一半以上**，而两个区间只在 21%–37% 这一小段重叠——这是这轮里最像真信号的一条。
+2. **定位不是瓶颈。** 更大的那个仓库定位反而更准（57% vs 43%），修复率却低得多。卡住的不是「找不到文件」，是「改不对」。
+
+## 一次自我更正
+
+第一轮只跑了 12 个任务（同一个 framework 仓库），得到 `定位 25% / 修复 58%`，我据此在 README 里写过一条结论：「诊断多半是错的，补丁多半是对的，detect 这一步可能不值它的钱」。
+
+第二轮在**同一个仓库**上跑 14 个任务，得到 `定位 43% / 修复 43%`。
+
+两轮的区间大幅重叠（定位 9%–53% vs 21%–67%，修复 32%–81% vs 21%–67%），每一轮的点估计都落在对方的区间里——**两轮统计上无法区分，那条结论是从噪声里读出来的。**
+
+区间就印在表里，是我没照着它读。这条更正留在这儿，因为它正是这套评测存在的理由：**它抓住了自己作者的过度解读。**
+
+有一条独立的观察仍然成立，因为它是**直接测量**而不是统计推断：这批任务里的纯断言失败，traceback 里根本没有产品代码的栈帧，`locate_source` 实测返回 **0 个候选**——Detector 在那些任务上确实是盲猜。但「盲猜」和「detect 不值它的钱」是两件事，后者需要一个对照实验（关掉 detect 再跑一轮），没做。
 
 ## 为什么目标仓库不是 aifix 自己
 
 评测的每个任务要跑 1 次 baseline 全量 + 至多 3 次 verify 全量。aifix 自己的套件
-384~678 秒，一个任务就要半小时以上；框架的套件 13 秒。
+378~886 秒，一个任务就要半小时以上；framework 的 13 秒，helper 的 65 秒。
 
 ## 复现
 
 ```bash
-cd /path/to/ai-fix-code-loop
-uv run aifix eval evals/tasks-ai-harness-framework.jsonl \
+uv run aifix eval evals/tasks-two-repos.jsonl \
     --label deepseek-v4-flash --parallel 3 \
-    --budget-per-task 0.60 --budget-total 6.00
+    --budget-per-task 0.60 --budget-total 16.00
 ```
 
 在哪个目录、用谁的 venv 跑 `aifix eval` 都不影响目标项目的测试：每个任务的测试
 解释器按它自己的 `repo` 字段（**源仓库**）解析 —— 显式的 `AIFIX_TEST_PYTHON` >
-源仓库里的 `.venv/bin/python`（其次 `venv/`）> aifix 自己的解释器。所以这里的
-前提只有一条：**任务集里 `repo` 指向的那个仓库，自己有一个装齐了测试依赖的
-venv**（没有就显式配 `AIFIX_TEST_PYTHON`）。
-
-（这一段以前写的是「必须套一层 `uv run --with-editable`，因为 aifix 用
-`sys.executable` 跑目标项目的测试」。那是解释器解析做进来之前的复现方法，现在
-不需要了，套着也没有坏处。）
+源仓库里的 `.venv/bin/python`（其次 `venv/`）> aifix 自己的解释器。所以前提只有
+一条：**任务集里 `repo` 指向的那个仓库，自己有一个装齐了测试依赖的 venv**
+（没有就显式配 `AIFIX_TEST_PYTHON`）。
 
 任务集里的 `repo` 字段是绝对路径，换机器要改。
+
+**别把 `--budget-per-task` 设太小。** 冒烟时用过 `0.20`，某个任务 1 轮就被掐断判
+`same`；放到 `0.60` 之后同一个任务修好了。预算设太紧会把「模型不行」和「额度不够」
+混成同一个数字。
+
+## 两条口径限制
+
+- **2 个评测故障不进分母**（它们是评测自己的问题，不是模型的成绩）。这一轮的 2 个都来自 helper 仓库。
+- **有任务撞的是 token 上限（50 万）而不是美元上限**，说明这批任务真正的约束是上下文长度而非价格。
