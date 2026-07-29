@@ -6,8 +6,6 @@
 import json
 from pathlib import Path
 
-import pytest
-
 from aifix.issue.github import STATUS_MARKER, GitHubClient
 
 _RAW = json.loads((Path(__file__).parent / "fixtures"
@@ -71,7 +69,7 @@ def test_second_status_edits_the_same_comment():
     自己那条评论时读的字段名和 GitHub 实际返回的一致。
     """
     mine = dict(_REAL_COMMENT, id=999, body=f"旧内容\n{STATUS_MARKER}")
-    c, r = _client(responses=[json.dumps([_REAL_COMMENT, mine])])
+    c, r = _client(responses=[json.dumps([[_REAL_COMMENT, mine]])])
     c.upsert_status(42, "新内容")
     patched = r.find("--method", "PATCH")
     assert patched, r.calls
@@ -85,7 +83,7 @@ def test_a_comment_without_the_marker_is_not_claimed():
     反向对照：上一个用例证明「有标记就会被编辑」，这一个证明「没标记就不会」
     —— 缺了它，一个恒真的「总是编辑第一条」实现也能让上面那条通过。
     """
-    c, r = _client(responses=[json.dumps([_REAL_COMMENT])])
+    c, r = _client(responses=[json.dumps([[_REAL_COMMENT]])])
     c.upsert_status(42, "新内容")
     assert not r.find("--method", "PATCH")
 
@@ -125,3 +123,26 @@ def test_plain_comment_does_not_carry_the_status_marker():
     c, r = _client()
     c.comment(42, "信息不足，缺：复现步骤")
     assert STATUS_MARKER not in (r.calls[-1][1] or "")
+
+
+def test_the_status_comment_is_found_across_paginated_pages():
+    """`gh api --paginate` 每一页是**独立的** JSON 数组，多页时输出是几个数组
+    串在一起 —— 直接 json.loads 必然失败。
+
+    失败的形态特别糟：解析不了 → 认领不到自己那条 → 每次 run 新发一条评论。
+    一条评论以上的 issue 才会触发（默认每页 30），而本地测一次只有零条，所以
+    它会一路活到线上，然后表现为「机器人开始刷屏」。
+
+    用 --slurp 把各页包进一个外层数组，再摊平一层。
+    """
+    others = [dict(_REAL_COMMENT, id=i) for i in range(1, 31)]
+    mine = dict(_REAL_COMMENT, id=999, body=f"旧内容\n{STATUS_MARKER}")
+    # --slurp 的形状：[[第一页...], [第二页...]]
+    c, r = _client(responses=[json.dumps([others, [mine]])])
+    c.upsert_status(42, "新内容")
+
+    listed = [x for x in r.calls if "--paginate" in x[0]][0]
+    assert "--slurp" in listed[0], "多页时不加 --slurp，输出不是合法 JSON"
+    patched = r.find("--method", "PATCH")
+    assert patched, "跨页没找到自己那条状态评论，会退化成每次新发一条"
+    assert any("999" in a for a in patched[0][0])

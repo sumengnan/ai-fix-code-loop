@@ -71,15 +71,30 @@ class GitHubClient:
                  stdin=json.dumps({"body": marked}, ensure_ascii=False))
 
     def _find_status_comment(self, issue: int) -> int | None:
-        raw = self.run(["gh", "api", "--paginate",
+        """跨全部分页找自己那条。
+
+        **`--slurp` 不能省。** `gh api --paginate` 的每一页是独立的 JSON 数组，
+        多页时输出是几个数组串在一起 —— 直接 json.loads 必然失败。而失败的形态
+        特别隐蔽：解析不了 → 认领不到自己那条 → 每次 run 新发一条评论。它只在
+        评论超过一页（默认 30 条）时才出现，本地测永远碰不到，会一路活到线上，
+        然后表现为「机器人开始刷屏」。
+
+        `--slurp` 给出的是 `[[第一页…], [第二页…]]`，所以要摊平一层。
+        """
+        raw = self.run(["gh", "api", "--paginate", "--slurp",
                         f"repos/{self.repo}/issues/{issue}/comments"])
         try:
-            comments: list[dict[str, Any]] = json.loads(raw or "[]")
+            pages = json.loads(raw or "[]")
         except json.JSONDecodeError:
             # 认不出就当作没有：多发一条评论是噪音，改错一条是破坏。
             return None
+        comments: list[dict[str, Any]] = [
+            c for page in pages
+            # 容错一层：真出现未包页的裸数组时（比如换了 gh 版本），按单页读，
+            # 而不是让整条链路以 AttributeError 炸掉
+            for c in (page if isinstance(page, list) else [page])]
         for c in reversed(comments):
-            if STATUS_MARKER in (c.get("body") or ""):
+            if isinstance(c, dict) and STATUS_MARKER in (c.get("body") or ""):
                 return int(c["id"])
         return None
 
