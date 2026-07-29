@@ -201,6 +201,27 @@ export AIFIX_FIXER__BASE_URL=...      # 端点也可以不同
 
 ---
 
+## issue 驱动：在 `run_once` 之前多一步，之后什么都没变
+
+M6 之后 `run_once` 不再是唯一入口。`aifix issue handle` 在它**之前**插了一段，而**核心循环一行都没改**：
+
+```
+读 issue 事件 → 授权（零 LLM）
+  → reproduce   模型路由三（复用 fixer 的配置）：读代码，写一条复现测试
+  → red_check   零 LLM：必须红，且不能红在收集错误上
+  → git commit  复现测试进 HEAD
+  → run_once(only_test=<那条复现测试>)      ← 从这里开始与上面完全一致
+  → git push + 开 PR
+```
+
+关键在 `git commit` 那一步：`Worktree` 是从 **HEAD** 建的，所以复现测试自然出现在 worktree 里，`baseline` 把它认成一个普通的失败用例，`only_test` 把队列削成只有它。**核心循环完全不知道自己在被 issue 驱动。**
+
+交付分支上因此天然有两个提交（复现测试、修复），PR 的 diff 一屏看完 —— 而「报告说已修复时分支上必须真的有东西」这条主张，在这里额外多了一层证据：那条测试本身就在分支上。
+
+`reproduce` **不在图里**，所以它不在 `nodes/` 下而在顶层 `src/aifix/reproduce.py`。它必须发生在 `run_once` 之前（测试要先进 HEAD），而图的入口就是 `run_once`。
+
+细节与七条设计决策见 [M6 计划](superpowers/plans/2026-07-29-m6-issue-driven.md)。
+
 ## `run_once` 与 `build_graph()` 不等价
 
 `graph.build_graph()` 用 LangGraph 装配了同一套节点与路由，节点是 trace 的单位，也是 checkpoint 的边界。但**两条路径不等价，预算只在 `run_once` 里**。
