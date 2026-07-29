@@ -114,7 +114,15 @@ def render_report(state: dict[str, Any]) -> str:
             f"| {r['attempts']} | {r['abort_reason'] or '—'} |")
     lines += _signal_section(state.get("signals") or [])
 
-    lines += ["", f"合并：`git merge {state['branch']}`"]
+    # 一个都没修好时不给合并命令：那条分支与 HEAD 逐字相同，`git merge` 是在
+    # 邀请用户去合一个空分支。fixed > 0 恰好就是「分支上至少多了一个提交」——
+    # results 里的 better 行只在 Worktree.commit 真的产生了提交之后才写
+    # （见 verify_node），两者不是各算各的。
+    if fixed:
+        lines += ["", f"合并：`git merge {state['branch']}`"]
+    else:
+        lines += ["", f"这条分支上没有任何提交（`{state['branch']}` 与 HEAD "
+                      "相同），没有可合并的东西。"]
     return "\n".join(lines) + "\n"
 
 

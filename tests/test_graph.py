@@ -117,3 +117,39 @@ def test_render_report_still_renders_well_formed_signal_entries():
     })
     assert "值得多看一眼" in md
     assert "`mul`" in md
+
+
+def test_render_report_does_not_invite_a_merge_of_an_empty_branch():
+    """一个都没修好时给出 `git merge` = 邀请用户去合一个空分支。
+
+    实测：在一个红仓库上 `aifix run . --dry-run`，报告写「修复 0 / 1」，
+    紧接着仍然是「合并：git merge aifix/xxxx」。这与刚修过的「报告写已修复
+    而分支上没有提交」是同一族 —— 报告承诺了一件分支上没有的事。
+
+    count_fixed > 0 恰好就是「分支上至少多了一个提交」：results 里的 better
+    行只在 Worktree.commit 真的产生了提交之后才写（见 verify_node）。
+    """
+    md = render_report({
+        "run_id": "r1", "branch": "aifix/r1", "adapter_name": "pytest",
+        "baseline_ids": ["a"], "spent_usd": 0.0, "spent_tokens": 0,
+        "abort": None,
+        "results": [{"test_id": "a", "verdict": "same", "attempts": 3,
+                     "abort_reason": "max_attempts"}],
+    })
+
+    assert "修复：**0 / 1**" in md
+    assert "git merge" not in md, md
+    # 只是不给命令还不够 —— 得说清楚这条分支上没有东西，否则用户会自己去合
+    assert "没有任何提交" in md, md
+
+
+def test_render_report_says_nothing_was_delivered_on_a_dry_run():
+    """--dry-run 一个模型都不调，分支必然是空的。"""
+    md = render_report({
+        "run_id": "r1", "branch": "aifix/r1", "adapter_name": "pytest",
+        "baseline_ids": ["a", "b"], "spent_usd": 0.0, "spent_tokens": 0,
+        "abort": None, "results": [],
+    })
+
+    assert "git merge" not in md, md
+    assert "没有任何提交" in md, md
