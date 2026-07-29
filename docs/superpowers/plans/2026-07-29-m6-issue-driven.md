@@ -20,7 +20,7 @@
 4. **不自造第三方的产出**。断言 GitHub 事件载荷形状的测试，其 fixture 必须来自**真实投递**（从仓库 Settings → Webhooks 的 Recent Deliveries 里抄，或 `gh api` 拉一条真 issue）。手写的 JSON 只能证明我们理解得自洽。
 5. **凡是判定，零 LLM**。授权、命令解析、红检、交付通路选择，全部由确定性代码做。模型只负责生成复现测试。
 6. 注释写「为什么」不写「是什么」，中文。
-7. 全量套件 592 项、378–726 秒（同机波动近一倍）。只在任务要求时跑。
+7. 全量套件 740 项（M6 之后）。同机波动近一倍，别把某一次读数当权威。只在任务要求时跑。
 
 ---
 
@@ -109,7 +109,7 @@
 
 **文件：** 新建 `src/aifix/agents/reproducer.py`；测试 `tests/test_reproducer.py`
 
-- [ ] **步骤 1：写失败测试**
+- [x] **步骤 1：写失败测试**
 
 ```python
 def test_parse_rejects_reproducible_claim_without_a_target_id():
@@ -144,9 +144,9 @@ def test_parse_rejects_a_test_file_outside_the_test_dirs():
             "target_test_id": f"{bad}::t", "missing_info": []})) is None
 ```
 
-- [ ] **步骤 2：跑一次确认失败**，把真实输出记进报告
-- [ ] **步骤 3：实现** `SYSTEM_PROMPT` / `build_prompt(issue_title, issue_body, adapter)` / `parse_reproduction(text)`
-- [ ] **步骤 4：跑通，commit**
+- [x] **步骤 2：跑一次确认失败**，把真实输出记进报告
+- [x] **步骤 3：实现** `SYSTEM_PROMPT` / `build_prompt(issue_title, issue_body, adapter)` / `parse_reproduction(text)`
+- [x] **步骤 4：跑通，commit**
 
 系统提示里必须写死的三条：只产出一条测试函数；**不许修改任何已有文件**；测试必须针对 issue 描述的行为断言，不许写恒真断言。
 
@@ -161,9 +161,9 @@ def test_parse_rejects_a_test_file_outside_the_test_dirs():
 
 `baseline.py` 里已有收集错误的判别逻辑，复用，不要另写一份（本项目在"第二份注册表"上栽过）。
 
-**文件：** 新建 `src/aifix/nodes/reproduce.py`；测试 `tests/test_reproduce_node.py`
+**文件：** 新建 `src/aifix/reproduce.py`（见上面那条更正）；测试 `tests/test_reproduce.py`
 
-- [ ] **步骤 1：写失败测试**
+- [x] **步骤 1：写失败测试**
 
 ```python
 async def test_red_check_rejects_a_test_that_passes(tmp_repo):
@@ -191,9 +191,9 @@ async def test_reproducer_registry_has_no_write_tools():
     assert "apply_patch" not in names and "run_tests" not in names
 ```
 
-- [ ] **步骤 2：跑一次确认失败**
-- [ ] **步骤 3：实现**
-- [ ] **步骤 4：跑通，commit**
+- [x] **步骤 2：跑一次确认失败**
+- [x] **步骤 3：实现**
+- [x] **步骤 4：跑通，commit**
 
 ### 任务 3：`aifix reproduce` 子命令 —— 第一次撞真实
 
@@ -205,11 +205,11 @@ uv run aifix reproduce . --issue-text issue.md
 
 **这是整个计划里第一个能给出真实读数的地方。** 拿三到五个你自己仓库里真实的、已经修过的 bug，把当初的 commit message 当 issue 正文喂进去，看它写出来的测试对不对。
 
-- [ ] **步骤 1：写失败测试**（子命令存在、`--issue-text` 缺失时报错、退出码语义）
-- [ ] **步骤 2：跑一次确认失败**
-- [ ] **步骤 3：实现**
-- [ ] **步骤 4：跑通，commit**
-- [ ] **步骤 5：真实验收** —— 五个真 bug，把「几个能写出复现、几个红得对」记进报告
+- [x] **步骤 1：写失败测试**（子命令存在、`--issue-text` 缺失时报错、退出码语义）
+- [x] **步骤 2：跑一次确认失败**
+- [x] **步骤 3：实现**
+- [x] **步骤 4：跑通，commit**
+- [x] **步骤 5：真实验收** —— 五个真 bug，把「几个能写出复现、几个红得对」记进报告
 
 > **验收点**：如果五个里少于两个能写出红得对的复现，**停下来先改 prompt 和上下文构造**，别急着往阶段二走。后面两个阶段全是胶水，胶水不会让这个数字变好。
 
@@ -233,7 +233,7 @@ uv run aifix reproduce . --issue-text issue.md
 
 **文件：** 新建 `src/aifix/issue/event.py`；测试 `tests/test_issue_event.py`。fixture 用**真实投递**的 JSON（约束 4）。
 
-- [ ] **步骤 1：写失败测试**
+- [x] **步骤 1：写失败测试**
 
 ```python
 def test_edited_comments_are_ignored(real_payload):
@@ -265,9 +265,9 @@ def test_rejection_always_carries_a_human_readable_reason(real_payload):
     assert d.allowed is False and d.reason
 ```
 
-- [ ] **步骤 2：跑一次确认失败**
-- [ ] **步骤 3：实现**
-- [ ] **步骤 4：跑通，commit**
+- [x] **步骤 2：跑一次确认失败**
+- [x] **步骤 3：实现**
+- [x] **步骤 4：跑通，commit**
 
 ### 任务 5：GitHub 输出侧
 
@@ -279,10 +279,10 @@ def test_rejection_always_carries_a_human_readable_reason(real_payload):
 
 **文件：** 新建 `src/aifix/issue/github.py`；测试 `tests/test_issue_github.py`
 
-- [ ] **步骤 1：写失败测试**（含：状态评论是**编辑**不是新建；PR body 来自 `report.md`；未修复时标题带标记）
-- [ ] **步骤 2：跑一次确认失败**
-- [ ] **步骤 3：实现**
-- [ ] **步骤 4：跑通，commit**
+- [x] **步骤 1：写失败测试**（含：状态评论是**编辑**不是新建；PR body 来自 `report.md`；未修复时标题带标记）
+- [x] **步骤 2：跑一次确认失败**
+- [x] **步骤 3：实现**
+- [x] **步骤 4：跑通，commit**
 
 ### 任务 6：`aifix issue handle` 编排
 
@@ -305,10 +305,10 @@ def test_rejection_always_carries_a_human_readable_reason(real_payload):
 
 **文件：** 新建 `src/aifix/issue/handle.py`；测试 `tests/test_issue_handle.py`（打桩 `run_once` 与 `reproduce_node`，只测编排与通路选择）
 
-- [ ] **步骤 1：写失败测试**（三条通路各一个；退出码各一个）
-- [ ] **步骤 2：跑一次确认失败**
-- [ ] **步骤 3：实现**
-- [ ] **步骤 4：跑通，commit**
+- [x] **步骤 1：写失败测试**（三条通路各一个；退出码各一个）
+- [x] **步骤 2：跑一次确认失败**
+- [x] **步骤 3：实现**
+- [x] **步骤 4：跑通，commit**
 
 ---
 
@@ -326,10 +326,10 @@ def test_rejection_always_carries_a_human_readable_reason(real_payload):
 
 **文件：** 改 `src/aifix/nodes/preflight.py`；测试 `tests/test_nodes_preflight_baseline.py`
 
-- [ ] **步骤 1：写失败测试**（打桩 client 抛连接错误 → `abort` 里出现凭据/网络字样，且**不出现**"模型没修好"这类措辞）
-- [ ] **步骤 2：跑一次确认失败**
-- [ ] **步骤 3：实现**
-- [ ] **步骤 4：跑通，commit**
+- [x] **步骤 1：写失败测试**（打桩 client 抛连接错误 → `abort` 里出现凭据/网络字样，且**不出现**"模型没修好"这类措辞）
+- [x] **步骤 2：跑一次确认失败**
+- [x] **步骤 3：实现**
+- [x] **步骤 4：跑通，commit**
 
 ### 任务 8：trace 持久化
 
@@ -343,10 +343,10 @@ def test_rejection_always_carries_a_human_readable_reason(real_payload):
 
 **文件：** 改 `src/aifix/trajectory.py`、`src/aifix/cli.py`；测试 `tests/test_trajectory.py`
 
-- [ ] **步骤 1：写失败测试**（`ingest` 指定目录后能读到那份 facts；孤儿分支上的目录布局能被 `ingest` 认出）
-- [ ] **步骤 2：跑一次确认失败**
-- [ ] **步骤 3：实现**
-- [ ] **步骤 4：跑通，commit**
+- [x] **步骤 1：写失败测试**（`ingest` 指定目录后能读到那份 facts；孤儿分支上的目录布局能被 `ingest` 认出）
+- [x] **步骤 2：跑一次确认失败**
+- [x] **步骤 3：实现**
+- [x] **步骤 4：跑通，commit**
 
 ### 任务 9：workflow 文件
 
@@ -407,7 +407,7 @@ jobs:
 - **`AIFIX_BUDGET_WALL_SECONDS` (3600) 必须显著小于 `timeout-minutes` (90)。** Actions 的超时是**杀进程**，`run_once` 那个保证报告先落地的 except 分支根本执行不到——跑了一小时，什么都没留下。让软闸先响。
 - **`AIFIX_PRICE_MAP` 用 variable 不用 secret。** 价格表不是机密，放 secret 里会被日志遮蔽成 `***`，你反而看不出它配没配对——**而没配价格表的后果是美元闸永远不触发**。
 
-- [ ] **步骤 1：连通性先验证**（**在写这个文件之前做**）
+- [x] **步骤 1：连通性先验证**（**在写这个文件之前做**）
 
 ```yaml
 - run: curl -sS -o /dev/null -w "%{http_code}\n" $BASE_URL/models -H "Authorization: Bearer $KEY"
@@ -415,19 +415,19 @@ jobs:
 
 runner 的出口 IP 是 Azure 的动态大段。**你的模型 endpoint 若有 IP 白名单，整条 Actions 路线要推倒重来**——不值得等胶水全写完才发现。
 
-- [ ] **步骤 2：写 workflow，合进默认分支**
-- [ ] **步骤 3：真实 issue 端到端验收**
+- [x] **步骤 2：写 workflow，合进默认分支**
+- [x] **步骤 3：真实 issue 端到端验收**
 
 ### 任务 10：整体验收
 
-- [ ] 自己提一个真实 issue（描述一个真 bug），评论 `/aifix`
-- [ ] 确认：状态评论出现 → PR 开出来 → diff 里有复现测试和补丁两个 commit
-- [ ] 确认：artifact 能下载，`aifix replay` 能读
-- [ ] 确认：`aifix/traces` 分支上有这次的 facts，clone 下来 `aifix ingest` 能灌库
-- [ ] **故意跑一次注定修不好的**，确认走通路二（PR 开出来且标明未修复）
-- [ ] **故意提一个信息不全的 issue**，确认走通路一（只回帖，不建分支）
-- [ ] 全量套件绿，把耗时读数记进报告
-- [ ] 更新 README：命令一览加 `aifix reproduce` / `aifix issue handle`，项目状态更新测试数
+- [x] 自己提一个真实 issue（描述一个真 bug），评论 `/aifix`
+- [x] 确认：状态评论出现 → PR 开出来 → diff 里有复现测试和补丁两个 commit
+- [x] 确认：artifact 能下载，`aifix replay` 能读
+- [x] 确认：`aifix/traces` 分支上有这次的 facts，clone 下来 `aifix ingest` 能灌库
+- [x] **故意跑一次注定修不好的**，确认走通路二（PR 开出来且标明未修复）
+- [x] **故意提一个信息不全的 issue**，确认走通路一（只回帖，不建分支）
+- [x] 全量套件绿，把耗时读数记进报告
+- [x] 更新 README：命令一览加 `aifix reproduce` / `aifix issue handle`，项目状态更新测试数
 
 ---
 
@@ -444,6 +444,58 @@ runner 的出口 IP 是 Azure 的动态大段。**你的模型 endpoint 若有 I
 任务 7 和 8 与前两个阶段无依赖，赶时间的话可以提前插。
 
 ---
+
+## 实现时撞出来的六处
+
+照 M5 记「六处裂缝」的规矩留痕。**每一处都不是计划里预见到的**，而其中五处的症状是同一类：不崩溃、不报错，只有某个数字或承诺是假的。
+
+### 一、交付提交的署名是假的
+
+`Worktree.commit` 从没设过 git 身份。原以为 runner 上会因此**失败**——实测（2026-07-29，macOS）不会：git 从主机名推断出 `苏梦楠 <sumengnan@MacBook-Pro-5.local>`，GitHub 的 runner 上会是 `runner@fv-az….(none)` 这一类。两者都是查无此人的地址，而这条提交要出现在 PR 上给人看。
+
+问题因此不是「提交不成功」，是**署名是假的**。顺带解决第二件事：那份推断依赖 GECOS 与主机名解析，在精简容器里会失败，那时 commit 的 RuntimeError 会被 verify_node 接住、判定降级成 SAME、报告写「交付失败（git add 未能暂存改动）」——一句指向 `git add` 的话，而真相在 commit 那一步。
+
+改法：`delivery.COMMIT_NAME` / `COMMIT_EMAIL`，`_git_commit()` 显式带 `-c`。用 aifix 自己的身份而不是仓库主的，因为这条提交**确实不是他写的**。
+
+**这一处是 M6 之外的存量问题**，只是 Actions 把它照亮了。
+
+### 二、模型可达性探针吃掉了脚本替身的第一轮
+
+探针原本写成 `probe_model(config, client=fixer_client)`。而所有 e2e 测试注入的 `_Scripted` 替身按调用次数发牌——探针消费掉第一轮之后，后面每一步都错位一格：诊断拿到本该给 fix 的补丁、fix 拿到下一轮的文本。
+
+**9 个既有用例同时红，而症状（判定不对、成本对不上 $50 ≠ $55）没有一个字指向探针。**
+
+改法：只在 `fixer_client is None`（run_once 自己要建真客户端）时才探。注入了 client 说明调用方已经决定了模型是什么，探一个替身证明不了端点可达。回归测试在 `test_model_preflight.test_an_injected_client_is_never_probed`。
+
+### 三、复现那一步的花销绕过了全部三层预算闸
+
+`reproduce` 在 `run_once` **之外**发起模型调用，`RunBudget` 一分都管不到。设 `AIFIX_BUDGET_USD=0.50`，实际可能花掉两倍——而这个项目对预算的措辞是「越线之后不再发起新的模型调用」，超支上界必须是可推导的。
+
+**一个精确措辞但从没验证过的预算上界实际超支 4 倍，是这个仓库已经犯过一次的错。**
+
+改法：把 `out.cost_usd` / `out.tokens` 从传给 `run_once` 的配置里扣掉（夹到 0，不许为负——负数会让「还剩多少」的比较全部反向，那时闸最该拦住的一刻恰好完全不拦），并把这笔钱写进 PR 正文：报告里的成本只统计 `run_once` 那一段，不单独写出来的话，它在**任何一份产物里都不存在**。
+
+### 四、`gh api --paginate` 多页时输出的不是合法 JSON
+
+每一页是**独立的** JSON 数组，多页时几个数组串在一起。`json.loads` 必然失败 → 认领不到自己那条状态评论 → 每次 run 新发一条。
+
+失败的形态特别隐蔽：**只在评论超过一页（默认 30 条）时出现**，本地测一次只有零条，会一路活到线上，然后表现为「机器人开始刷屏」。
+
+改法：加 `--slurp`（把各页包进一个外层数组）再摊平一层。
+
+### 五、复现测试的主干比对是裸子串
+
+`target_test_id` 要能追溯到 `test_file`，判据一开始写成 `stem in target`。而 `test_a` 是 `tests/test_ab.py::test_x` 的子串——写下去的是 A、红检跑的是 B。B 若恰好是仓库里本来就红的用例，红检通过、fixer 被派去修它，而 issue 里那个 bug 一个字没动。
+
+改法：按词边界匹配。**不能改用 `startswith`**——`::` 是 pytest 的语法，M5 的裂缝 5 就是把它当通用格式写死栽的；Maven 的选择器长成 `com.example.FooTest#testBar`，与文件路径毫无前缀关系。
+
+### 六、两处「失联」：空分支名与 push 失败
+
+`run_once` 若在建 worktree **之前**就中止（解释器配错、端点不通），`state["branch"]` 是空串，随后 `git push origin ""` 抛出去；`git push` 本身失败（没配远端、认证过期）同理。
+
+后果不是「报错」而是**失联**：异常裸穿，没有 PR、没有状态评论，issue 里最后一条还停在那个 👀，人只能去 Actions 页面读一段调用栈——而 `run_once` 已经把报告准备好了，那里面写着到底出了什么事。
+
+改法：两条各自接住并回帖，附上报告。顺带统一了退出码口径——`crash` / `collect` / `model` 三种退 1（与 `aifix run` 一致），预算耗尽退 0（那是正常收场，活干到钱花完为止，结论仍可信）。
 
 ## 交给后续
 

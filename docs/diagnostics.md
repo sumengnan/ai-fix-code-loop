@@ -118,6 +118,33 @@ aifix 跨 run 统计 · /private/tmp/aifixdoc/.aifix/trajectory.db
   a1b2c3d4：1 条
 ```
 
+### 在 GitHub Actions 上，这套默认是失效的
+
+`ingest` 扫的是 `<repo>/.aifix/runs/*/facts.jsonl` —— 它假设**多次 run 的产物堆在同一个目录里**。而 runner 是临时的：job 一结束整台机器销毁，那个目录下永远只有本次这一个 run。跨 run 汇总天然失去意义，而且不报错，只是每次都告诉你「灌库 1 个 run」。
+
+M6 的处置是把结论推到一条**孤儿分支**上（`aifix.traces`，由 `aifix issue handle` 在 run 结束后自动做）：
+
+```
+分支 aifix/traces（orphan，不含任何源码）
+  └── runs/
+       ├── 230356cb/facts.jsonl + report.md
+       └── 41a9c2f0/facts.jsonl + report.md
+```
+
+clone 下来指给 `ingest` 就重新连成一片：
+
+```console
+$ git clone --branch aifix/traces <repo> /tmp/traces
+$ aifix ingest --repo /tmp/aifixdoc --runs-dir /tmp/traces/runs
+已灌库 37 个 run → /private/tmp/aifixdoc/.aifix/trajectory.db
+```
+
+**只推 `facts.jsonl` 与 `report.md`，不推 `events.jsonl`。** 这正是本页开头那条区分：事实是结论，事件是原始素材。前者要长期统计所以要永久留；后者只在出问题时才要，而且是三份里唯一体积会失控的（模型 IO 原文）—— 它走 workflow 里的 `upload-artifact`，保留 90 天。
+
+代价说清楚：**`aifix replay` 在 Actions 上的体验掉了一档。** 它要读 `events.jsonl`，而那份只在 artifact 里 —— 得先下载、解压、摆到 `.aifix/runs/<run_id>/` 才能用；90 天后 artifact 过期，那次 run 就再也回放不了了。
+
+归档失败**不影响交付**：补丁已经推上去、PR 已经开了，为一次归档失败把整个 job 弄红，等于让人以为修复没成功。它会在 issue 的状态评论里出声，仅此而已。
+
 ### 三条要记住的性质
 
 **幂等。** 同一批产物灌任意多次，表里的行数不变（先删后插：`run_id` 不是 `facts` 的主键，`INSERT OR REPLACE` 对它无能为力；少了那一句，重灌一次所有聚合数字就翻一倍，不报错、不崩溃，只是从此以后每个数都是错的）。所以 `ingest` 报的是**本次处理**的 run 数，不是新增数 —— 重灌同一批仍报同一个数字，这正是「重灌安全」看得见的样子。
