@@ -524,7 +524,10 @@ def test_ingest_is_idempotent_and_reports_how_many_runs(repo, capsys):
     """第二次灌进去翻倍不报错、不崩溃，只让此后所有聚合数字翻倍。"""
     _run_cmd(["ingest", "--repo", str(repo)])
     first_out = capsys.readouterr().out
-    assert "3" in first_out, "得告诉用户灌了几个 run"
+    # 整句比，不用「含 3」：这一行里还印着 db 全路径，路径里出现数字 3
+    # 的概率不低（tmp 目录名、pytest-of-<user> 下的序号），含子串的取法
+    # 在「灌了 999 个」的实现下照样是绿的 —— 实测过。
+    assert "已灌库 3 个 run" in first_out, first_out
 
     facts, runs = _count(repo, "facts"), _count(repo, "runs")
     assert facts > 10, "行数为 0 的话下面「不变」是恒真的"
@@ -534,7 +537,7 @@ def test_ingest_is_idempotent_and_reports_how_many_runs(repo, capsys):
     second_out = capsys.readouterr().out
     assert _count(repo, "facts") == facts, "重灌翻倍是这个功能最可能的 bug"
     assert _count(repo, "runs") == runs
-    assert "3" in second_out, "重灌报的是本次处理数，不是新增数"
+    assert "已灌库 3 个 run" in second_out, "重灌报的是本次处理数，不是新增数"
 
 
 def test_ingest_on_a_repo_without_runs_says_so(tmp_path, capsys):
@@ -564,7 +567,11 @@ def test_stats_renders_decoded_values_in_frequency_order(repo, capsys):
     assert "empty_diff" in out
     # 按次数降序：真产物里 empty_diff 8 次、huge_diff 1 次
     assert out.index("empty_diff") < out.index("huge_diff")
-    assert "pytest" in out, "每个 adapter 的 run 数要能一眼看到"
+    # 按行首取，不用「含 pytest」：抬头那行印的是 db 全路径，而临时目录
+    # 恰好叫 pytest-of-<user>，含子串的取法在「整节被删掉」的实现下照样
+    # 是绿的 —— 实测过。
+    assert any(ln.startswith("  pytest：run 3 次") for ln in out.splitlines()), \
+        f"每个 adapter 的 run 数要能一眼看到：{out}"
     assert "r_fix" in out, "可疑信号最多的 run 是 r_fix（另两个 run 一条都没有）"
     assert "r_guard" not in out.split("信号")[-1], \
         "撞守卫被回滚的 run 一条信号都没有，不该出现在信号榜上"
