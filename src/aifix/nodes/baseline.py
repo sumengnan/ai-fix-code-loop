@@ -34,6 +34,22 @@ def adapter_for(name: str) -> ProjectAdapter:
     return ADAPTERS[name]()
 
 
+def detect_adapter(repo: Path) -> ProjectAdapter | None:
+    """按注册表顺序探测这个仓库归谁管；没人认领返回 None。
+
+    **全项目唯一的探测入口**，preflight_node 与 `aifix mine` 都走这里。
+    分头写就是「第二份注册表」那处裂缝的形状：`_cmd_mine` 曾直接
+    `PytestAdapter()`，于是对着 Maven 仓库 source_suffixes() 只认 `.py` →
+    gold_files 恒空 → is_candidate 恒 False → 产出 0 个任务，不报一个错，
+    与「这个仓库最近没有红转绿的提交」完全无法区分 —— 而适配层里为 Maven
+    补的每一处缺口都在这一行之后，全都到不了。
+    """
+    for cls in ADAPTERS.values():
+        if cls.detect(Path(repo)):
+            return cls()
+    return None
+
+
 def _check_report(worktree: Path, paths: list[Path], required: bool) -> None:
     """required 时至少要有一份报告，否则抛 —— 「没跑成」不能冒充「跑完了、全绿」。
 

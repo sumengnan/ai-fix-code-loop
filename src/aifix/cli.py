@@ -372,9 +372,19 @@ def _cmd_run(args) -> None:
 
 def _cmd_mine(args) -> None:
     # 延迟导入：eval 子包依赖 cli 模块（run_once），提到模块顶部会形成循环导入
-    from .adapters.pytest_adapter import PytestAdapter
     from .eval.mine import mine_tasks
     from .eval.task import write_jsonl
+    from .nodes.baseline import detect_adapter
+
+    repo = Path(args.repo).resolve()
+    # 适配器要探测，不能写死。这里曾是 `PytestAdapter()`：Maven 仓库拿到的
+    # source_suffixes() 只认 `.py`，gold_files 恒空，产出 0 个任务且不报错 ——
+    # 与「这个仓库最近没有红转绿的提交」无法区分。走 preflight 用的同一份
+    # 探测，新增适配器时不会漏掉这一处。
+    adapter = detect_adapter(repo)
+    if adapter is None:
+        print(f"没有适配器认领这个项目：{repo}")
+        raise SystemExit(1)
 
     def progress(sha: str, n: int, error: str | None = None) -> None:
         if error is not None:
@@ -384,7 +394,7 @@ def _cmd_mine(args) -> None:
             print(f"  {sha[:8]}：{n} 个可用用例", flush=True)
 
     tasks = asyncio.run(mine_tasks(
-        str(Path(args.repo).resolve()), PytestAdapter(),
+        str(repo), adapter,
         limit=args.limit, max_tasks=args.max_tasks, on_progress=progress))
     write_jsonl(Path(args.out), tasks)
     print(f"产出 {len(tasks)} 个任务 → {args.out}")

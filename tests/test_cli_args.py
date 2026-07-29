@@ -640,3 +640,68 @@ def test_stats_marks_a_partially_unknown_fixed_count_as_incomplete(repo, capsys)
     assert "2 次取不到修复数" in line, line
     # 且不许再给一个看着完整的求和值
     assert "· 修复 1 个用例" not in line, line
+
+
+def test_mine_picks_the_adapter_by_detecting_the_repo(tmp_path, monkeypatch,
+                                                      capsys):
+    """`aifix mine` 曾写死 PytestAdapter()，Maven 仓库一个任务都挖不出。
+
+    这是「第二份注册表」那处裂缝的同一个形状：适配器的真正来源和登记新
+    适配器的地方不是同一处。链路是 PytestAdapter.source_suffixes() 只认
+    `.py` → gold_files 恒空 → is_candidate 恒 False → 0 个任务，且不报
+    一个错，与「这个仓库最近没有红转绿的提交」无法区分。
+
+    不跑 mvn：把 mine_tasks 换成间谍，只看递进去的那个适配器是谁。
+    """
+    import aifix.cli as cli
+
+    repo = tmp_path / "mvn"
+    (repo / "src/main/java/demo").mkdir(parents=True)
+    (repo / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+    # PytestAdapter.detect 极宽松：pyproject.toml 存在就认领。Java 工程的
+    # 工具链里带 Python 脚本是常事 —— 这里造出来，才是有区分度的输入
+    (repo / "pyproject.toml").write_text("[project]\nname='t'\n",
+                                         encoding="utf-8")
+
+    seen = {}
+
+    async def spy(repo_path, adapter, **kw):
+        seen["adapter"] = adapter
+        return []
+
+    monkeypatch.setattr("aifix.eval.mine.mine_tasks", spy)
+    args = build_parser().parse_args(
+        ["mine", str(repo), "--out", str(tmp_path / "t.jsonl")])
+    cli._cmd_mine(args)
+    capsys.readouterr()
+    assert seen["adapter"].name == "maven", seen["adapter"].name
+
+
+def test_mine_still_picks_pytest_for_a_python_repo(buggy_repo, tmp_path,
+                                                   monkeypatch, capsys):
+    """反向断言：一个「无脑返回 maven」的实现必须过不了这里。"""
+    import aifix.cli as cli
+
+    seen = {}
+
+    async def spy(repo_path, adapter, **kw):
+        seen["adapter"] = adapter
+        return []
+
+    monkeypatch.setattr("aifix.eval.mine.mine_tasks", spy)
+    args = build_parser().parse_args(
+        ["mine", str(buggy_repo), "--out", str(tmp_path / "t.jsonl")])
+    cli._cmd_mine(args)
+    capsys.readouterr()
+    assert seen["adapter"].name == "pytest", seen["adapter"].name
+
+
+def test_mine_refuses_a_repo_no_adapter_claims(tmp_path, capsys):
+    """认领不了要当场退出，不能拿一个猜的适配器去跑几十分钟再产出 0 个任务。"""
+    import aifix.cli as cli
+
+    args = build_parser().parse_args(
+        ["mine", str(tmp_path), "--out", str(tmp_path / "t.jsonl")])
+    with pytest.raises(SystemExit):
+        cli._cmd_mine(args)
+    assert "适配器" in capsys.readouterr().out
