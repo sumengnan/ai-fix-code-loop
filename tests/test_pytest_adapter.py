@@ -112,8 +112,17 @@ def test_locate_source_empty_when_no_repo_frames(buggy_repo):
 def test_commands_disable_bytecode_writing():
     """python -B：不生成 __pycache__。
 
-    否则 Worktree.commit() 的 git add -A 会把 .pyc 扫进交付分支 ——
-    真实运行中确实发生了，用户 review 时看到二进制垃圾。
+    理由**不是**「会被扫进交付分支」：Worktree.commit 只
+    `git add -- <ApplyPatchTool 记账过的路径>`，这个仓库里根本没有
+    `git add -A` 这条交付路径（tests/test_maven_e2e.py 里那条真跑 mvn 的
+    验收：交付分支的树上只有 pom.xml 和两个 .java，整个 target/ 都没进去）。
+    照那个理由 review 会得出「交付侧会过滤，-B 可以去掉」。
+
+    真实理由是未跟踪产物**跨状态存活**：同一个 worktree 会被
+    `git checkout --force` 在 C^ 和 C 之间来回切，而 checkout 不碰未跟踪
+    文件，上一跑留下的东西原样活到下一跑 —— 陈旧报告被下一跑当成自己的结果
+    就是这个机制。压根不写出来的产物，不需要任何人记得去清。
+    见 adapters/pytest_adapter._BASE 上方的说明。
     """
     a = PytestAdapter()
     assert "-B" in a.full_test_command()
