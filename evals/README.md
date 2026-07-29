@@ -15,14 +15,20 @@
 ## 复现
 
 ```bash
-cd /path/to/ai-harness-framework
-uv run --with-editable /path/to/ai-fix-code-loop aifix eval \
-    /path/to/ai-fix-code-loop/evals/tasks-ai-harness-framework.jsonl \
+cd /path/to/ai-fix-code-loop
+uv run aifix eval evals/tasks-ai-harness-framework.jsonl \
     --label deepseek-v4-flash --parallel 3 \
     --budget-per-task 0.60 --budget-total 6.00
 ```
 
-`--with-editable` 那一层是必须的：aifix 用 `sys.executable` 跑目标项目的测试，
-而 aifix 自己的 venv 装不了框架的测试依赖。这是一条真实的产品限制。
+在哪个目录、用谁的 venv 跑 `aifix eval` 都不影响目标项目的测试：每个任务的测试
+解释器按它自己的 `repo` 字段（**源仓库**）解析 —— 显式的 `AIFIX_TEST_PYTHON` >
+源仓库里的 `.venv/bin/python`（其次 `venv/`）> aifix 自己的解释器。所以这里的
+前提只有一条：**任务集里 `repo` 指向的那个仓库，自己有一个装齐了测试依赖的
+venv**（没有就显式配 `AIFIX_TEST_PYTHON`）。
+
+（这一段以前写的是「必须套一层 `uv run --with-editable`，因为 aifix 用
+`sys.executable` 跑目标项目的测试」。那是解释器解析做进来之前的复现方法，现在
+不需要了，套着也没有坏处。）
 
 任务集里的 `repo` 字段是绝对路径，换机器要改。

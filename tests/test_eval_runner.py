@@ -1,12 +1,13 @@
 import asyncio
 import json
+import sys
 
 from harness.llm.base import StreamChunk, ToolCallDelta
 from harness.usage import Usage
 
 from aifix.config import AifixConfig
-from aifix.eval.runner import (first_attempt_suspect, locate_hit, run_suite,
-                               run_task)
+from aifix.eval.runner import (_safe_id, first_attempt_suspect, locate_hit,
+                               run_suite, run_task)
 from aifix.eval.task import Task, TaskResult
 
 _PATCH = """--- a/calc.py
@@ -143,6 +144,71 @@ async def test_baseline_not_reproduced_keeps_task_origin(
                        fixer_client=_fixer())
     assert r.error is not None
     assert r.origin == "mutated"
+
+
+# --------------------------------------------------------------------------
+# 跑目标项目测试的解释器：评测里的「源仓库」是 task.repo，不是那份克隆
+# --------------------------------------------------------------------------
+
+def _test_python_facts(workdir, task) -> list[str]:
+    """把这次 run 实际用的测试解释器从 facts.jsonl 里取出来。
+
+    baseline 每跑一次就记一条 `test_python` 事实，所以这是「实际用了哪个
+    解释器」的第一手记录，而不是对实现的复述。
+    """
+    from aifix.eval.runner import _read_facts, _safe_id
+
+    run_id = _safe_id(task.task_id)
+    return [f["value"] for f in _read_facts(workdir / run_id, run_id)
+            if f.get("key") == "test_python"]
+
+
+async def test_run_task_runs_tests_with_the_source_repo_interpreter(
+        history_repo, tmp_path, monkeypatch, real_venv):
+    """评测必须用**源仓库**（task.repo）的解释器，克隆里没有 `.venv`。
+
+    run_task 先 `git clone --local` 到 workdir，再对那份克隆调 run_once，于是
+    核心循环拿到的 `state["repo"]` 是克隆而不是用户的仓库 —— 克隆里没有
+    `.venv`（git 不跟踪它），探测落空、退回 aifix 自己的解释器，跑不动目标
+    项目的测试。真实评测里的表现是 39 个任务全部记成「评测故障」。
+
+    sys.executable 被换成一个不存在的路径，回退那条路因此走不通：只有真的
+    用上了源仓库里那个 venv，测试才跑得起来、任务才可能判 better。
+    """
+    exe = real_venv(history_repo["path"] / ".venv")
+    monkeypatch.setattr(sys, "executable", "/nonexistent/python")
+
+    t = _task(history_repo)
+    r = await run_task(t, AifixConfig(), "假模型", tmp_path / "w",
+                       detector_client=_Scripted([_text(_DIAG)]),
+                       fixer_client=_fixer())
+
+    assert r.error is None, r.error
+    assert r.verdict == "better"
+    assert _test_python_facts(tmp_path / "w", t) == [str(exe)]
+    # 前提自检：克隆里确实没有 .venv，所以上面那条只可能来自源仓库
+    assert not (tmp_path / "w" / _safe_id(t.task_id) / ".venv").exists()
+
+
+async def test_run_task_lets_the_explicit_config_beat_the_probe(
+        history_repo, tmp_path, real_venv):
+    """显式配的 AIFIX_TEST_PYTHON 仍然压过对源仓库的探测。
+
+    两个都是真 venv，两条路都跑得起来 —— 这条测的是**选了哪个**，不是
+    「跑没跑成」。一个把探测结果无条件盖上去的实现在这里当场红。
+    """
+    found = real_venv(history_repo["path"] / ".venv")
+    configured = real_venv(tmp_path / "sidecar")
+
+    t = _task(history_repo)
+    r = await run_task(t, AifixConfig(test_python=str(configured)), "假模型",
+                       tmp_path / "w",
+                       detector_client=_Scripted([_text(_DIAG)]),
+                       fixer_client=_fixer())
+
+    assert r.error is None, r.error
+    assert _test_python_facts(tmp_path / "w", t) == [str(configured)]
+    assert str(found) not in _test_python_facts(tmp_path / "w", t)
 
 
 def test_suspect_is_taken_from_the_first_attempt():

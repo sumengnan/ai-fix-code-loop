@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ..adapters.pytest_adapter import resolve_test_python
 from ..cli import run_once
 from ..config import AifixConfig
 from ..nodes.baseline import COLLECTION_ABORT_KIND
@@ -134,7 +135,22 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
                        origin=task.origin)
 
     prepare_task_repo(task, dest)
-    state = await run_once(dest, config, run_id=run_id,
+    # 解释器必须按**源仓库**（task.repo）解析，然后随配置带进 run_once。
+    # 核心循环是照着 `state["repo"]` 探的，而在评测里那是 dest —— 一份
+    # `git clone --local` 出来的克隆，里面没有 `.venv`（git 不跟踪它）。不接
+    # 这一行，探测在评测这条路上恒空、退回 aifix 自己的解释器，跑不动目标
+    # 项目的测试：整批 baseline 全是收集错误，每个任务都被那道闸记成「评测
+    # 故障」，一个模型调用都发不出去。
+    #
+    # 无条件写回，但写回的是 resolve 的结果，而它本身就是「显式配置 > 探测」：
+    # 配了 AIFIX_TEST_PYTHON 时写回去的就是那个配置（只多一次 `~` 展开），两条
+    # 来源都空时写回 None，适配器照旧退回 sys.executable（目标项目没有 venv、
+    # 或依赖本来就装在当前解释器里时，那是对的）。不在这里另写一句「配置为空
+    # 才用探测值」：那等于把优先级抄成两份，两处迟早漂移。
+    task_config = config.model_copy(update={
+        "test_python": resolve_test_python(Path(task.repo),
+                                           config.test_python)})
+    state = await run_once(dest, task_config, run_id=run_id,
                            only_test=task.target_test,
                            detector_client=detector_client,
                            fixer_client=fixer_client)

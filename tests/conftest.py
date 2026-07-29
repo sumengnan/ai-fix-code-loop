@@ -2,9 +2,37 @@
 from __future__ import annotations
 
 import subprocess
+import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture
+def real_venv():
+    """造一个**真的** venv（自己的 prefix、自己的 bin/python）的工厂。
+
+    用一条 `.pth` 把当前解释器的 site-packages 接过去，于是它看得见 pytest，
+    整个过程不联网。
+
+    真 venv 而不是假脚本：假脚本能骗过每一条只看命令字符串的断言，却证明不了
+    「换了解释器之后测试真的还跑得起来」——而这正是这一整条解释器链路存在的
+    唯一理由。放在 conftest 是因为解释器解析有两条独立的入口（核心循环、
+    评测的 run_task），两边都要用它来做端到端断言。
+    """
+    def make(path: Path) -> Path:
+        subprocess.run(
+            [sys.executable, "-m", "venv", "--without-pip", str(path)],
+            check=True, capture_output=True)
+        sp = next(iter(sorted((path / "lib").glob("python*")))) / "site-packages"
+        sp.mkdir(parents=True, exist_ok=True)
+        (sp / "_aifix_link.pth").write_text(
+            sysconfig.get_paths()["purelib"] + "\n", encoding="utf-8")
+        exe = path / "bin" / "python"
+        assert exe.is_file() and str(exe) != sys.executable
+        return exe
+    return make
 
 _BUGGY = '''def add(a, b):
     return a - b        # bug: 应为 a + b

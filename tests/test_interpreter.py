@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import os
 import stat
-import subprocess
 import sys
 from pathlib import Path
 
@@ -319,33 +318,19 @@ def test_preflight_accepts_a_real_interpreter(buggy_repo):
     assert out["adapter_name"] == "pytest"
 
 
-def _real_venv(path: Path) -> Path:
-    """造一个**真的** venv（自己的 prefix、自己的 bin/python），并让它看得见
-    pytest —— 用一条 `.pth` 把当前解释器的 site-packages 接过去，不联网。
-
-    真 venv 而不是假脚本：假脚本能骗过每一条只看命令字符串的断言，却证明
-    不了「换了解释器之后测试真的还跑得起来」。
-    """
-    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(path)],
-                   check=True, capture_output=True)
-    import sysconfig
-    sp = next(iter(sorted((path / "lib").glob("python*"))))/"site-packages"
-    sp.mkdir(parents=True, exist_ok=True)
-    (sp / "_aifix_link.pth").write_text(
-        sysconfig.get_paths()["purelib"] + "\n", encoding="utf-8")
-    exe = path / "bin" / "python"
-    assert exe.is_file() and str(exe) != sys.executable
-    return exe
+# 造真 venv 的 `real_venv` 工厂在 conftest.py：评测那条路（eval/runner）也要用
+# 它做同样的端到端断言，两边各留一份会各自漂移。
 
 
-async def test_baseline_really_runs_with_the_configured_interpreter(buggy_repo):
+async def test_baseline_really_runs_with_the_configured_interpreter(buggy_repo,
+                                                                    real_venv):
     """端到端（显式配置）：baseline 真的用配的那个解释器跑出失败集合。"""
     from aifix.delivery import Worktree
     from aifix.graph import new_state
     from aifix.nodes.baseline import baseline_node
     from aifix.nodes.preflight import preflight_node
 
-    exe = _real_venv(buggy_repo.parent / "sidecar-venv")
+    exe = real_venv(buggy_repo.parent / "sidecar-venv")
     st = new_state(buggy_repo, AifixConfig(test_python=str(exe)), run_id="ri1")
     st.update(preflight_node(st))
     assert st["abort"] is None
@@ -356,7 +341,8 @@ async def test_baseline_really_runs_with_the_configured_interpreter(buggy_repo):
 
 
 async def test_baseline_really_runs_with_the_discovered_venv(buggy_repo,
-                                                             monkeypatch):
+                                                             monkeypatch,
+                                                             real_venv):
     """端到端（自动探测）：仓库里放一个 `.venv`，什么都不配也要用上它。
 
     这条把整条链路一次性钉死，而且钉的是最容易写错的那一环：`.venv` 在
@@ -370,7 +356,7 @@ async def test_baseline_really_runs_with_the_discovered_venv(buggy_repo,
     from aifix.nodes.baseline import baseline_node
     from aifix.nodes.preflight import preflight_node
 
-    exe = _real_venv(buggy_repo / ".venv")
+    exe = real_venv(buggy_repo / ".venv")
     # 断掉回退路径：只有真的用上了探测到的解释器，测试才跑得起来
     monkeypatch.setattr(sys, "executable", "/nonexistent/python")
 
