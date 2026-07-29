@@ -179,8 +179,13 @@ def module_state(source: str) -> set[str]:
 
 
 def analyze(files: dict[str, tuple[str | None, str | None]],
-            suspect: str | None) -> PatchSignals:
+            suspect: str | None,
+            suspect_anchored: bool = True) -> PatchSignals:
     """files: 路径 → (旧内容, 新内容)。None 表示该侧不存在（新增 / 删除）。
+
+    suspect_anchored：Detector 手上是否有过**源码**栈帧。为 False 时
+    `files_outside_suspect` 恒空 —— 理由与 suspect 为 None 时同一条，见下面
+    那段注释：没有参照系就不比。
 
     已知偏差：`files_outside_suspect` 依赖 suspect 存在，而 suspect 来自
     Detector 的 JSON 诊断 —— detect_node 在 JSON 解析失败时把 diagnosis 置
@@ -208,6 +213,13 @@ def analyze(files: dict[str, tuple[str | None, str | None]],
     # suspect 为 None 时没有「之外」可言 —— 没有诊断就没有参照系，把整个
     # 改动都标出来等于这一列恒亮，人会立刻学会无视它。
     #
+    # suspect_anchored 为 False 是同一件事的另一种形状：Detector 有诊断，但
+    # 它是在**没有任何源码栈帧**的情况下按包名猜出来的路径。纯断言失败的
+    # traceback 里只有测试文件那一帧（被调函数正常返回了，栈上没有它），这是
+    # 最常见的一类失败。实测：模型猜 `src/cart.py`，真文件是
+    # `src/shopcart/cart.py`，两个补丁都修对了，两条都被标成「落在嫌疑文件
+    # 之外」。一条在正常修复上必然亮起的信号，和恒亮是一个结果。
+    #
     # `old != new` 不能省：files 的键来自 ApplyPatchTool 累加的 touched，它
     # 只在 huge_diff 时整体清空。模型对 utils.py 打了补丁又打了反向补丁
     # （git diff 归零，撞上 empty_diff 守卫），重试里改对了 calc.py —— 此时
@@ -215,7 +227,7 @@ def analyze(files: dict[str, tuple[str | None, str | None]],
     # 在嫌疑文件之外」，人按图索骥去看一个空 diff，这一列就废了。
     outside = ([p for p, (old, new) in files.items()
                 if old != new and not same_file(p, suspect)]
-               if suspect else [])
+               if suspect and suspect_anchored else [])
 
     # 三个列表都排序：报告与 facts 会消费它们，集合的迭代顺序不可复现，
     # 会让两次相同的运行产出不同的 diff。

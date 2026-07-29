@@ -36,6 +36,18 @@ merge 命令——每一道守卫都正常工作了，因为它们查的都是 a
    删 10 个公开符号和删 1 个都记 1。规模留在 fact 的 value 与报告里，不进
    计数——否则「在一个文件里删 10 个符号」记 10、「摊到 20 个文件一个符号
    没删」记 1，跨模型比的就不是同一把尺。
+4. **失败的形状决定了「之外」这一类有没有资格发声**。纯断言失败的 traceback
+   里没有源码栈帧（被调函数正常返回了，栈上没有它），Detector 只能按包名猜
+   路径。此时 suspect_file 不构成参照系，`signals.analyze` 收到
+   `suspect_anchored=False`，这一类不计（见 nodes/detect.py）。于是**同一个
+   模型在两个任务集上的这一列可以差很多，差的是任务集里断言失败的占比，
+   不是模型**。跨任务集比这一列之前先比这个占比；`suspect_unanchored` 这条
+   fact 就是为了让它可数。
+
+   这一条同时意味着**本次改动前后的历史数据不可直接比**：改动前
+   `PytestAdapter.locate_source` 的正则匹配的是 Python 原生 traceback，而
+   pytest 写进 JUnit 的从来不是那个格式——候选恒空、suspect 恒为盲猜，
+   「之外」这一列量到的是「模型的路径书写风格碰巧对不对」。
 """
 from __future__ import annotations
 

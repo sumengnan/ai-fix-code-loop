@@ -6,8 +6,24 @@ from pathlib import Path, PurePosixPath
 
 from .base import Failure, SourceCandidate
 
-# 形如：  File "/abs/path/calc.py", line 2, in add
-_FRAME = re.compile(r'File "(?P<path>[^"]+)", line (?P<line>\d+), in (?P<fn>\S+)')
+# Python 原生 traceback：  File "/abs/path/calc.py", line 2, in add
+# pytest 的 longrepr **不产出**这个形状，但 --tb=native、以及被 pytest 原样
+# 转载的嵌套 / 子进程 traceback 会。留着它是为了那些场合。
+_NATIVE_FRAME = re.compile(
+    r'File "(?P<path>[^"]+)", line (?P<line>\d+), in (?P<fn>\S+)')
+
+# pytest 自己的帧行，也是 JUnit XML 里**实际**出现的唯一形状。三种收尾：
+#   src/mod.py:2: in outer          中间帧，带函数名
+#   src/mod.py:5: ZeroDivisionError 最深帧，跟的是异常类型
+#   tests/test_mod.py:6:            入口帧，后面什么都没有
+# 路径相对 rootdir。行首必须顶格 —— 缩进的行是被回显的源码，里面出现
+# `foo.py:3:` 这种字样时不该当成栈帧。尾部一律先收进 rest 再分辨，不在正则
+# 里穷举异常名的形状：那种正则每见到一个没想到的收尾就静默少解一帧。
+_PYTEST_FRAME = re.compile(
+    r"^(?P<path>\S[^:\n]*?):(?P<line>\d+):(?P<rest>[^\n]*)$", re.MULTILINE)
+
+# rest 里带函数名时的形状：` in outer`
+_IN_FUNC = re.compile(r"^\s+in\s+(?P<fn>\S+)\s*$")
 
 _MARKERS = ("pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml", "conftest.py")
 
@@ -131,24 +147,60 @@ class PytestAdapter:
         """
         return {i for i in test_ids if i.startswith(file_id + "::")}
 
+    def _resolve(self, raw: str, repo_real: str) -> str | None:
+        """把帧里的路径还原成 repo 内的相对路径；不在 repo 内则 None。
+
+        pytest 写的是**相对 rootdir** 的路径，原生 traceback 写的是绝对路径，
+        两种都要认，所以相对的先按 repo 拼一次。
+
+        存在性检查是 pytest 那个形状的收口手段：它没有引号做界，`a.py:3:`
+        这种字样可能出现在被回显的源码或断言文本里。多给 Detector 一个不存在
+        的候选，比不给候选更糟 —— 它会照着那个路径去编造根因。
+        """
+        try:
+            p = Path(raw)
+            real = str((p if p.is_absolute() else Path(repo_real) / p).resolve())
+        except OSError:
+            return None
+        if not real.startswith(repo_real + "/"):
+            return None
+        if "site-packages" in real or "/dist-packages/" in real:
+            return None
+        if not Path(real).is_file():
+            return None
+        return str(Path(real).relative_to(repo_real))
+
     def locate_source(self, failure: Failure, repo: Path) -> list[SourceCandidate]:
-        """从 traceback 抽出 repo 内部帧，最深的排最前。"""
+        """从 traceback 抽出 repo 内部帧，最深的排最前。
+
+        两种帧形状都扫，按它们在文本里出现的先后合并 —— pytest 的
+        `src/mod.py:2: in outer` 是 JUnit 报告里实际出现的那种，原生的
+        `File "...", line N, in fn` 只在 --tb=native 与转载的 traceback 里出现。
+
+        只认前者会漏掉后者，只认后者……就是这个函数改造前的样子：真实数据上
+        一帧都匹配不到，Detector 每次都拿到「未能从栈帧定位到 repo 内的源码」
+        然后盲猜路径。当时的单元测试喂的是手写的原生 traceback，所以全绿。
+
+        纯断言失败拿不到源码帧，这不是解析能补的：被调函数正常返回了，栈上
+        没有它。那种情况下返回的只有测试文件那一帧，调用方要据此知道
+        Detector 是在无锚点地猜（见 nodes/detect.py 的 suspect_anchored）。
+        """
         repo_real = str(Path(repo).resolve())
-        out: list[SourceCandidate] = []
-        for m in _FRAME.finditer(failure.trace):
-            raw = m.group("path")
-            try:
-                real = str(Path(raw).resolve())
-            except OSError:
-                continue
-            if not (real == repo_real or real.startswith(repo_real + "/")):
-                continue
-            if "site-packages" in real or "/dist-packages/" in real:
-                continue
-            out.append(SourceCandidate(
-                path=str(Path(real).relative_to(repo_real)),
-                line=int(m.group("line")),
-                frame=m.group("fn"),
-            ))
-        out.reverse()          # traceback 由浅入深，最深的最可疑
-        return out
+        hits: list[tuple[int, SourceCandidate]] = []
+        for pattern in (_PYTEST_FRAME, _NATIVE_FRAME):
+            for m in pattern.finditer(failure.trace):
+                path = self._resolve(m.group("path"), repo_real)
+                if path is None:
+                    continue
+                groups = m.groupdict()
+                if "fn" in groups:                      # 原生 traceback
+                    fn = groups["fn"]
+                else:                                   # pytest 的帧行
+                    tail = _IN_FUNC.match(groups["rest"] or "")
+                    # 最深帧的尾部是异常类型、入口帧的尾部是空 —— 都没有函数名
+                    fn = tail.group("fn") if tail else ""
+                hits.append((m.start(), SourceCandidate(
+                    path=path, line=int(m.group("line")), frame=fn)))
+        # 先按出现顺序（由浅入深）排稳，再整体反转 —— 最深的最可疑
+        hits.sort(key=lambda h: h[0])
+        return [c for _, c in reversed(hits)]

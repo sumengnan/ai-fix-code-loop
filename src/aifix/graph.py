@@ -26,6 +26,10 @@ class AifixState(TypedDict, total=False):
     attempt: int
 
     diagnosis: dict[str, Any] | None
+    # 本轮诊断是否有**源码**栈帧可依。纯断言失败的 traceback 里只有测试文件
+    # 那一帧，此时 suspect_file 是模型按包名猜的，`files_outside_suspect`
+    # 据此决定要不要发声（见 signals.analyze）。只有 detect_node 会写它。
+    suspect_anchored: bool
     verdict: str | None
 
     touched: list[str]

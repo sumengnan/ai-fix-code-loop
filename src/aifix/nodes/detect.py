@@ -12,6 +12,7 @@ from harness.tools.base import ToolRegistry
 from ..agents.detector import SYSTEM_PROMPT, build_prompt, parse_diagnosis
 from ..agents.runner import consume
 from ..graph import AifixState, trace_of
+from ..signals import under_dirs
 from .baseline import adapter_for
 
 
@@ -34,9 +35,19 @@ async def detect_node(state: AifixState, client: Any = None) -> dict[str, Any]:
     with json_output():
         outcome = await consume(loop.run(build_prompt(failure, candidates)))
 
+    # 候选里有没有**非测试**文件，决定了 suspect_file 是推断还是猜测。
+    # 纯断言失败的 traceback 里只有测试文件那一帧，此时模型只能按包名猜路径，
+    # 猜错是常态 —— 下游的 files_outside_suspect 据此决定要不要发声。
+    anchored = any(not under_dirs(c.path, adapter.test_dirs())
+                   for c in candidates)
+
     diagnosis = parse_diagnosis(outcome.text) if outcome.ok else None
     trace = trace_of(state)
     trace.record_events(outcome.events)
+    if not anchored:
+        # 落成事实而不是只在信号里体现：复盘时要能一眼看出这次诊断是无锚
+        # 猜测，跨 run 统计也才分得清「模型定位差」与「压根没东西可定位」。
+        trace.fact("suspect_unanchored", True)
     if diagnosis is not None:
         # 模型点名的文件是否落在 traceback 指出的候选里。
         # 这不是规格 §9 的 locate_hit —— 那个对 ground truth 判定，由评测
@@ -50,6 +61,7 @@ async def detect_node(state: AifixState, client: Any = None) -> dict[str, Any]:
         trace.fact("diagnosis_parse_failed", True)
     return {
         "diagnosis": diagnosis.model_dump() if diagnosis else None,
+        "suspect_anchored": anchored,
         "spent_tokens": state["spent_tokens"] + outcome.tokens,
         "spent_usd": state["spent_usd"] + outcome.cost_usd,
     }

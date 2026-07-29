@@ -156,6 +156,100 @@ def test_locate_source_empty_when_no_repo_frames(buggy_repo):
     assert PytestAdapter().locate_source(fail, buggy_repo) == []
 
 
+# 下面三段是 pytest 9.1.1 真正写进 JUnit XML 的 <failure> 文本，逐字复制自
+# 一次真跑（2026-07-29，见 docs/adapters.md）。上面那两条用的是手写的
+# Python 原生 traceback（`File "...", line N, in fn`）—— 那个格式 pytest 的
+# longrepr **从不产出**，于是 _FRAME 在真实数据上一帧都匹配不到，而测试全绿。
+# 假输入喂出来的绿灯是这个 bug 能活到现在的唯一原因，所以这几条必须用真数据。
+
+_REAL_PROPAGATED = '''def test_boom():
+>       assert outer(0) == 1
+               ^^^^^^^^
+
+tests/test_mod.py:6:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src/mod.py:2: in outer
+    return inner(x)
+           ^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+x = 0
+
+    def inner(x):
+>       return 10 / x
+               ^^^^^^
+E       ZeroDivisionError: division by zero
+
+src/mod.py:5: ZeroDivisionError'''
+
+_REAL_ASSERTION = '''def test_add():
+>       assert add(2, 3) == 5
+E       AssertionError: assert -1 == 5
+E        +  where -1 = add(2, 3)
+
+tests/test_calc.py:5: AssertionError'''
+
+
+def _frames(repo, trace):
+    fail = Failure(test_id="t", classname="c", name="n", message="m",
+                   trace=trace)
+    return PytestAdapter().locate_source(fail, repo)
+
+
+def test_locate_source_parses_the_format_pytest_actually_writes(tmp_path):
+    """异常穿过源码时，那几帧必须被认出来——它们是 Detector 唯一的锚点。
+
+    pytest 的格式是 `src/mod.py:2: in outer`（相对 rootdir，冒号分隔），
+    不是 Python 原生的 `File "...", line N, in fn`。认不出的后果不是报错，
+    是 Detector 拿到一句「未能从栈帧定位到 repo 内的源码」然后盲猜路径。
+    """
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src/mod.py").write_text("x\n", encoding="utf-8")
+    (tmp_path / "tests/test_mod.py").write_text("x\n", encoding="utf-8")
+
+    cands = _frames(tmp_path, _REAL_PROPAGATED)
+    assert cands, "真实 pytest traceback 一帧都没解出来"
+    # 最深的最可疑：ZeroDivisionError 抛出处
+    assert (cands[0].path, cands[0].line) == ("src/mod.py", 5)
+    assert (cands[1].path, cands[1].line, cands[1].frame) == \
+        ("src/mod.py", 2, "outer")
+    # 测试文件自己的帧也在，排最后（最浅）
+    assert (cands[-1].path, cands[-1].line) == ("tests/test_mod.py", 6)
+
+
+def test_locate_source_on_a_plain_assertion_yields_the_test_frame(buggy_repo):
+    """纯断言失败的 traceback 里**没有**源码帧，只有断言所在的测试文件。
+
+    这不是解析能补回来的信息：被调函数正常返回了，栈上根本没有它。
+    能拿到的只有测试文件那一帧，那也得拿到——它至少给出准确的行号。
+    """
+    cands = _frames(buggy_repo, _REAL_ASSERTION)
+    assert [(c.path, c.line) for c in cands] == [("tests/test_calc.py", 5)]
+
+
+def test_locate_source_still_parses_native_tracebacks(buggy_repo):
+    """`File "...", line N, in fn` 仍要认：--tb=native 与嵌套异常会产出它。"""
+    trace = (f'  File "{buggy_repo}/calc.py", line 2, in add\n'
+             '    return a - b\n')
+    assert [(c.path, c.line, c.frame) for c in _frames(buggy_repo, trace)] == \
+        [("calc.py", 2, "add")]
+
+
+def test_locate_source_ignores_paths_that_are_not_in_the_repo(tmp_path):
+    """行号形状的文本到处都是（日志、字符串字面量、第三方帧）。
+
+    pytest 那种格式没有引号做界，只能靠「这个路径在 repo 里真的存在」收口；
+    否则 Detector 的候选列表里会混进根本不存在的文件，比没有候选更误导。
+    """
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/mod.py").write_text("x\n", encoding="utf-8")
+    trace = ('src/mod.py:2: in outer\n'
+             'nowhere/gone.py:9: in missing\n'
+             '/usr/lib/python3.13/site-packages/_pytest/x.py:1: in run\n')
+    assert [c.path for c in _frames(tmp_path, trace)] == ["src/mod.py"]
+
+
 def test_commands_disable_bytecode_writing():
     """python -B：不生成 __pycache__。
 

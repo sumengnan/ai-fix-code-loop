@@ -233,3 +233,37 @@ def test_under_dirs_is_case_insensitive():
     assert under_dirs("SRC/Test/java/X.java", ["src/test"])
     # 区分度：不敏感只放宽大小写，不放宽分段边界
     assert not under_dirs("TESTDATA/x.py", ["tests"])
+
+
+def test_an_unanchored_suspect_produces_no_outside_signal():
+    """Detector 手上一个源码栈帧都没有时，它给的 suspect 是猜的。
+
+    纯断言失败（最常见的那种）的 traceback 里只有测试文件那一帧，源码帧
+    根本不存在——不是解析不出来，是栈上没有。此时 Detector 只能按包名猜一
+    个路径，猜错是常态：实测里它猜 `src/cart.py`，真文件是
+    `src/shopcart/cart.py`，于是每一个**修对了**的补丁都被标成「改动落在诊断
+    的嫌疑文件之外」。
+
+    一条在正常修复上必然亮起的信号等于没有信号。这与本模块已有的
+    「suspect 为 None 时没有『之外』可言」是同一条原则：没有参照系就不比。
+    """
+    files = {"src/shopcart/cart.py": ("x = 1\n", "x = 2\n")}
+    assert analyze(files, suspect="src/cart.py").files_outside_suspect == \
+        ["src/shopcart/cart.py"]
+    assert analyze(files, suspect="src/cart.py",
+                   suspect_anchored=False).files_outside_suspect == []
+
+
+def test_anchoring_does_not_touch_the_other_two_signals():
+    """锚定与否只关掉「之外」这一列，删符号 / 新增模块级状态照报。
+
+    那两条不依赖 Detector 的任何输出，拿 suspect 的可信度去关它们，
+    等于让一个坏掉的诊断顺手关掉两条与它无关的警报。
+    """
+    old = "def keep(): pass\ndef gone(): pass\n"
+    new = "def keep(): pass\nCACHE = {}\n"
+    s = analyze({"m.py": (old, new)}, suspect="其它.py",
+                suspect_anchored=False)
+    assert s.removed_public_symbols == ["gone"]
+    assert s.new_module_state == ["CACHE"]
+    assert s.files_outside_suspect == []
