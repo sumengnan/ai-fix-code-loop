@@ -42,10 +42,12 @@
 **命令**
 
 ```
-mvn -B -q -o test -Dmaven.test.failure.ignore=true
+mvn -B -q -o clean test -Dmaven.test.failure.ignore=true
 ```
 
 `-Dmaven.test.failure.ignore=true` 必须加：否则测试一红 `mvn` 就以非 0 退出，而**报告已经写出来了**——不加的话调用方容易把退出码当成「没跑成」。
+
+`clean` 必须加，理由是**正确性不是整洁**：`mvn test` 不清空 `target/surefire-reports/`，而 `report_paths` 只看文件系统当前状态。跑一次全量留下 A、B、C，再跑只测 A 的复跑，目录里仍躺着上一轮的 B、C，`parse_junit` 会把上一轮的失败算成这一轮的——flaky 确认据此判定，不报错，只是判错。`run_full_suite` / `run_scoped` 的 `finally` 里确实会删报告，但只删 `report_paths` 当时返回的那些，任何一次异常退出都会留下残骸；把这件事挂在别人的 `finally` 上不成立。代价是每次重新编译（本机约 3 秒）。
 
 **报告位置：是 glob，不是单个文件**
 
@@ -77,10 +79,12 @@ return parse_junit([worktree / report], adapter.make_test_id)
 **修法**：把接口改成
 
 ```python
-def report_paths(self, worktree: Path) -> list[Path]: ...
+def report_paths(self, worktree: Path, scoped: bool = False) -> list[Path]: ...
 ```
 
-默认实现就是对 `report_glob()` 做一次 glob。`parse_junit` 本来就接受 `Iterable[Path]`，不用改。
+`report_glob()` **整个删掉**，不保留任何「默认实现对它做一次 glob」的过渡形态：留着它等于让协议同时有两个回答报告位置的成员，而 Maven 只能回答其中一个。`parse_junit` 本来就接受 `Iterable[Path]`，不用改。
+
+`scoped` 参数是决定性的，不是可选的排版细节：`run_scoped` 用的报告名必须与全量那份**不同**（pytest 侧是 `.aifix-recheck.xml`），否则 flaky 复跑会覆盖掉还要继续用的全量报告。Maven 侧两者由 surefire 写在同一个目录，忽略这个参数即可（命令里的 `clean` 保证目录里只有本次跑出来的）。
 
 `run_full_suite` / `run_scoped` 里「跑完删报告」那一步同样要跟着改成删多个。
 
@@ -96,12 +100,17 @@ def report_paths(self, worktree: Path) -> list[Path]: ...
 |---|---|
 | `name` | `"maven"` |
 | `detect(repo)` | `(repo / "pom.xml").is_file()` |
-| `full_test_command(report)` | `["mvn", "-B", "-q", "test", "-Dmaven.test.failure.ignore=true"]` |
-| `scoped_test_command(ids, report)` | 追加 `-Dtest=<用逗号连接的 id>` 与 `-DfailIfNoSpecifiedTests=false` |
-| `report_paths(worktree)` | `sorted(worktree.glob("target/surefire-reports/TEST-*.xml"))` |
+| `full_test_command()` | `["mvn", "-B", "-q", "-o", "clean", "test", "-Dmaven.test.failure.ignore=true"]` |
+| `scoped_test_command(ids)` | 追加 `-Dtest=<用逗号连接的 id>` 与 `-DfailIfNoSpecifiedTests=false` |
+| `report_paths(worktree, scoped=False)` | `sorted(worktree.glob("target/surefire-reports/TEST-*.xml"))`，忽略 `scoped` |
 | `test_dirs()` | `["src/test"]` |
+| `source_suffixes()` | `(".java",)` |
 | `make_test_id(classname, name, file)` | `f"{classname}#{name}"`（surefire 的 `-Dtest=` 语法） |
 | `locate_source(failure, repo)` | 见下 |
+
+两个成员的签名与上面 §4 保持一致：命令**不接收报告路径**（表头里也不许再写 `full_test_command(report)`），报告位置由 `report_paths()` 单独回答。
+
+**`source_suffixes()` 是本里程碑新增的协议成员**。挖任务时「哪些后缀算源文件」的判据必须由适配器给，不能写死在挖掘代码里：`eval/mine.split_paths` 曾经只认 `.py`，于是 Java 仓库的源码全部落空 → `gold_files` 恒空 → `is_candidate` 恒 `False` → `aifix mine` 对任何 Maven 工程产出 0 个任务，且不报错，与「这个仓库最近没有红转绿的提交」无法区分。Maven 侧只收 `.java`：`pom.xml` 的改动确实能让测试转红转绿，但它不是 `locate_source` 能指向的东西，塞进 `gold_files` 等于给 Detector 记一个它按设计就拿不到的分。
 
 **`report_path` 参数怎么办**：`full_test_command(report_path)` 现在把报告路径传给适配器。Maven 不接受这个参数——报告位置由 surefire 决定。**接口要跟着变**：命令不再接收报告路径，报告位置由 `report_paths()` 单独回答。pytest 侧把 `--junitxml=` 的路径变成适配器自己的常量。
 

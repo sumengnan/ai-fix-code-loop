@@ -102,7 +102,9 @@ tests.test_foo          →  路径 tests/test_foo.py，类 []
 
 **修法**：**测试目录下的**非 `.py` 文件归入 `test_files`，跟着测试一起嫁接。判据是**按路径分段的前缀匹配**，由 `signals.under_dirs(path, dirs)` 这一份实现统一提供（它在分段之前会把 `\` 归一成 `/`、去掉前导 `./`，并**大小写不敏感**地比较；判定同时服务 `tools/patch.py` 的「不许改测试文件」守卫——两处问的是同一个问题，复制成两份必然各自漂移）。不是 `pp.parts[0] in test_dirs`：M5 的 MavenAdapter 走 Maven 标准布局 `src/test/java/...`，`test_dirs` 会是 `["src/test"]`，只看第一段拿到的是 `src`，判不出来，整棵 Java 测试树会被当成源文件塞进 `gold_files`。按分段比而不是裸 `startswith`，是因为 `testdata/x.py` 不是 `test` 目录下的文件。对 pytest 的 `["tests", "test"]` 行为完全不变。
 
-非测试目录下的非 `.py` 文件继续忽略——**不进 `gold_files`**。`gold_files` 是 `locate_hit` 的判定依据，衡量的是 Detector 定位**源文件**的能力；把数据文件塞进去会稀释这个指标。
+非测试目录下、**后缀不在 `adapter.source_suffixes()` 里**的文件继续忽略——**不进 `gold_files`**。`gold_files` 是 `locate_hit` 的判定依据，衡量的是 Detector 定位**源文件**的能力；把数据文件塞进去会稀释这个指标。
+
+> 这里原先写的是「非 `.py` 文件继续忽略」。M5 加了 `MavenAdapter` 之后那句话就是假的：Java 仓库的源文件后缀是 `.java`，照那句话 `gold_files` 恒空 → `is_candidate` 恒 `False` → `aifix mine` 对任何 Maven 工程产出 0 个任务，且不报错。判据由适配器的 `source_suffixes()` 给出，`split_paths` 收的是这个值而不是 adapter 对象，也没有默认值——默认 `(".py",)` 正是那个 bug 本身。
 
 **顺带修一处同源缺陷**：`conftest.py` 若位于仓库根目录（不在 `test_dirs` 里、也不以 `test_` 开头），当前会被判成源文件进 `gold_files`。它是测试基础设施，不是 ground truth。修法：文件名为 `conftest.py` 的一律归 `test_files`。
 

@@ -80,12 +80,18 @@ def test_commands_no_longer_take_a_report_path():
 ```python
     def full_test_command(self) -> list[str]: ...
     def scoped_test_command(self, test_ids: list[str]) -> list[str]: ...
-    def report_paths(self, worktree: Path) -> list[Path]: ...
+    def report_paths(self, worktree: Path,
+                     scoped: bool = False) -> list[Path]: ...
+    def source_suffixes(self) -> tuple[str, ...]: ...
 ```
 
 `PytestAdapter` 增加 `REPORT_NAME = ".aifix-report.xml"` 与 `SCOPED_REPORT_NAME = ".aifix-recheck.xml"`。
 
-**注意**：`run_scoped` 现在用的是**另一个**报告名（`.aifix-recheck.xml`），为的是不覆盖全量那份。接口改造后这个区分要保留——`report_paths` 需要能分别回答两者，或者由调用方传一个「哪一份」的标识。**你选一种，在报告里说明取舍。** Maven 侧两者是同一个目录，无所谓。
+**注意**：`run_scoped` 现在用的是**另一个**报告名（`.aifix-recheck.xml`），为的是不覆盖全量那份。接口改造后这个区分要保留——`report_paths` 需要能分别回答两者，或者由调用方传一个「哪一份」的标识。
+
+**已选定：由调用方传标识**，即 `report_paths(worktree, scoped=False)`。这个参数是决定性的，不是可选的排版细节——pytest 侧全量与复跑必须落在两份不同的文件上，否则 flaky 复跑会覆盖掉还要继续用的全量报告。Maven 侧两者是同一个目录，忽略这个参数即可。
+
+**新增协议成员 `source_suffixes()`**：挖任务时「哪些后缀算源文件」的判据必须由适配器给。`eval/mine.split_paths` 曾经只认 `.py`，于是 Java 仓库的源码全部落空 → `gold_files` 恒空 → `is_candidate` 恒 `False` → `aifix mine` 对任何 Maven 工程产出 0 个任务，且不报错，与「这个仓库最近没有红转绿的提交」无法区分。
 
 `baseline.py`：
 
@@ -116,7 +122,7 @@ def test_commands_no_longer_take_a_report_path():
 
 **已实测的 Maven 事实（照抄，不要自己再试一遍）：**
 
-- 命令：`mvn -B -q -o test -Dmaven.test.failure.ignore=true`。`-Dmaven.test.failure.ignore=true` **必须加**：否则测试一红 `mvn` 就以非 0 退出，而**报告已经写出来了**，调用方容易把退出码当成「没跑成」
+- 命令：`mvn -B -q -o clean test -Dmaven.test.failure.ignore=true`。`clean` **必须加**，理由是正确性不是整洁：`mvn test` 不清空 `target/surefire-reports/`，而 `report_paths` 只看文件系统当前状态——上一轮留下的报告会被 `parse_junit` 当成这一轮的结果，flaky 确认据此判定，不报错，只是判错。`-Dmaven.test.failure.ignore=true` **必须加**：否则测试一红 `mvn` 就以非 0 退出，而**报告已经写出来了**，调用方容易把退出码当成「没跑成」
 - 报告：`target/surefire-reports/TEST-<FQCN>.xml`，每个测试类一份
 - 根元素是 `<testsuite>`（pytest 是 `<testsuites>`）。`parse_junit` 用 `root.iter("testcase")`，两者都走得通，不用改
 - `<testcase classname="demo.CalcTest" name="addWorks" time="0.027">`——**没有 `file` 属性**
@@ -165,10 +171,11 @@ def test_locate_source_filters_out_the_assertion_framework(maven_repo):
 |---|---|
 | `name` | `"maven"` |
 | `detect(repo)` | `(repo / "pom.xml").is_file()` |
-| `full_test_command()` | `["mvn", "-B", "-q", "-o", "test", "-Dmaven.test.failure.ignore=true"]` |
+| `full_test_command()` | `["mvn", "-B", "-q", "-o", "clean", "test", "-Dmaven.test.failure.ignore=true"]` |
 | `scoped_test_command(ids)` | 追加 `-Dtest=<逗号连接>` 与 `-DfailIfNoSpecifiedTests=false` |
-| `report_paths(worktree)` | `sorted(worktree.glob("target/surefire-reports/TEST-*.xml"))` |
+| `report_paths(worktree, scoped=False)` | `sorted(worktree.glob("target/surefire-reports/TEST-*.xml"))`，忽略 `scoped` |
 | `test_dirs()` | `["src/test"]` |
+| `source_suffixes()` | `(".java",)`——只收产品代码；`pom.xml` 不进 `gold_files`，它不是 `locate_source` 能指向的东西 |
 | `make_test_id(cn, name, file)` | `f"{cn}#{name}"` |
 
 `-DfailIfNoSpecifiedTests=false` **必须加**：类名对不上时不至于让整个构建失败。
