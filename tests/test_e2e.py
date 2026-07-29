@@ -88,3 +88,98 @@ async def test_dirty_repo_aborts(buggy_repo):
                            fixer_client=_Scripted([_text("x")]))
     assert state["abort"] is not None
     assert "工作区不干净" in state["report_md"]
+
+
+class _Recording:
+    """记下 run_once 报了哪些进度，不渲染。
+
+    断言的是**调用**而不是渲染出来的文字：措辞归 TerminalProgress 管
+    （tests/test_progress.py 钉），这里管的是核心循环有没有在该出声的地方
+    出声 —— 两者分开，改一句措辞不会弄红这条集成测试。
+    """
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def __getattr__(self, name):
+        def rec(**kw):
+            self.calls.append((name, kw))
+        return rec
+
+    def kinds(self) -> list[str]:
+        return [k for k, _ in self.calls]
+
+
+async def test_run_once_reports_progress_through_the_whole_loop(buggy_repo):
+    """一次完整的 run 里，四个阶段都要出声。
+
+    此前 `aifix run` 从头到尾一个字不印，5 分钟的等待里分不出「在干活」和
+    「卡死了」。这条钉的是接线本身：baseline、每个 failure 的开头、诊断、
+    验证、收尾，一个都不能少。
+    """
+    prog = _Recording()
+    await run_once(buggy_repo, AifixConfig(), run_id="prog1",
+                   detector_client=_Scripted([_text(_DIAG)]),
+                   fixer_client=_Scripted([
+                       _tool("apply_patch", json.dumps({"diff": _PATCH})),
+                       _text("已修复")]),
+                   progress=prog)
+
+    kinds = prog.kinds()
+    for expected in ("run_start", "baseline", "failure_start", "detected",
+                     "verified", "finished"):
+        assert expected in kinds, f"{expected} 没有出声：{kinds}"
+    # 顺序：先说清这是哪次 run，再报规模，最后才轮到具体 failure
+    assert kinds.index("run_start") < kinds.index("baseline") \
+        < kinds.index("failure_start") < kinds.index("verified")
+
+    # 报的数得是真的：buggy_repo 是 2 个用例、1 个红的
+    base = dict(prog.calls[kinds.index("baseline")][1])
+    assert base["ran"] == 2 and base["failing"] == 1
+    head = dict(prog.calls[kinds.index("failure_start")][1])
+    assert head == {"index": 1, "total": 1,
+                    "test_id": "tests/test_calc.py::test_add"}
+    assert dict(prog.calls[kinds.index("verified")][1])["verdict"] == "better"
+
+
+async def test_run_once_is_silent_by_default(buggy_repo, capsys):
+    """不传 progress 时一个字都不许印。
+
+    `eval` 会并行跑几十个任务，每个都是一次完整的 run —— 默认出声的话几十条
+    进度交织成一团，eval 自己那行 `✅ task_id` 反而被淹掉。
+    """
+    await run_once(buggy_repo, AifixConfig(), run_id="prog2",
+                   detector_client=_Scripted([_text(_DIAG)]),
+                   fixer_client=_Scripted([
+                       _tool("apply_patch", json.dumps({"diff": _PATCH})),
+                       _text("已修复")]))
+    out, err = capsys.readouterr()
+    assert out == "" and err == "", f"默认不该出声：{out!r} / {err!r}"
+
+
+async def test_the_fix_phase_emits_a_real_heartbeat(buggy_repo):
+    """心跳必须由**真的 AgentLoop** 产出的事件驱动。
+
+    这条测试存在的理由是它抓到过一个真 bug：`consume` 原本监听
+    `harness.events.ToolCall`，而那是消息里的数据结构，**从不作为事件出现在
+    流上**（实测一次真 run：ToolStarted 33 条、ToolFinished 33 条、
+    ToolCallRequested 30 条、ToolCall 0 条）。单元测试自己构造 ToolCall 喂进
+    consume，测试全绿，真跑一步都不报 —— 与 `locate_source` 那次是同一个错误
+    形状：**测试喂了系统从不产出的输入**。
+
+    所以这里不构造任何事件，走 `run_once` 的完整链路，让脚本化模型替身经过
+    真的 AgentLoop、真的工具注册表。事件类型再改名，这条会红。
+    """
+    prog = _Recording()
+    await run_once(buggy_repo, AifixConfig(), run_id="hb1",
+                   detector_client=_Scripted([_text(_DIAG)]),
+                   fixer_client=_Scripted([
+                       _tool("apply_patch", json.dumps({"diff": _PATCH})),
+                       _text("已修复")]),
+                   progress=prog)
+
+    steps = [kw for k, kw in prog.calls if k == "agent_step"]
+    assert steps, f"fix 阶段一步都没报心跳：{prog.kinds()}"
+    assert steps[0]["tool"] == "apply_patch"
+    # 步号从 1 起、连续递增：屏幕上出现两段「第 1 步」会读成重新开始了
+    assert [s["step"] for s in steps] == list(range(1, len(steps) + 1))

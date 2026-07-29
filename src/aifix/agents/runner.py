@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
-from harness.events import Event, ModelUsage, RunError, TextDelta
+from harness.events import (Event, ModelUsage, RunError, TextDelta,
+                            ToolStarted)
 
 
 @dataclass
@@ -32,10 +33,21 @@ class AgentOutcome:
 
 
 async def consume(stream: AsyncIterator[Event],
-                  cost_cap: float | None = None) -> AgentOutcome:
+                  cost_cap: float | None = None,
+                  on_tool: Callable[[str], None] | None = None) -> AgentOutcome:
     """消费整条事件流。保留全部事件供 trace 使用。
 
     cost_cap：累计成本越过该值即停止消费并关闭生成器。
+
+    on_tool：每次**工具调用**回调一次，参数是工具名。给进度显示用 —— fix 是
+    一次 run 里最长的一段（默认最多 25 步，每步可能读码、搜索、打补丁、跑
+    目标用例），只在它结束后出声的话，最需要心跳的那几分钟仍然是空屏。
+    听的是 `ToolStarted`，**不是 `ToolCall`** —— 后者是消息里的数据结构，
+    从不作为事件出现在流上。这一条踩过：单元测试自己构造 ToolCall 喂进来，
+    测试全绿而真跑一步都不报。实测一次真 run 的 events.jsonl：
+    ToolStarted 33 条、ToolFinished 33 条、ToolCallRequested 30 条，
+    ToolCall **0 条**。听 ToolFinished 也不对 —— 那是工具跑完才报，而心跳
+    的意义正是在工具**跑着的时候**让人知道它在跑（run_tests 一跑几十秒）。
 
     契约是「越线之后不再发起新的模型调用」，不是「绝不超过一分钱」——
     成本只有在调用返回后才知道（ModelUsage 到达的那一刻），所以越线时
@@ -45,7 +57,10 @@ async def consume(stream: AsyncIterator[Event],
     out = AgentOutcome()
     async for ev in stream:
         out.events.append(ev)
-        if isinstance(ev, TextDelta):
+        if isinstance(ev, ToolStarted):
+            if on_tool is not None:
+                on_tool(ev.tool_call.name)
+        elif isinstance(ev, TextDelta):
             parts.append(ev.text)
         elif isinstance(ev, ModelUsage):
             out.tokens += ev.usage.total_tokens

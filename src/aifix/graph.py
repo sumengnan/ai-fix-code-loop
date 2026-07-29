@@ -76,8 +76,12 @@ class AifixState(TypedDict, total=False):
     # baseline 解析出的 Failure 对象，按 test_id 索引。
     # 下划线前缀表示它不参与路由判断，只作为 detect / verify 的数据源。
     _failures: dict[str, Any]
+    # baseline 跑出结果的用例总数，只供进度显示（见 progress.py）
+    _ran: int
     # 当前 run 的 RunTrace。同样不参与路由，只是各节点写观测数据的出口。
     _trace: Any
+    # 进度回调（见 progress.py），侧信道，理由同 _trace
+    _progress: Any
 
 
 def new_state(repo: Path, config: AifixConfig, run_id: str) -> AifixState:
@@ -108,6 +112,18 @@ def trace_of(state: AifixState):
     """取当前 run 的 trace；未接线时返回一个吞掉所有调用的空实现。"""
     t = state.get("_trace")
     return t if t is not None else _NullTrace()
+
+
+def progress_of(state: AifixState):
+    """取当前 run 的进度回调；未接线时返回哑实现。
+
+    与 trace_of 同一套约定（侧信道放在 state 里），理由也一样：进度是
+    **横切**的，让每个节点的签名各加一个参数，等于每加一处出声点就要改一遍
+    调用链。哑实现是默认值 —— eval 并行跑几十个 run，默认出声会串成一团。
+    """
+    from .progress import NullProgress
+    p = state.get("_progress")
+    return p if p is not None else NullProgress()
 
 
 def check_circuit_breaker(state: AifixState) -> str | None:

@@ -5,6 +5,7 @@ import asyncio
 import re
 import shutil
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from .nodes.preflight import preflight_node
 from .nodes.report import (cost_is_unknown, count_fixed, render_report,
                            report_node)
 from .nodes.verify import verify_node
+from .progress import NullProgress, TerminalProgress
 # replay 与 trajectory 可以放在模块顶部：它们只读 jsonl / sqlite，一个
 # aifix 内部模块都不 import，不存在 eval 子包那条 `eval.runner → cli` 的环
 # （trajectory 宁可复制一份 SIGNAL_KEYS 也不 import eval.runner，正是为此）。
@@ -69,7 +71,8 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                    detector_client: Any = None,
                    fixer_client: Any = None,
                    only_test: str | None = None,
-                   dry_run: bool = False) -> AifixState:
+                   dry_run: bool = False,
+                   progress: Any = None) -> AifixState:
     """按状态图的语义顺序执行一次完整 run。
 
     M1 直接手工驱动节点，节点顺序与路由和 build_graph() 的图一致——把
@@ -80,8 +83,16 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
     函数里；build_graph() 那条路径没有 RunBudget，`failure_usd_budget`
     一直是 None，整条美元闸不存在。产品入口走的是 run_once，图那条路径
     目前只用于结构验证，别拿它去验证任何与花钱有关的保证。
+
+    progress：进度回调（见 progress.py），默认 `NullProgress` —— 一个字都不
+    印。默认必须是哑的：`eval` 会并行跑几十个任务，每个都是一次完整的 run。
+    它只报**语义**（跑了几个、判定是什么），措辞归 TerminalProgress。
     """
+    prog = progress or NullProgress()
     state = new_state(repo, config, run_id=run_id)
+    # 侧信道，与 _trace 同一套约定：fix_node 要在**循环内部**逐步出声，
+    # 从这里一路传参数下去等于每加一处出声点就改一遍调用链
+    state["_progress"] = prog
     state.update(preflight_node(state))
     if state["abort"]:
         state["report_md"] = render_report(state)
@@ -96,10 +107,18 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
         with Worktree(repo, run_id=run_id) as wt, trace.run_span():
             state["worktree_path"] = str(wt.path)
             state["branch"] = wt.branch
+            prog.run_start(run_id=run_id, adapter=state["adapter_name"],
+                           branch=wt.branch)
 
             # 全量测试很贵，整个 run 只在这里跑一次；后续每轮 verify 各跑一次
+            t0 = time.monotonic()
             state.update(await baseline_node(state))
             trace.fact("baseline_failures", len(state["baseline_ids"]))
+            # ran 取自报告里真正跑出结果的用例数 —— 只报红的数目分不出
+            # 2/14 还是 2/2000，而后者意味着后面每轮 verify 都要再跑一次
+            prog.baseline(ran=state.get("_ran", len(state["baseline_ids"])),
+                          failing=len(state["baseline_ids"]),
+                          seconds=time.monotonic() - t0)
             if only_test is not None:
                 state["queue"] = [t for t in state["queue"] if t == only_test]
             if dry_run:
@@ -118,11 +137,19 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                         break
                     state["current"] = state["queue"].pop(0)
                     state["attempt"] = 1
+                    # 位置信息（[2/7]）是「还要等多久」的唯一线索。分母取
+                    # 「已办 + 手上这个 + 队列里剩下的」，不是 baseline 的
+                    # 红数 —— --test 会把队列筛成一条，那时报 1/14 是假话。
+                    done = len(state["results"])
+                    prog.failure_start(index=done + 1,
+                                       total=done + 1 + len(state["queue"]),
+                                       test_id=state["current"])
                 spent = budget.exhaustion()
                 if spent:
                     # 种类另记一份：评测要据此区分「模型没在预算内修好」
                     # 与「评测调度器的墙钟耗尽」，光靠消息文本判不可靠
                     state["abort_kind"], state["abort"] = spent
+                    prog.note(state["abort"])
                     trace.fact("abort", state["abort"])
                     trace.fact("abort_kind", state["abort_kind"])
                     _backfill_in_flight_result(state)
@@ -134,7 +161,14 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                 before = state["spent_tokens"], state["spent_usd"]
                 with trace.failure_span(state["current"]), \
                         trace.attempt_span(state["attempt"]):
+                    prog.attempt_start(attempt=state["attempt"],
+                                       max_attempts=config.max_attempts)
                     state.update(await detect_node(state, client=detector_client))
+                    diag = state.get("diagnosis") or {}
+                    prog.detected(
+                        suspect=diag.get("suspect_file"),
+                        anchored=state.get("suspect_anchored", True),
+                        tokens=state["spent_tokens"] - before[0])
                     # detect 不接美元闸是计划登记过的有意偏差，但它花掉的钱
                     # 必须**在这里立刻结算**：否则下面算给 fix 的额度是按
                     # 「detect 还没花钱」算出来的，fix 会在可能已经越线的
@@ -150,14 +184,24 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                     state["failure_usd_budget"] = budget.usd_for_failure(
                         remaining_failures)
                     state.update(await fix_node(state, client=fixer_client))
+                    prog.patched(touched=list(state.get("touched") or []),
+                                 diff_lines=state.get("diff_lines", 0))
+                    # 守卫触发要当场说：它是「这一轮花了钱却没进展」的解释，
+                    # 只写进 facts.jsonl 的话要等 run 结束再 replay 才看得到
+                    for hit in (state.get("guard_hits") or []):
+                        prog.note(f"守卫触发：{hit}")
                     # 两笔 charge 相加恰好是 after_fix - before：不重复计入，
                     # 也不遗漏。verify_node 零 LLM，不产生花销。
                     budget.charge(state["spent_tokens"] - mid[0],
                                   state["spent_usd"] - mid[1])
+                    t_verify = time.monotonic()
                     state.update(await verify_node(state))
+                    prog.verified(verdict=state.get("verdict") or "same",
+                                  seconds=time.monotonic() - t_verify)
                 tripped = check_circuit_breaker(state)
                 if tripped:
                     state["abort"] = tripped
+                    prog.note(tripped)
                     trace.fact("abort", tripped)
                     _backfill_in_flight_result(state)
                     break
@@ -171,6 +215,7 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
         # 所以这里不吞异常、只保证报告先落地：记成一次中止（abort_kind
         # 另记，评测据此把它算作评测故障而不是模型没修好），渲染、落盘，
         # 然后照常返回。退出码由 _cmd_run 负责，管道里区分得出来。
+        prog.note(f"运行异常中断：{type(e).__name__}：{e}")
         state["abort"] = state.get("abort") or f"运行异常中断：{type(e).__name__}：{e}"
         state["abort_kind"] = state.get("abort_kind") or "crash"
         trace.fact("crash", f"{type(e).__name__}: {e}")
@@ -183,6 +228,11 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
     else:
         _record_run_summary(trace, state)
         state.update(report_node(state))
+        tokens, usd = state["spent_tokens"], state["spent_usd"]
+        # usd 传 None 而不是 0.0：没配价格表时成本恒为 0，印 $0.0000 就是伪造
+        prog.finished(fixed=count_fixed(state["results"]),
+                      total=len(state["baseline_ids"]), tokens=tokens,
+                      usd=None if cost_is_unknown(tokens, usd) else usd)
     finally:
         trace.close()
     return state
@@ -281,6 +331,9 @@ def build_parser() -> argparse.ArgumentParser:
                           "那一次必然已经花掉。需要配置 AIFIX_PRICE_MAP")
     run.add_argument("--dry-run", action="store_true",
                      help="只跑 preflight + baseline，报告有多少活")
+    run.add_argument("--quiet", "-q", action="store_true",
+                     help="不印进度（进度本来就走 stderr，只在你连 stderr "
+                          "一起收进日志时才需要它）")
 
     mine = sub.add_parser(
         "mine", help="从 git history 挖任务集", epilog=_TEST_PYTHON_HELP,
@@ -385,7 +438,10 @@ def _cmd_run(args) -> None:
     require_price_map_for_usd_budget(config)
     state = asyncio.run(run_once(
         Path(args.repo).resolve(), config, run_id=uuid.uuid4().hex[:8],
-        only_test=args.test, dry_run=args.dry_run))
+        only_test=args.test, dry_run=args.dry_run,
+        # 进度走 stderr，报告走 stdout —— `aifix run . > report.md` 存出来的
+        # 文件顶上不该粘着几十行进度
+        progress=None if args.quiet else TerminalProgress()))
     print(state["report_md"])
     if state.get("abort_kind") in ("crash", COLLECTION_ABORT_KIND):
         # 报告先印出来（分支上可能真躺着可合并的修复），退出码再说明这次

@@ -347,8 +347,11 @@ async def baseline_node(state: AifixState) -> dict[str, Any]:
     fs = await run_full_suite(Path(state["worktree_path"]), adapter,
                               require_report=True)
     ids = sorted(fs.ids)
+    # _ran 是**跑出结果的用例总数**（通过 + 失败，不含 skipped），只供进度
+    # 显示。红的数目单独看分不出 2/14 还是 2/2000，而后者意味着后面每轮
+    # verify 都要再跑一次那 2000 个 —— 用户看到的停顿会长得多，且那是正常的。
     out: dict[str, Any] = {"baseline_ids": ids, "queue": list(ids),
-                           "_failures": dict(fs.failures),
+                           "_failures": dict(fs.failures), "_ran": len(fs.ran),
                            "abort": None, "abort_kind": None}
     bad = collection_error_abort(ids, adapter)
     if bad is None:

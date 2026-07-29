@@ -300,8 +300,9 @@ def test_cli_run_exits_nonzero_on_a_collection_abort(monkeypatch, capsys):
                 "abort_kind": COLLECTION_ABORT_KIND}
 
     monkeypatch.setattr(cli, "run_once", fake_run_once)
-    args = type("A", (), {"repo": ".", "budget": None, "test": None,
-                          "dry_run": False})()
+    # 用真的 parser 造 args，不手搓命名空间：手搓的那种每加一个 CLI 开关就
+    # 断一次（--quiet 就断过），而且它验证不了那些字段真的存在于 parser 里。
+    args = cli.build_parser().parse_args(["run", "."])
     with pytest.raises(SystemExit) as ei:
         cli._cmd_run(args)
     assert ei.value.code == 1
@@ -317,7 +318,8 @@ def test_cli_run_exits_zero_on_a_budget_abort(monkeypatch, capsys):
                 "abort_kind": "tokens"}
 
     monkeypatch.setattr(cli, "run_once", fake_run_once)
-    args = type("A", (), {"repo": ".", "budget": None, "test": None,
-                          "dry_run": False})()
+    # 用真的 parser 造 args，不手搓命名空间：手搓的那种每加一个 CLI 开关就
+    # 断一次（--quiet 就断过），而且它验证不了那些字段真的存在于 parser 里。
+    args = cli.build_parser().parse_args(["run", "."])
     cli._cmd_run(args)
     assert "# 报告" in capsys.readouterr().out

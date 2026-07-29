@@ -12,7 +12,7 @@ from harness.types import Message, Role
 from ..agents.detector import Diagnosis
 from ..agents.fixer import SYSTEM_PROMPT, build_initial_messages, build_registry
 from ..agents.runner import consume
-from ..graph import AifixState, trace_of
+from ..graph import AifixState, progress_of, trace_of
 from ..violations import count_violations
 from .baseline import adapter_from_state
 
@@ -140,6 +140,7 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
     lines = 0
 
     trace = trace_of(state)
+    prog = progress_of(state)
     sandbox = LocalSandbox(workspace=state["worktree_path"])
     await sandbox.start()
     try:
@@ -161,6 +162,18 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
 
         last_guard: str | None = None
         guard_repeats = 0
+
+        # 心跳：模型每调一次工具报一条。fix 默认最多 25 步，是一次 run 里最长
+        # 的一段 —— 不报的话，最需要进度的那几分钟仍然是空屏。
+        # 步号在**整个 failure 内累加**，跨守卫重试不重置：守卫重试是同一次
+        # 修复尝试的延续（这也是它不计入 attempt 的理由），每轮从 1 重数会让
+        # 屏幕上出现两段「第 1 步」，读起来像是重新开始了。
+        steps = 0
+
+        def _step(tool: str) -> None:
+            nonlocal steps
+            steps += 1
+            prog.agent_step(step=steps, tool=tool)
         for _ in range(cfg.fix_guard_retries + 1):
             # 额度是**整个 failure** 的，不是每轮的：守卫重试是同一次修复
             # 尝试的延续，各轮分别给一份额度等于把上限悄悄放大数倍。
@@ -169,7 +182,7 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
                 cost_capped = True
                 break
             outcome = await consume(loop.run(messages=list(messages)),
-                                    cost_cap=round_cap)
+                                    cost_cap=round_cap, on_tool=_step)
             tokens += outcome.tokens
             cost += outcome.cost_usd
             if outcome.cost_capped:
