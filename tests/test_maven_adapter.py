@@ -104,6 +104,30 @@ class CalcTest {
 }
 """
 
+# 类初始化就抛异常：surefire 对这种「整个类没跑成」发的报告形状与逐个用例
+# 完全不同（见 test_a_class_that_cannot_initialise_gets_a_class_level_id）。
+# 它是 pytest 侧「测试文件导入失败」的 Maven 对应物。
+_BOOT_TEST = """package demo;
+
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+
+class BootTest {
+    @BeforeAll
+    static void boot() {
+        throw new IllegalStateException("类初始化就炸了");
+    }
+
+    @Test
+    void a() {
+    }
+
+    @Test
+    void b() {
+    }
+}
+"""
+
 # 第二个测试类：surefire 每个类写一份报告，陈旧报告那条测试需要两份才有区分度。
 _OTHER_TEST = """package demo;
 
@@ -169,6 +193,29 @@ def class_selector_run(tmp_path_factory) -> dict:
         MavenAdapter().scoped_test_command(["demo.CalcTest"]),
         cwd=repo, capture_output=True, text=True)
     return {"repo": repo, "proc": proc}
+
+
+@pytest.fixture(scope="module")
+def empty_method_selector_run(tmp_path_factory) -> dict:
+    """`-Dtest=demo.CalcTest#`（方法名为空）—— 这是**反面教材**的实证。"""
+    repo = _write_project(tmp_path_factory.mktemp("mvn_empty_meth"))
+    proc = subprocess.run(
+        MavenAdapter().scoped_test_command(["demo.CalcTest#"]),
+        cwd=repo, capture_output=True, text=True)
+    return {"repo": repo, "proc": proc}
+
+
+@pytest.fixture(scope="module")
+def boot_failure_run(tmp_path_factory) -> dict:
+    """只含一个「初始化就抛异常」的测试类的工程，跑一次全量。"""
+    root = tmp_path_factory.mktemp("mvn_boot")
+    (root / "src/test/java/demo").mkdir(parents=True)
+    (root / "pom.xml").write_text(_POM, encoding="utf-8")
+    (root / "src/test/java/demo/BootTest.java").write_text(
+        _BOOT_TEST, encoding="utf-8")
+    proc = subprocess.run(MavenAdapter().full_test_command(), cwd=root,
+                          capture_output=True, text=True)
+    return {"repo": root, "proc": proc}
 
 
 @pytest.fixture(scope="module")
@@ -348,6 +395,56 @@ def test_selector_for_a_whole_class_really_runs_it(class_selector_run):
     assert fs.ran == {"demo.CalcTest#addWorks", "demo.CalcTest#divideBlowsUp",
                       "demo.CalcTest#alsoPasses"}, sorted(fs.ran)
     assert "demo.OtherTest#alwaysPasses" not in fs.ran, sorted(fs.ran)
+
+
+def test_an_empty_method_name_silently_blows_the_scope_away(
+        empty_method_selector_run):
+    """`-Dtest=demo.CalcTest#` 不是「只跑这个类」，是**没有过滤条件**。
+
+    这条测试的存在理由是它上面那条改动的依据：make_test_id 遇到空方法名时
+    绝不能拼成 `类名#`。surefire 把它读成空的过滤条件，把整个套件跑一遍，
+    报告里于是躺着无关类的结果 —— 挖任务时阶段 3 的复跑会把别的类的失败
+    读成候选自己的失败，不报错，只是判错。
+
+    断言 OtherTest 的报告也在（而不是只断言 CalcTest 在）：只看 CalcTest
+    的话，「正确地只跑了那个类」与「跑了全套」两种结果长得一模一样。
+    """
+    names = _reports(empty_method_selector_run["repo"])
+    assert names == ["TEST-demo.CalcTest.xml", "TEST-demo.OtherTest.xml"], (
+        f"{names}\n{empty_method_selector_run['proc'].stdout[-2000:]}")
+
+
+def test_a_class_that_cannot_initialise_gets_a_class_level_id(boot_failure_run):
+    """类初始化就炸时，surefire 发的是一条 name 为**空串**的 testcase。
+
+    实测形状（surefire 3.2.5 / JUnit 5.10.2）：整个类只有一条 `<testcase
+    name="" classname="demo.BootTest">`，带一个 `<error>` 子元素，两个
+    `@Test` 方法一条都不发。这是 pytest 侧「测试文件导入失败发一条文件级
+    <error>」的 Maven 对应物。
+
+    合成出来的 id 必须是**裸类名**，不能是 `demo.BootTest#`：后者作为
+    `-Dtest=` 的值会被 surefire 当成没有过滤条件（见上一条），而裸类名是
+    合法选择器（见 test_selector_for_a_whole_class_really_runs_it）。
+    """
+    a = MavenAdapter()
+    paths = a.report_paths(boot_failure_run["repo"])
+    assert [p.name for p in paths] == ["TEST-demo.BootTest.xml"], (
+        f"{[p.name for p in paths]}\n{boot_failure_run['proc'].stdout[-2000:]}")
+    # 先钉住报告的真实形状，再钉住我们从它合成出什么 —— 少了前半截，
+    # 后半截就成了在验证一个我们自己虚构的输入
+    cases = [dict(c.attrib) for c in ET.parse(paths[0]).getroot().iter("testcase")]
+    assert [c.get("name") for c in cases] == [""], cases
+    assert [c.get("classname") for c in cases] == ["demo.BootTest"], cases
+
+    fs = parse_junit(paths, a.make_test_id)
+    assert fs.ids == {"demo.BootTest"}, sorted(fs.ids)
+    assert fs.ran == {"demo.BootTest"}, sorted(fs.ran)
+
+
+def test_make_test_id_keeps_the_hash_for_a_real_method():
+    """反向：方法名非空时照旧是 `类#方法` —— 上一条不能把这件事一起改掉。"""
+    assert MavenAdapter().make_test_id("demo.BootTest", "a", None) == \
+        "demo.BootTest#a"
 
 
 def test_scoped_run_does_not_see_the_previous_runs_reports(stale_run):

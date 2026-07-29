@@ -106,10 +106,21 @@ class MavenAdapter:
         file 一定是 None：surefire 的 <testcase> 不写 file 属性（pytest 的
         xunit1 才写）。留着这个参数是因为 parse_junit 按位置传三个值。
 
+        **name 为空 = 类级失败**，退回裸类名。已实测（surefire 3.2.5 /
+        JUnit 5.10.2）：`@BeforeAll` 抛异常时整个类只发一条
+        `<testcase name="" classname="demo.BootTest">` 带 `<error>`，两个
+        `@Test` 方法一条都不发 —— 这是 pytest 侧「文件导入失败发一条文件级
+        <error>」的对应物。拼成 `demo.BootTest#` 会出大事：已实测
+        `-Dtest=demo.CalcTest#` 被 surefire 读成**没有过滤条件**，整个套件
+        跑一遍，复跑的报告里躺着无关类的失败。裸类名才是合法选择器
+        （`-Dtest=demo.CalcTest` 只跑那个类）。
+
         classname 为空时退回裸方法名：surefire 没见过这种报告，但拼出来的
         `#addWorks` 是个 -Dtest= 认不出的 id，那会静默地一个用例都不跑。
         """
-        return f"{classname}#{name}" if classname else name
+        if not classname:
+            return name
+        return f"{classname}#{name}" if name else classname
 
     def locate_source(self, failure: Failure, repo: Path) -> list[SourceCandidate]:
         """从 Java 堆栈抽出 src/main/java 下的帧，最深的排最前。
