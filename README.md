@@ -160,6 +160,43 @@ uv run aifix stats                      # 跨 run 汇总：适配器、守卫触
 
 细节见 [诊断](docs/diagnostics.md)。
 
+## 从一个 issue 开始
+
+上面那条链路的入口是「已经红了的测试」。**M6 把入口往前挪了一格**：输入变成一段人话。
+
+```
+你在自己的 issue 里评论一句 /aifix
+  → Actions 起来
+  → 读 issue → 写一条复现测试 → 跑一遍，必须红
+  → detect → fix → verify（现有核心循环一行没改）
+  → 开 PR：复现测试 + 补丁 + 报告
+  → 你审 PR                      ← 唯一一道人闸
+```
+
+复现测试先 commit 进 HEAD，随后 worktree 从 HEAD 建出来，baseline 自然把它认成一个失败用例 —— 所以核心循环完全不知道自己在被 issue 驱动。
+
+**三条交付通路**，取舍写在 [`docs/superpowers/plans/2026-07-29-m6-issue-driven.md`](docs/superpowers/plans/2026-07-29-m6-issue-driven.md) 里：
+
+| 情形 | 产出 |
+|---|---|
+| 写不出复现测试 | 只回帖，列出 issue 缺哪些信息。不建分支、不开 PR |
+| 写出了复现、没修好 | **照样开 PR**，标题标明「未修复」—— 一条红着的复现测试本身就是产出 |
+| 修好了 | 开 PR，报告写进正文 |
+
+想先自己量一量模型写复现测试的本事，不必碰 GitHub：
+
+```bash
+uv run aifix reproduce . --issue-text bug.md     # 首行当标题，其余当正文
+```
+
+拿历史上真实的修复 commit message 直接喂进去就行 —— 它本来就是这个形状。跑完不在你仓库里留东西。
+
+**触发条件是两条同时成立**：评论者是仓库所有者，**且 issue 也是他自己提的**。第二条不是权限洁癖：issue 正文会作为输入交给模型，而外部提交的正文是不可信文本。只限制触发者挡不住注入 —— 外人提一个藏了指令的 issue，等仓库主觉得该修、顺手打上 `/aifix`，就绕过去了。
+
+**已知的空白，说准确点**：本地那条端到端是真跑的（`tests/test_issue_e2e.py`）——真实形状的 event 载荷、真的 reproducer 落盘、真跑 pytest 的红检、真的 `run_once`、真的 push 到一个 bare 远端，最后断言交付分支上确有两个提交且 `calc.py` 被改对了。**只有模型和 GitHub 是替身。**
+
+盖不住的因此只剩两件：`gh` 的命令真被 GitHub 接受（需要真账号），以及**真实模型读一段人话能不能写出对的复现测试**——后者是这条路的天花板，而它一个数字都还没有。想量它不必碰 GitHub，用上面那个 `aifix reproduce` 就行。
+
 ## 支持哪些语言
 
 `pytest` 与 `Maven`（surefire）。加一门新语言要实现 `ProjectAdapter` 的 11 个方法。
@@ -179,6 +216,7 @@ uv run aifix stats                      # 跨 run 汇总：适配器、守卫触
 | [评测](docs/evaluation.md) | `mine` / `mutate` / `eval`、双档打分、Wilson 区间、可疑信号 |
 | [诊断](docs/diagnostics.md) | trace 布局、`replay`、SQLite 跨 run 轨迹 |
 | [适配器](docs/adapters.md) | 协议逐个成员、写新适配器的清单、六处裂缝的完整记录 |
+| [M6 计划](docs/superpowers/plans/2026-07-29-m6-issue-driven.md) | issue 驱动：七条设计决策、为什么只有一道人闸、Actions 的坑 |
 
 设计规格与实现计划在 [`docs/superpowers/`](docs/superpowers/) 下——每个里程碑一份规格、一份计划，包括那些被证伪之后留痕更正的地方。
 
@@ -186,6 +224,8 @@ uv run aifix stats                      # 跨 run 汇总：适配器、守卫触
 
 ```
 aifix run <repo>            修复失败的测试            --test / --budget / --dry-run
+aifix reproduce <repo>      把缺陷报告译成复现测试     --issue-text / --title / --keep
+aifix issue handle          处理一次 issue_comment 事件 --repo / --event
 aifix mine <repo>           从 git history 挖任务集    --limit / --max-tasks / --out
 aifix mutate <repo>         人造变异生成冒烟任务集      --max-tasks / --scope / --seed
 aifix eval <tasks.jsonl>    在任务集上跑评测           --parallel / --label / --budget-per-task / --budget-total
@@ -225,11 +265,11 @@ aifix stats                 跨 run 汇总
 
 ## 项目状态
 
-- **592 个测试**，全绿（2026-07-29 实测。全量耗时 378 / 384 / 388 / 420 / 466 / 581 / 658 / 678 / 726 秒——同一台机器连跑九次，最大差 92%，所以这里给的是九个读数而不是一个"权威"数字；本机装了 `mvn`，Maven 那批是真跑的）。约 5,500 行实现、10,200 行测试
+- **747 个测试**，全绿（2026-07-29 实测。全量耗时 683 / 697 / 735 秒——同一台机器连跑三次；同一天更早的九次读数是 378–726 秒，但那是 592 项的套件，两组数字不可比。给多个读数而不是一个"权威"数字这条规矩不变；本机装了 `mvn`，Maven 那批是真跑的）。约 8,100 行实现、13,700 行测试
 - 依赖 [ai-harness-framework](https://github.com/sumengnan/ai-harness-framework)（同作者，提供 AgentLoop / 沙箱 / 预算 / 遥测）
-- 第一阶段（M1 闭环 → M2 靠谱 → M3 可度量 → M3b 成本闸 → M4 有结论 → M5 跨语言与可诊断）已完成
+- 第一阶段（M1 闭环 → M2 靠谱 → M3 可度量 → M3b 成本闸 → M4 有结论 → M5 跨语言与可诊断 → M6 issue 驱动）已完成
 
-**还没做的**（都是有意留的，不是忘了）：覆盖率差分、SWE-bench Lite / Defects4J 的对外可比数字、任务/issue 驱动（输入变成自然语言，系统先写复现测试）、自动开 PR、第三个适配器。
+**还没做的**（都是有意留的，不是忘了）：覆盖率差分、SWE-bench Lite / Defects4J 的对外可比数字、第三个适配器、issue 驱动那条链路的**真实端到端验收**（需要真 runner 与 API key，见上）、复现测试准确率的离线评测（拿 `evals/` 那 39 个任务、只喂 commit message、藏掉真实测试来量）。
 
 **已知限制**：目标项目把自己可编辑安装进测试解释器时，`import <目标包>` 可能解析到源仓库而不是打了补丁的 worktree —— aifix 只做一次**近似**探测并出声，不解决（解决它要么接管目标项目的安装方式，要么改写它的 `sys.path`）。那道探测复现不了 `conftest.py` 里手写的 `sys.path` 改动，**返回空不等于安全**。见 [适配器文档](docs/adapters.md#换来的真实风险可编辑安装会让验证悄悄失效)。
 
