@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import configparser
 import json
 import os
@@ -9,7 +10,23 @@ import sys
 import tomllib
 from pathlib import Path, PurePosixPath
 
+from ..signals import under_dirs
 from .base import Failure, SourceCandidate
+
+# 走不进去的目录。`.venv` 是硬需求而不是优化：仓库里的虚拟环境有上万个 .py，
+# 且它们一个都不是产品代码 —— 漏掉它，`from calc import add` 会匹配到
+# site-packages 里某个同名模块，Detector 拿到的候选是别人的库。
+_SKIP_DIRS = frozenset({
+    ".git", ".venv", "venv", ".tox", ".nox", "__pycache__", "node_modules",
+    "site-packages", "dist-packages", ".mypy_cache", ".pytest_cache", "build",
+})
+# 索引上限。走目录树是每个失败一次的开销，正常工程远够用；巨型 monorepo 上
+# 与其扫穿，不如退回「没有 import 锚点」—— 那是这条退路引入前的行为，
+# 不会更糟。
+_MAX_INDEXED = 20_000
+# `pkg/__init__.py` → `pkg/api.py` → `pkg/_impl/core.py` 这种两跳转发是常见
+# 的；再深就更可能是解析绕进了环，而不是真的还有一层门面。
+_MAX_REEXPORT_HOPS = 3
 
 # Python 原生 traceback：  File "/abs/path/calc.py", line 2, in add
 # pytest 的 longrepr **不产出**这个形状，但 --tb=native、以及被 pytest 原样
@@ -220,6 +237,161 @@ def imports_outside_worktree(python: str,
     return hits
 
 
+def _read_text(path: Path) -> str | None:
+    """读不出来就当没有 —— 编码坏掉的文件不该炸掉整次定位。"""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _repo_modules(repo_real: str) -> dict[str, str]:
+    """{可导入的模块名: 仓库内相对路径}。
+
+    一个文件贡献它路径的**每一个后缀**：`src/shopcart/cart.py` 同时登记成
+    `shopcart.cart` 和 `cart`（以及 `src.shopcart.cart`）。因为「测试写的
+    模块名对应哪一段路径」取决于 pythonpath / src 布局 / 有没有装成包，
+    在这里判定不了；登记全部后缀让匹配自己去选，比赌某一种布局稳。
+
+    冲突时**短路径优先**：同名模块存在于多处时，靠近仓库根的那个更可能是
+    被测的产品代码。这是启发式，不是保证。
+    """
+    index: dict[str, str] = {}
+    count = 0
+    for root, dirs, files in os.walk(repo_real):
+        dirs[:] = [d for d in dirs
+                   if d not in _SKIP_DIRS and not d.startswith(".")]
+        for fn in files:
+            if not fn.endswith(".py"):
+                continue
+            count += 1
+            if count > _MAX_INDEXED:
+                return index
+            rel = str(Path(root, fn).relative_to(repo_real))
+            parts = PurePosixPath(rel).parts
+            # `pkg/__init__.py` 导入时写的是 `pkg`，不含末段
+            stem = list(parts[:-1]) if parts[-1] == "__init__.py" \
+                else [*parts[:-1], parts[-1][:-3]]
+            for i in range(len(stem)):
+                mod = ".".join(stem[i:])
+                old = index.get(mod)
+                if old is None or len(rel) < len(old):
+                    index[mod] = rel
+    return index
+
+
+def _imports_of(source: str) -> list[tuple[str, list[str]]]:
+    """[(模块名, 从它导入的符号名)]，按出现顺序。
+
+    相对 import（level > 0）跳过：解析它要知道文件自己的包名，而那取决于
+    rootdir / pythonpath / 有没有 __init__.py，猜错就是给 Detector 一个不
+    存在的候选 —— 比不给候选更糟。
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    out: list[tuple[str, list[str]]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.level or not node.module:
+                continue
+            out.append((node.module, [a.name for a in node.names]))
+        elif isinstance(node, ast.Import):
+            # `import a.b as c` —— 模块是 a.b，没有「从中导入的符号」
+            out.extend((a.name, []) for a in node.names)
+    # stdlib 的模块名不可能是本仓库的产品代码。不靠「匹配不到就自然掉队」
+    # 兜底：仓库里真有个 `json.py` 时，`import json` 会命中它 —— 那多半
+    # 是巧合而不是证据。
+    return [(m, n) for m, n in out
+            if m.split(".")[0] not in sys.stdlib_module_names]
+
+
+def _names_in(name: str, haystack: str) -> bool:
+    """符号名在失败文本里被点过名。按词边界比，`add` 不该被 `address` 命中。"""
+    return re.search(rf"\b{re.escape(name)}\b", haystack) is not None
+
+
+def _defined_in(source: str, wanted: set[str]) -> tuple[int, str]:
+    """符号在这份源码里的定义行。没定义返回 (1, "")。"""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return 1, ""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)) and node.name in wanted:
+            return node.lineno, node.name
+    return 1, ""
+
+
+def _forwarded_to(source: str, rel: str, wanted: set[str],
+                  index: dict[str, str], repo_real: str) -> str | None:
+    """这份源码把 wanted 里的符号转发给了哪个模块（仓库内相对路径）。
+
+    包内相对 import 在这里**是可解的**，与测试文件里的相对 import 不同：
+    参照系是这个文件自己的目录，`.cart` 就是同级的 cart.py，纯路径运算，
+    不需要猜 rootdir / pythonpath。
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    base = PurePosixPath(rel).parent
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if not any(a.name in wanted for a in node.names):
+            continue
+        if node.level:
+            # level=1 是本包，每多一级往上一层。`__init__.py` 的包目录就是
+            # 它自己所在的目录，普通模块同理，所以两者都从 parent 起算。
+            here = base
+            for _ in range(node.level - 1):
+                here = here.parent
+            stem = here / (node.module or "").replace(".", "/")
+            for cand in (f"{stem}.py", f"{stem}/__init__.py"):
+                if (Path(repo_real) / cand).is_file():
+                    return cand
+        elif node.module:
+            hit = index.get(node.module)
+            if hit is not None:
+                return hit
+    return None
+
+
+def _anchor_for(repo_real: str, rel: str, names: list[str],
+                index: dict[str, str]) -> tuple[str, int, str]:
+    """顺着 re-export 找到符号**真正定义**的那个文件。
+
+    动机是实测：`from shopcart import most_expensive` 解析到
+    `src/shopcart/__init__.py`，而那个文件只有一行 `from .cart import ...`
+    转发，逻辑全在 `src/shopcart/cart.py`。停在 `__init__.py` 给出的是一个
+    不含任何逻辑的文件 —— 比模型自己猜好不了多少，gold_files 也对不上。
+
+    返回 (相对路径, 行号, 符号名)。追不到定义时返回**追到的最后一处**：
+    多跳一步至少换来一个更接近实现的文件。跳数封顶且带 seen 集，互相转发
+    的两个模块不会把定位转成死循环。
+    """
+    if not names:
+        return rel, 1, ""
+    wanted = set(names)
+    cur, seen = rel, {rel}
+    for _ in range(_MAX_REEXPORT_HOPS):
+        src = _read_text(Path(repo_real) / cur)
+        if src is None:
+            break
+        line, fn = _defined_in(src, wanted)
+        if fn:
+            return cur, line, fn
+        nxt = _forwarded_to(src, cur, wanted, index, repo_real)
+        if nxt is None or nxt in seen or not (Path(repo_real) / nxt).is_file():
+            break
+        seen.add(nxt)
+        cur = nxt
+    return cur, 1, ""
+
+
 class PytestAdapter:
     name = "pytest"
 
@@ -385,8 +557,8 @@ class PytestAdapter:
         然后盲猜路径。当时的单元测试喂的是手写的原生 traceback，所以全绿。
 
         纯断言失败拿不到源码帧，这不是解析能补的：被调函数正常返回了，栈上
-        没有它。那种情况下返回的只有测试文件那一帧，调用方要据此知道
-        Detector 是在无锚点地猜（见 nodes/detect.py 的 suspect_anchored）。
+        没有它。那种情况下退到测试文件的 import（见 `_import_candidates`）——
+        仍然是确定性证据，只是弱一档，用 origin 标出来。
         """
         repo_real = str(Path(repo).resolve())
         hits: list[tuple[int, SourceCandidate]] = []
@@ -406,4 +578,69 @@ class PytestAdapter:
                     path=path, line=int(m.group("line")), frame=fn)))
         # 先按出现顺序（由浅入深）排稳，再整体反转 —— 最深的最可疑
         hits.sort(key=lambda h: h[0])
-        return [c for _, c in reversed(hits)]
+        frames = [c for _, c in reversed(hits)]
+
+        # 栈帧里已经有源码文件时**不掺 import**：那是更弱的证据，混进来只会
+        # 稀释真锚点，把「失败穿过这里」和「测试用到了这个模块」摆成同一档。
+        if any(not under_dirs(c.path, self.test_dirs()) for c in frames):
+            return frames
+        imported = self._import_candidates(failure, frames, repo_real)
+        # 源码候选排在测试文件那一帧前面 —— 「按可疑度排序」，而断言所在的
+        # 那一行恰恰是最不可能藏着缺陷的地方（它只是发现问题的地方）。
+        return imported + frames
+
+    def _import_candidates(self, failure: Failure,
+                           frames: list[SourceCandidate],
+                           repo_real: str) -> list[SourceCandidate]:
+        """从测试文件 import 了什么，反推嫌疑源码文件。零 LLM，确定性。
+
+        动机是实测：纯断言失败下 Detector 的输入里**一个产品代码文件都没有**
+        （它无工具、单步，连仓库有哪些目录都看不到），只能按包名猜路径。同一
+        个失败连跑三次给出 `cart.py` / `cart.py` / `src/cart.py`，真实路径是
+        `src/shopcart/cart.py` —— 三次都没对，而按分段后缀判定前两个算命中、
+        第三个算未命中。那一列量到的是运气。
+
+        而证据一直躺在测试文件顶上：`from shopcart.cart import most_expensive`
+        既给出模块，也给出被测符号。
+
+        三步：
+        1. ast 解析测试文件的 import，取模块名与导入的符号名；
+        2. 模块名按**分段后缀**匹配仓库里的 .py（`shopcart.cart` →
+           `src/shopcart/cart.py`），src 布局下裸拼 `repo / 模块路径` 找不到，
+           那正是模型猜不中的那段前缀；
+        3. 断言文本里点过名的符号，它所在的模块排前面，并把行号定到那个符号
+           的 def 行 —— 只给文件不给符号的话，一个 import 五个模块的测试
+           产出的是一份没有次序的清单，跟没有锚点差不了多少。
+
+        故意不处理相对 import（`from .cart import x`）：解析它要知道测试文件
+        自己的包名，而 rootdir / pythonpath / 有没有 __init__.py 都会改变答案，
+        猜错就是给 Detector 一个不存在的候选 —— 那比不给候选更糟（同
+        `_resolve` 的存在性检查）。测试文件用相对 import 本来也罕见。
+        """
+        out: list[tuple[int, int, SourceCandidate]] = []
+        haystack = f"{failure.message}\n{failure.trace}"
+        index = _repo_modules(repo_real)
+        seen: set[str] = set()
+        for order, frame in enumerate(frames):
+            src = _read_text(Path(repo_real) / frame.path)
+            if src is None:
+                continue
+            for module, names in _imports_of(src):
+                entry = index.get(module)
+                if entry is None:
+                    continue
+                # 被失败文本点过名的符号 —— 用它同时定名次、追转发、定行号
+                named = [n for n in names if _names_in(n, haystack)]
+                path, line, fn = _anchor_for(repo_real, entry, named, index)
+                # 去重按**追完之后**的路径：同一个包的两条 import 会汇到同一
+                # 个实现文件，按入口去重的话它会重复出现在候选列表里
+                if path in seen or under_dirs(path, self.test_dirs()):
+                    continue
+                seen.add(path)
+                # 排序键：点名数降序（负号），其次保持 import 出现顺序，
+                # 让「没被点名」的候选仍然进列表、只是靠后
+                out.append((-len(named), order * 1000 + len(out),
+                            SourceCandidate(path=path, line=line, frame=fn,
+                                            origin="import")))
+        out.sort(key=lambda t: (t[0], t[1]))
+        return [c for _, _, c in out]
