@@ -283,3 +283,68 @@ async def test_giveup_limit_one_gives_up_immediately(buggy_repo):
         out = await fix_node(st, client=client)
         assert client.calls == 1
         assert out["abort_reason"] == "empty_diff_giveup"
+
+
+# —— 改动落在被 .gitignore 忽略的路径上 ——
+
+_IGNORED_NEW_FILE = """--- /dev/null
++++ b/build/helper.py
+@@ -0,0 +1,2 @@
++def helper():
++    return 1
+"""
+
+
+class _Recording(_Scripted):
+    """把每一轮收到的 messages 存下来 —— 要断言的正是发回给模型的那句话。"""
+
+    def __init__(self, turns):
+        super().__init__(turns)
+        self.seen: list[list[str]] = []
+
+    async def stream(self, messages, tools):
+        self.seen.append([str(m.content or "") for m in messages])
+        async for c in super().stream(messages, tools):
+            yield c
+
+
+async def test_feedback_tells_the_truth_when_the_change_is_gitignored(
+        buggy_repo):
+    """`--exclude-standard` 让被 gitignore 的新文件恒计 0 行。
+
+    行为本身站得住（那个文件确实交付不了 —— git add 会以 1 退出），但反馈
+    文案对模型说的是「你没有对任何文件做出修改」，那是一句假话：它改了，
+    只是改在了一个交付不到的地方。模型照这句话去做只会再改一次同样的东西，
+    一路重试到 giveup。
+    """
+    with Worktree(buggy_repo, run_id="r1") as wt:
+        (wt.path / ".gitignore").write_text("build/\n", encoding="utf-8")
+        st = _state(buggy_repo, wt, fix_guard_retries=1, guard_giveup_limit=3)
+        client = _Recording([
+            _tool("apply_patch", json.dumps({"diff": _IGNORED_NEW_FILE})),
+            _text("已修复")])
+
+        out = await fix_node(st, client=client)
+
+        assert (wt.path / "build" / "helper.py").is_file(), "前提没成立：补丁没落地"
+        assert out["diff_lines"] == 0
+        assert out["guard_hits"], "行为不变：交付不了的改动仍然按空 diff 处理"
+        feedback = "\n".join(m for turn in client.seen for m in turn)
+        assert ".gitignore" in feedback, feedback
+        assert "交付不了" in feedback, feedback
+        assert "你没有对任何文件做出修改" not in feedback, \
+            "它改了，只是改在了一个交付不到的地方 —— 这句话是假的"
+
+
+async def test_a_real_empty_diff_still_gets_the_plain_feedback(buggy_repo):
+    """区分度：真的一个字没改时，文案不许换成「落在被忽略的路径上」。"""
+    with Worktree(buggy_repo, run_id="r1") as wt:
+        (wt.path / ".gitignore").write_text("build/\n", encoding="utf-8")
+        st = _state(buggy_repo, wt, fix_guard_retries=1, guard_giveup_limit=3)
+        client = _Recording([_text("已修复")])
+
+        await fix_node(st, client=client)
+
+        feedback = "\n".join(m for turn in client.seen for m in turn)
+        assert "你没有对任何文件做出修改" in feedback
+        assert ".gitignore" not in feedback, feedback

@@ -20,6 +20,14 @@ _EMPTY_FEEDBACK = (
     "你没有对任何文件做出修改。只说「已修复」是无效的 —— "
     "请先用 read_file 确认文件当前的真实内容，再用 apply_patch 提交具体改动。")
 
+# 改动落在被 .gitignore 盖住的路径上时**不能**发上面那句：模型确实改了文件，
+# 说它「没有对任何文件做出修改」是一句假话，而模型照这句话去做只会再改一次
+# 同样的东西，一路重试到 giveup。说实话它才有机会换个地方。
+_IGNORED_FEEDBACK = (
+    "你的改动落在被 .gitignore 忽略的路径上（{paths}），这些文件交付不了 —— "
+    "交付分支只收 git 跟踪得到的文件，被忽略的路径 `git add` 会直接拒绝。"
+    "请把修复写到不被忽略的路径上，或者改已有的源文件。")
+
 _HUGE_FEEDBACK = (
     "你的改动范围过大（{lines} 行，上限 {limit} 行），疑似整文件重写。"
     "改动已被回滚。请只改必要的那几行，用最小的 diff 修复问题。")
@@ -49,6 +57,11 @@ async def _diff_lines(sandbox: LocalSandbox, touched: set[str]) -> int:
     （__pycache__、覆盖率文件、日志），把它们算进来等于让 empty_diff 这道
     守卫从此永不触发。touched 是 ApplyPatchTool 的记账，是 agent 唯一的修改
     手段 —— 与 Worktree.commit 「绝不用 git add -A」是同一条理由、同一份名单。
+
+    `--exclude-standard` 的代价：被 .gitignore 盖住的新文件恒计 0 行。这一条
+    是**有意**保留的 —— 那个文件交付不了（`git add` 对被忽略的路径直接以 1
+    退出，实测），算成有效改动只会把问题推到交付那一步再炸，而那一步能给模型
+    的反馈只剩一次 run 的结论。代价必须由文案兜住：见 `_ignored_paths`。
     """
     total = _sum_numstat(
         (await sandbox.exec(["git", "diff", "--numstat"], 30.0)).stdout)
@@ -69,6 +82,21 @@ async def _diff_lines(sandbox: LocalSandbox, touched: set[str]) -> int:
             30.0)
         total += _sum_numstat(added.stdout)
     return total
+
+
+async def _ignored_paths(sandbox: LocalSandbox, touched: set[str]) -> list[str]:
+    """`touched` 里被 .gitignore 盖住的那些路径。
+
+    `--ignored` 与 `--exclude-standard` 一起用才是「只列被忽略的」——
+    单给 `--ignored` 时 git 会连普通的未跟踪文件一起列出来，那样任何一次
+    新建文件都会被说成「落在被忽略的路径上」。
+    """
+    if not touched:
+        return []
+    listed = await sandbox.exec(
+        ["git", "ls-files", "--others", "--ignored", "--exclude-standard",
+         "--", *sorted(touched)], 30.0)
+    return [ln.strip() for ln in listed.stdout.splitlines() if ln.strip()]
 
 
 async def _rollback(sandbox: LocalSandbox) -> None:
@@ -155,7 +183,17 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
             lines = await _diff_lines(sandbox, touched)
 
             if lines == 0:
-                kind, feedback = "empty_diff", _EMPTY_FEEDBACK
+                # 守卫种类仍是 empty_diff（可交付的改动确实是零，报告与 stats
+                # 的口径不变），但反馈得说实话：模型改了文件，只是改到了一个
+                # 交付不到的地方。事实另记一条，复盘时这两种零分得开。
+                kind = "empty_diff"
+                ignored = await _ignored_paths(sandbox, touched)
+                if ignored:
+                    trace.fact("ignored_paths", ignored)
+                    feedback = _IGNORED_FEEDBACK.format(
+                        paths="、".join(ignored))
+                else:
+                    feedback = _EMPTY_FEEDBACK
             elif lines > cfg.max_diff_lines:
                 kind = "huge_diff"
                 feedback = _HUGE_FEEDBACK.format(
