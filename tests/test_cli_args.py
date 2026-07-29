@@ -221,6 +221,19 @@ def test_mutate_subcommand_exists_and_states_its_positioning():
     assert "不是基准" in text
 
 
+def test_every_subcommand_that_runs_tests_documents_the_interpreter():
+    """run / mine / mutate 三条路都在目标项目里真跑测试，三份 --help 都要说。
+
+    源码里那段 `_TEST_PYTHON_HELP` 的注释写的就是「三个子命令……都吃这一段」，
+    而 mutate 的 parser 当初没接上 —— 注释说了一件代码没做的事。这一条按
+    子命令逐个断言，漏接哪一个都当场红。
+    """
+    for cmd in ("run", "mine", "mutate"):
+        h = _sub_help(cmd)
+        assert "AIFIX_TEST_PYTHON" in h, cmd
+        assert "aifix自己的解释器" in h, cmd
+
+
 def test_mutate_flags():
     args = build_parser().parse_args(
         ["mutate", ".", "--max-tasks", "3", "--scope", "full"])

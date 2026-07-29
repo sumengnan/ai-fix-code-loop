@@ -309,7 +309,9 @@ def build_parser() -> argparse.ArgumentParser:
         "mutate", help="人造变异生成冒烟任务集",
         description="产出的是冒烟集，不是基准。变异的分布与真实 bug 不同——"
                     "它便宜、确定、可任意规模，用来验证链路本身是否工作；"
-                    "拿它跨模型比高低是过度解读。")
+                    "拿它跨模型比高低是过度解读。",
+        epilog=_TEST_PYTHON_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     mut.add_argument("repo", nargs="?", default=".")
     mut.add_argument("--max-tasks", type=int, default=10,
                      help="最多产出多少个任务")
