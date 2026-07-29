@@ -31,9 +31,20 @@ class Diagnosis(BaseModel):
 
 
 def build_prompt(failure: Failure, candidates: list[SourceCandidate]) -> str:
+    """候选的来源必须写在行里，不能只列路径。
+
+    纯断言失败下候选来自测试文件的 import（`SourceCandidate.origin`），证据
+    比栈帧弱一档：「测试 import 了这个模块」不等于「缺陷在这个模块」。不标出
+    来，模型会把两者当同一回事 —— 而这些路径**是准的**（确定性推出来的），
+    于是它会拿一个只说明「用到了」的事实去支撑「缺陷在这」的结论。
+
+    `path` 一律照原样给出（相对 repo 根）。让模型自己改写路径形式，就是把
+    定位准确率变成书写风格的函数 —— 那个坑记在 eval/runner.locate_hit 里。
+    """
     if candidates:
         cand_text = "\n".join(
-            f"  {i + 1}. {c.path}:{c.line}  在 {c.frame}()"
+            f"  {i + 1}. {c.path}:{c.line}  在 {c.frame or '?'}()"
+            f"{'' if c.origin == 'traceback' else '  ← 测试 import 的模块，非栈帧'}"
             for i, c in enumerate(candidates))
     else:
         cand_text = "  （未能从栈帧定位到 repo 内的源码）"
@@ -41,6 +52,7 @@ def build_prompt(failure: Failure, candidates: list[SourceCandidate]) -> str:
         f"失败用例：{failure.test_id}\n"
         f"断言信息：{failure.message}\n\n"
         f"嫌疑位置（按可疑度排序，最深的栈帧在前）：\n{cand_text}\n\n"
+        f"suspect_file 请从上面的路径里原样选一条，不要改写形式。\n\n"
         f"完整 traceback：\n{failure.trace}\n")
 
 

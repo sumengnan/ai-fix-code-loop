@@ -225,7 +225,189 @@ def test_locate_source_on_a_plain_assertion_yields_the_test_frame(buggy_repo):
     能拿到的只有测试文件那一帧，那也得拿到——它至少给出准确的行号。
     """
     cands = _frames(buggy_repo, _REAL_ASSERTION)
-    assert [(c.path, c.line) for c in cands] == [("tests/test_calc.py", 5)]
+    frames = [c for c in cands if c.origin == "traceback"]
+    assert [(c.path, c.line) for c in frames] == [("tests/test_calc.py", 5)]
+
+
+# ======== 无栈帧可锚时，退到测试文件的 import ========
+
+def test_plain_assertion_falls_back_to_what_the_test_imports(buggy_repo):
+    """栈上没有源码帧时，去看测试文件 import 了什么——那是真证据，不是猜。
+
+    这条挡的是实测行为：纯断言失败下 Detector 的输入里一个产品代码文件都
+    没有（它连仓库有哪些目录都不知道），只能按包名猜路径。同一个失败连跑
+    三次给出 `cart.py` / `cart.py` / `src/cart.py`，真实路径是
+    `src/shopcart/cart.py`——三次都没对，而按分段后缀判定，前两个算命中、
+    第三个算未命中。量到的是运气，不是定位能力。
+
+    `tests/test_calc.py` 顶上写着 `from calc import add`，`calc.py` 就在
+    repo 里——这是确定性的、零 LLM 的锚点。
+    """
+    cands = _frames(buggy_repo, _REAL_ASSERTION)
+    imported = [c for c in cands if c.origin == "import"]
+    assert [c.path for c in imported] == ["calc.py"]
+    # 不止给出文件：被失败点名的符号要定位到它的 def 行，锚点才和栈帧等价
+    assert (imported[0].line, imported[0].frame) == (1, "add")
+    # 源码候选排在测试文件那一帧前面——「按可疑度排序」，测试文件最不可疑
+    assert cands[0].path == "calc.py", [c.path for c in cands]
+
+
+def test_import_fallback_stays_out_of_the_way_when_frames_exist(tmp_path):
+    """栈帧解出来了就别掺 import——那是更弱的证据，会稀释真锚点。"""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src/mod.py").write_text("def outer(x):\n    pass\n",
+                                         encoding="utf-8")
+    (tmp_path / "tests/test_mod.py").write_text(
+        "from src.mod import outer\n", encoding="utf-8")
+
+    cands = _frames(tmp_path, _REAL_PROPAGATED)
+    assert cands, "真实 traceback 一帧都没解出来"
+    assert all(c.origin == "traceback" for c in cands), \
+        [(c.path, c.origin) for c in cands]
+
+
+def test_import_fallback_drops_stdlib_and_third_party(tmp_path):
+    """`import json` 不是锚点。给 Detector 一个错候选比不给更糟。"""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "calc.py").write_text("def add(a, b):\n    return a\n",
+                                      encoding="utf-8")
+    (tmp_path / "tests/test_calc.py").write_text(
+        "import json\n"
+        "import pytest\n"
+        "from calc import add\n\n\n"
+        "def test_add():\n"
+        "    assert add(2, 3) == 5\n", encoding="utf-8")
+
+    trace = ("def test_add():\n"
+             ">       assert add(2, 3) == 5\n"
+             "E       AssertionError\n\n"
+             "tests/test_calc.py:6: AssertionError")
+    imported = [c for c in _frames(tmp_path, trace) if c.origin == "import"]
+    assert [c.path for c in imported] == ["calc.py"], \
+        [c.path for c in imported]
+
+
+def test_import_fallback_ranks_symbols_the_failure_names_first(tmp_path):
+    """一个测试文件 import 五个模块时，排序才是这条路有没有用的关键。
+
+    断言文本里点了名的符号，它所在的模块最可疑——不排序的话
+    Detector 拿到的是一份没有次序的清单，跟没有锚点差不了多少。
+    """
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "cart.py").write_text(
+        "def subtotal(items):\n    return 0\n\n\n"
+        "def most_expensive(items, n):\n    return []\n", encoding="utf-8")
+    (tmp_path / "fmt.py").write_text("def money(x):\n    return x\n",
+                                     encoding="utf-8")
+    (tmp_path / "tests/test_cart.py").write_text(
+        "from fmt import money\n"
+        "from cart import subtotal, most_expensive\n\n\n"
+        "def test_rank():\n"
+        "    assert most_expensive([], 1) == []\n", encoding="utf-8")
+
+    trace = ("def test_rank():\n"
+             ">       assert most_expensive([], 1) == []\n"
+             "E       AssertionError\n\n"
+             "tests/test_cart.py:5: AssertionError")
+    imported = [c for c in _frames(tmp_path, trace) if c.origin == "import"]
+    assert imported[0].path == "cart.py", [c.path for c in imported]
+    # 定位到被点名的那个函数，不是文件里的第一个
+    assert (imported[0].line, imported[0].frame) == (5, "most_expensive")
+
+
+def test_import_fallback_finds_src_layout_packages(tmp_path):
+    """`from shopcart.cart import x` → `src/shopcart/cart.py`。
+
+    src 布局下模块路径和仓库路径差一段前缀，裸拼 `repo / 模块路径` 找不到。
+    这正是实测里模型猜 `cart.py` / `src/cart.py` 都没猜中的那段前缀。
+    """
+    (tmp_path / "src/shopcart").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src/shopcart/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src/shopcart/cart.py").write_text(
+        "def most_expensive(items, n):\n    return []\n", encoding="utf-8")
+    (tmp_path / "tests/test_cart.py").write_text(
+        "from shopcart.cart import most_expensive\n", encoding="utf-8")
+
+    trace = ("def test_rank():\n"
+             ">       assert most_expensive([], 1) == []\n"
+             "E       AssertionError\n\n"
+             "tests/test_cart.py:5: AssertionError")
+    imported = [c for c in _frames(tmp_path, trace) if c.origin == "import"]
+    assert [c.path for c in imported] == ["src/shopcart/cart.py"], \
+        [c.path for c in imported]
+
+
+def test_import_fallback_follows_package_re_exports(tmp_path):
+    """`from shopcart import x` 落在 `__init__.py` 上等于没定位到。
+
+    这是实测发现的：ai-fix-demo 的测试写的是 `from shopcart import
+    most_expensive`，而 `src/shopcart/__init__.py` 只有一行
+    `from .cart import ...` 转发，逻辑全在 `src/shopcart/cart.py`。停在
+    `__init__.py` 给出的是一个**不含任何逻辑**的文件，比模型自己猜好不了
+    多少，gold_files 也对不上。
+
+    包内相对 import 在这里是可解的（与测试文件里的相对 import 不同）：
+    `__init__.py` 自己的目录就是包目录，`.cart` 就是同级的 cart.py，
+    纯路径运算，不需要猜 rootdir。
+    """
+    (tmp_path / "src/shopcart").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src/shopcart/__init__.py").write_text(
+        "from .cart import most_expensive, subtotal\n\n"
+        '__all__ = ["most_expensive", "subtotal"]\n', encoding="utf-8")
+    (tmp_path / "src/shopcart/cart.py").write_text(
+        "def subtotal(items):\n    return 0\n\n\n"
+        "def most_expensive(items, n):\n    return []\n", encoding="utf-8")
+    (tmp_path / "tests/test_cart.py").write_text(
+        "from shopcart import most_expensive\n", encoding="utf-8")
+
+    trace = ("def test_rank():\n"
+             ">       assert most_expensive(items, 2) == []\n"
+             "E       AssertionError\n\n"
+             "tests/test_cart.py:52: AssertionError")
+    imported = [c for c in _frames(tmp_path, trace) if c.origin == "import"]
+    assert [c.path for c in imported] == ["src/shopcart/cart.py"], \
+        [c.path for c in imported]
+    assert (imported[0].line, imported[0].frame) == (5, "most_expensive")
+
+
+def test_import_fallback_survives_a_re_export_cycle(tmp_path):
+    """互相转发的两个模块不能把定位转成死循环。"""
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "pkg/__init__.py").write_text(
+        "from .a import boom\n", encoding="utf-8")
+    (tmp_path / "pkg/a.py").write_text("from .b import boom\n",
+                                       encoding="utf-8")
+    (tmp_path / "pkg/b.py").write_text("from .a import boom\n",
+                                       encoding="utf-8")
+    (tmp_path / "tests/test_x.py").write_text("from pkg import boom\n",
+                                              encoding="utf-8")
+
+    trace = ("def test_x():\n"
+             ">       assert boom() == 1\n"
+             "E       AssertionError\n\n"
+             "tests/test_x.py:3: AssertionError")
+    imported = [c for c in _frames(tmp_path, trace) if c.origin == "import"]
+    # 追不到定义，但必须**终止**并给出追到的最后一处
+    assert imported and imported[0].path.startswith("pkg/"), \
+        [c.path for c in imported]
+
+
+def test_import_fallback_never_walks_into_venv(tmp_path):
+    """仓库里的 `.venv` 有上万个 .py，且它们一个都不是产品代码。"""
+    (tmp_path / ".venv/lib/python3.14/site-packages/calc").mkdir(parents=True)
+    (tmp_path / ".venv/lib/python3.14/site-packages/calc/__init__.py").write_text(
+        "def add(a, b):\n    return a\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_calc.py").write_text(
+        "from calc import add\n", encoding="utf-8")
+
+    trace = ("tests/test_calc.py:5: AssertionError")
+    imported = [c for c in _frames(tmp_path, trace) if c.origin == "import"]
+    assert imported == [], [c.path for c in imported]
 
 
 def test_locate_source_still_parses_native_tracebacks(buggy_repo):

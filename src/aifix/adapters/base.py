@@ -20,10 +20,23 @@ class Failure:
 
 @dataclass(frozen=True)
 class SourceCandidate:
-    """从栈帧还原出的嫌疑源码位置，按可疑度排序（越靠前越可疑）。"""
+    """嫌疑源码位置，按可疑度排序（越靠前越可疑）。
+
+    origin 是**证据强度**，不是来源标签：
+
+    - `traceback`：失败真的穿过这一帧。最强的证据。
+    - `import`：测试文件 import 了它。弱一档 —— 「测试用到了这个模块」不
+      等于「缺陷在这个模块」。纯断言失败时栈上根本没有源码帧（被调函数正常
+      返回了），这是唯一还拿得到的确定性锚点。
+
+    两者必须分得开。合并成一个列表交给下游，`suspect_anchored` 就答不了
+    「这次定位到底是靠什么」，跨 run 也统计不出「退到 import 之后定位准确
+    率动没动」—— 而那正是引入这条退路时唯一要回答的问题。
+    """
     path: str
     line: int
     frame: str
+    origin: str = "traceback"
 
 
 @dataclass(frozen=True)

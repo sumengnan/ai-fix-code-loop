@@ -81,6 +81,47 @@ async def test_detect_records_traceback_miss(buggy_repo, tmp_path):
     assert hit and hit[0]["value"] is False
 
 
+async def test_import_anchored_detect_is_not_recorded_as_a_guess(
+        buggy_repo, tmp_path):
+    """import 推出来的候选也是锚点——但要和栈帧锚点分得开。
+
+    `tests/test_calc.py` 写着 `from calc import add`，所以纯断言失败下
+    Detector 不再是无锚猜测，suspect_unanchored 不该再写。但这两种锚点
+    强度不同（栈帧是「失败真的穿过这里」，import 只是「测试用到了它」），
+    trace 里必须留得下这个区别，否则跨 run 统计分不清定位是靠什么来的，
+    也没法回答「退到 import 之后定位准确率动没动」。
+    """
+    with Worktree(buggy_repo, run_id="r1") as wt:
+        trace = RunTrace(tmp_path, run_id="r1")
+        # 纯断言失败：栈上只有测试文件那一帧
+        st = _state(buggy_repo, wt, trace,
+                    "tests/test_calc.py:5: AssertionError")
+        await detect_node(st, client=_Scripted([_text(_DIAG)]))
+        trace.close()
+
+    facts = _facts(tmp_path)
+    keys = {f["key"] for f in facts}
+    assert "suspect_unanchored" not in keys, "有 import 锚点就不是盲猜"
+    kind = [f for f in facts if f["key"] == "suspect_anchor"]
+    assert kind and kind[0]["value"] == "import", facts
+
+
+async def test_traceback_anchor_is_labelled_as_such(buggy_repo, tmp_path):
+    """有源码栈帧时锚点种类是 traceback —— 与 import 那条互为对照。
+
+    只断言 import 那一条的话，一个恒返回 "import" 的实现也能通过。
+    """
+    with Worktree(buggy_repo, run_id="r1") as wt:
+        trace = RunTrace(tmp_path, run_id="r1")
+        st = _state(buggy_repo, wt, trace,
+                    f'File "{wt.path}/calc.py", line 2, in add\n')
+        await detect_node(st, client=_Scripted([_text(_DIAG)]))
+        trace.close()
+
+    kind = [f for f in _facts(tmp_path) if f["key"] == "suspect_anchor"]
+    assert kind and kind[0]["value"] == "traceback"
+
+
 async def test_detect_records_parse_failure(buggy_repo, tmp_path):
     """模型没吐出合法 JSON 时也要留痕，否则 suspect_in_traceback 的分母不可信。"""
     with Worktree(buggy_repo, run_id="r1") as wt:

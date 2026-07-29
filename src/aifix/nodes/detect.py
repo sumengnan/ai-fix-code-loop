@@ -36,15 +36,23 @@ async def detect_node(state: AifixState, client: Any = None) -> dict[str, Any]:
         outcome = await consume(loop.run(build_prompt(failure, candidates)))
 
     # 候选里有没有**非测试**文件，决定了 suspect_file 是推断还是猜测。
-    # 纯断言失败的 traceback 里只有测试文件那一帧，此时模型只能按包名猜路径，
-    # 猜错是常态 —— 下游的 files_outside_suspect 据此决定要不要发声。
-    anchored = any(not under_dirs(c.path, adapter.test_dirs())
-                   for c in candidates)
+    # 一个源码候选都没有时模型只能按包名猜路径，猜错是常态 —— 下游的
+    # files_outside_suspect 据此决定要不要发声。
+    sources = [c for c in candidates
+               if not under_dirs(c.path, adapter.test_dirs())]
+    anchored = bool(sources)
+    # 锚点**种类**要与「有没有锚点」分开记。两种强度不同：traceback 是
+    # 「失败真的穿过这里」，import 只是「测试用到了这个模块」。合成一个
+    # 布尔值的话，跨 run 回答不了「退到 import 之后定位准确率动没动」——
+    # 而那是引入 import 退路时唯一要回答的问题。
+    anchor = sources[0].origin if sources else None
 
     diagnosis = parse_diagnosis(outcome.text) if outcome.ok else None
     trace = trace_of(state)
     trace.record_events(outcome.events)
-    if not anchored:
+    if anchor is not None:
+        trace.fact("suspect_anchor", anchor)
+    else:
         # 落成事实而不是只在信号里体现：复盘时要能一眼看出这次诊断是无锚
         # 猜测，跨 run 统计也才分得清「模型定位差」与「压根没东西可定位」。
         trace.fact("suspect_unanchored", True)
