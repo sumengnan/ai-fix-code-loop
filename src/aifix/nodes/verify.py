@@ -52,10 +52,24 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
     baseline = FailureSet({i: state["_failures"][i]
                            for i in state["baseline_ids"]
                            if i in state["_failures"]})
-    current = await run_full_suite(worktree_path, adapter)
+    # `require_report=True` 两处都不能省，这是判定的取证环节：
+    #
+    # 全量这一份缺失 → current 是空集合 → 「目标不再失败、也没有新失败」 →
+    # 判 BETTER → 一个从未被验证过的补丁被 commit 进交付分支，报告写「已修复」。
+    # 「唯一有资格说修好了的是最笨的那个组件」在这里被击穿：最笨的那个没开口，
+    # 判定照做了。
+    #
+    # 复跑那一份缺失更反 → filter_flaky 把空集合读成「重跑就绿」，于是**真的
+    # 被这个补丁弄红的用例**全部划进抖动、从 effective 里剔除，判定回到
+    # BETTER。不是没验证，是把反证据当成了正证据。
+    #
+    # 代价是这一轮直接抛出去、run 记成 crash（退出码 1）。这正是想要的：
+    # 环境坏了的话后面每一轮都会坏，快速失败比匀速烧钱好。
+    current = await run_full_suite(worktree_path, adapter, require_report=True)
 
     async def _rerun(ids: list[str]) -> FailureSet:
-        return await run_scoped(worktree_path, adapter, ids)
+        return await run_scoped(worktree_path, adapter, ids,
+                                require_report=True)
 
     confirmed, flaky = await filter_flaky(baseline, current, _rerun)
     # 抖动的用例从当前结果里剔除，避免它们把判定拖成 WORSE
@@ -82,8 +96,12 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
         f = worktree_path / p
         return f.read_text(encoding="utf-8") if f.is_file() else None
 
+    # suspect_anchored 缺省当 True：只有 detect_node 会写这个键，而它写的是
+    # 这一轮的真值。默认 False 会让所有绕过 detect 的路径（图那条、测试夹具）
+    # 悄悄关掉这一列信号——把「没人告诉我」读成「诊断不可信」是反的。
     sig = analyze({p: (wt.file_at_head(p), _now(p)) for p in touched},
-                  suspect=(state.get("diagnosis") or {}).get("suspect_file"))
+                  suspect=(state.get("diagnosis") or {}).get("suspect_file"),
+                  suspect_anchored=state.get("suspect_anchored", True))
 
     # commit 提到这里（而不是留在下面的 BETTER 分支里）：**它的返回值参与判
     # 定**，所以必须发生在写 verdict / 信号那几条 fact 之前，否则 facts.jsonl

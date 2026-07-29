@@ -267,6 +267,29 @@ async def test_scoped_run_does_not_clobber_the_full_report(buggy_repo):
         (buggy_repo / a.REPORT_NAME).unlink(missing_ok=True)
 
 
+async def test_baseline_refuses_to_read_a_dead_test_run_as_all_green(
+        buggy_repo, monkeypatch):
+    """baseline 的测试进程没跑成时必须抛，不能安静地产出一个空队列。
+
+    `run_full_suite` 默认容忍报告缺失，理由写在它的 docstring 里：「下一轮
+    verify 会重新跑」。那句话对 verify 成立，对 baseline **不成立** ——
+    baseline 一次 run 只跑一次，没有下一轮。它一旦返回空集合，队列就是空的，
+    整个 run 以「修复 0 / 0、全绿、没活干」收场，退出码 0。
+
+    这条路真实发生过：aifix 装成 uv tool 之后自带的解释器里没有 pytest，
+    `sys.executable -m pytest` 直接失败、一份报告都没写，而报告显示一切正常。
+    """
+    from aifix.nodes import baseline as baseline_mod
+    st = new_state(buggy_repo, AifixConfig(), run_id="r1")
+    st.update(preflight_node(st))
+    with Worktree(buggy_repo, run_id="r1") as wt:
+        st["worktree_path"] = str(wt.path)
+        monkeypatch.setattr(baseline_mod, "adapter_for",
+                            lambda name: _SilentAdapter())
+        with pytest.raises(RuntimeError, match="报告"):
+            await baseline_node(st)
+
+
 async def test_baseline_on_green_repo_yields_empty_queue(buggy_repo, fixed_source):
     (buggy_repo / "calc.py").write_text(fixed_source, encoding="utf-8")
     import subprocess

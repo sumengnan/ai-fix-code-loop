@@ -132,3 +132,100 @@ async def test_better_with_changes_still_commits(buggy_repo, monkeypatch):
         out = await verify_mod.verify_node(st)
 
     assert out["verdict"] == "better"
+
+
+class _SilentAdapter:
+    """一个测试进程跑不出报告的适配器：超时被杀 / 崩溃 / 依赖没装。
+
+    只实现 verify 这条路径用得到的部分，其余委托给真的 PytestAdapter。
+    """
+
+    def __init__(self):
+        from aifix.adapters.pytest_adapter import PytestAdapter
+        self._real = PytestAdapter()
+        self.name = "pytest"
+
+    def __getattr__(self, item):
+        return getattr(self._real, item)
+
+    def full_test_command(self):
+        import sys
+        return [sys.executable, "-c", ""]
+
+    def scoped_test_command(self, test_ids):
+        import sys
+        return [sys.executable, "-c", ""]
+
+
+async def test_verify_refuses_to_read_a_dead_test_run_as_all_green(
+        buggy_repo, monkeypatch):
+    """verify 的全量跑没产出报告时必须抛，绝不能判 BETTER。
+
+    这是「没跑成冒充全绿」三处里最贵的一处：空的 current 集合意味着
+    「目标用例不再失败、也没有新失败」，compare 直接判 BETTER，于是
+    **一个从未被验证过的补丁被 commit 进交付分支**，报告写「已修复」。
+    「系统里唯一有资格说修好了的组件是最笨的那个」这条主张就是在这里被
+    击穿的——最笨的那个压根没开口，判定却照做了。
+    """
+    from aifix.config import AifixConfig
+    from aifix.delivery import Worktree
+    from aifix.graph import new_state
+    from aifix.nodes import verify as verify_mod
+    from aifix.nodes.preflight import preflight_node
+
+    import pytest as _pytest
+    tid = "tests/test_calc.py::test_add"
+    monkeypatch.setattr(verify_mod, "adapter_for", lambda name: _SilentAdapter())
+
+    with Worktree(buggy_repo, run_id="v3") as wt:
+        (wt.path / "calc.py").write_text("def add(a, b):\n    return a + b\n",
+                                         encoding="utf-8")
+        st = new_state(buggy_repo, AifixConfig(), run_id="v3")
+        st.update(preflight_node(st))
+        st["worktree_path"] = str(wt.path)
+        st["baseline_ids"] = [tid]
+        st["_failures"] = _fs(tid).failures
+        st["current"] = tid
+        st["attempt"] = 1
+        st["touched"] = ["calc.py"]
+        with _pytest.raises(RuntimeError, match="报告"):
+            await verify_mod.verify_node(st)
+
+
+async def test_flaky_rerun_that_never_ran_is_not_evidence_of_flakiness(
+        buggy_repo, monkeypatch):
+    """复跑没产出报告时不能把确认回归判成抖动。
+
+    filter_flaky 拿空集合当「重跑就绿」：新增失败全部被划进 flaky、从
+    effective 里剔除，判定回到 BETTER —— 一个**真的弄红了别的用例**的补丁
+    被提交。三处里语义最反的一处：它不只是没验证，是把反证据当成了正证据。
+    """
+    from aifix.config import AifixConfig
+    from aifix.delivery import Worktree
+    from aifix.graph import new_state
+    from aifix.nodes import verify as verify_mod
+    from aifix.nodes.preflight import preflight_node
+
+    import pytest as _pytest
+    tid = "tests/test_calc.py::test_add"
+
+    async def _full_with_a_new_failure(*a, **k):
+        return _fs(tid, "tests/test_calc.py::test_identity")
+
+    # 全量跑正常产出（有一个新失败），只有复跑那一步跑不出报告
+    monkeypatch.setattr(verify_mod, "run_full_suite", _full_with_a_new_failure)
+    monkeypatch.setattr(verify_mod, "adapter_for", lambda name: _SilentAdapter())
+
+    with Worktree(buggy_repo, run_id="v4") as wt:
+        (wt.path / "calc.py").write_text("def add(a, b):\n    return a + b\n",
+                                         encoding="utf-8")
+        st = new_state(buggy_repo, AifixConfig(), run_id="v4")
+        st.update(preflight_node(st))
+        st["worktree_path"] = str(wt.path)
+        st["baseline_ids"] = [tid]
+        st["_failures"] = _fs(tid).failures
+        st["current"] = tid
+        st["attempt"] = 1
+        st["touched"] = ["calc.py"]
+        with _pytest.raises(RuntimeError, match="报告"):
+            await verify_mod.verify_node(st)

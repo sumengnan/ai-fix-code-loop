@@ -53,11 +53,16 @@ def detect_adapter(repo: Path) -> ProjectAdapter | None:
 def _check_report(worktree: Path, paths: list[Path], required: bool) -> None:
     """required 时至少要有一份报告，否则抛 —— 「没跑成」不能冒充「跑完了、全绿」。
 
-    parse_junit 对缺失报告的处理是安全跳过并返回空集合。对核心循环这是对的
-    （少一份报告不该让整个 run 崩掉，下一轮 verify 会重新跑）；但对挖任务是
-    致命的：空集合会被读成「全绿」，`red - green` 于是把 base 处所有红的用例
-    全部当成「红转绿」吐出来。报告缺失的真实含义是超时被杀 / 进程崩溃 /
-    沙箱执行失败，这时唯一安全的动作是让调用方知道并跳过。
+    parse_junit 对缺失报告的处理是安全跳过并返回空集合。这个默认曾经覆盖到
+    核心循环，理由写的是「少一份报告不该让整个 run 崩掉，下一轮 verify 会重新
+    跑」——**那句话站不住**：baseline 一次 run 只跑一次，没有下一轮；而 verify
+    这一轮的空集合当场就会被读成「全绿」并 commit。核心循环的三个调用点因此
+    都改成了 required（见 baseline_node 与 verify_node），默认值只留给别的
+    调用方。
+
+    挖任务那条路径上它一直是致命的：空集合会被读成「全绿」，`red - green`
+    于是把 base 处所有红的用例全部当成「红转绿」吐出来。报告缺失的真实含义是
+    超时被杀 / 进程崩溃 / 沙箱执行失败，这时唯一安全的动作是让调用方知道并跳过。
 
     消息里不点名具体文件：报告可以有多份（surefire 每个测试类一份），
     点名某一个在那种适配器上就是一句假话。
@@ -92,7 +97,9 @@ async def run_full_suite(worktree: Path, adapter: ProjectAdapter,
                          require_report: bool = False):
     """在 worktree 里跑全量测试并解析报告。零 LLM。
 
-    require_report 默认 False：核心循环容忍报告缺失（见 _check_report）。
+    require_report 默认 False，但核心循环的每一个调用点都显式传了 True
+    （见 _check_report）：默认值留给「少一份报告确实无所谓」的调用方，
+    产品路径上不存在这样的调用方。
     """
     sb = LocalSandbox(workspace=str(worktree))
     await sb.start()
@@ -126,9 +133,16 @@ async def run_scoped(worktree: Path, adapter: ProjectAdapter,
 
 
 async def baseline_node(state: AifixState) -> dict[str, Any]:
-    """跑一次全量，同时产出 id 列表与 Failure 对象——全量测试很贵，只跑这一次。"""
+    """跑一次全量，同时产出 id 列表与 Failure 对象——全量测试很贵，只跑这一次。
+
+    `require_report=True`：baseline 是整个 run 唯一一次「改动之前长什么样」
+    的测量，没有下一轮可以兜底。测试进程没跑成时返回空集合，队列就是空的，
+    run 以「修复 0 / 0、全绿、没活干」正常收场、退出码 0 —— 用户得到的是一句
+    「你的仓库没问题」，而真相是测试压根没跑起来。
+    """
     adapter = adapter_for(state["adapter_name"])
-    fs = await run_full_suite(Path(state["worktree_path"]), adapter)
+    fs = await run_full_suite(Path(state["worktree_path"]), adapter,
+                              require_report=True)
     ids = sorted(fs.ids)
     return {"baseline_ids": ids, "queue": list(ids),
             "_failures": dict(fs.failures)}
