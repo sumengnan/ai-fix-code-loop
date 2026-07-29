@@ -69,6 +69,16 @@ class PytestAdapter:
         # 进 gold_files 只会让 locate_hit 变得更难达成。
         return (".py",)
 
+    def test_selectors(self, test_files: list[str]) -> list[str]:
+        """pytest 的选择器就是路径本身，只需把非 `.py` 滤掉。
+
+        测试目录下的夹具（数据文件、快照、配置片段）会跟着测试一起进
+        test_files（见 eval/mine.split_paths），它们必须被 materialize
+        嫁接，但出现在 pytest 命令行上会让收集整轮中止（exit 4）——
+        一个用例都不跑，写出的是一份 tests="0" 的空报告。
+        """
+        return [p for p in test_files if PurePosixPath(p).suffix == ".py"]
+
     def make_test_id(self, classname: str, name: str, file: str | None) -> str:
         """把 junit 报告里的一条 <testcase> 还原成 pytest 认得的 node id。
 

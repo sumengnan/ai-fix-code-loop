@@ -157,12 +157,16 @@ async def verify_commit(repo: str, commit: str, base_commit: str,
     误读成模型不行** —— 先去源仓库确认那几个 target_test 在 C 处单跑与
     全量下的结果是否一致。
     """
-    # test_files 含测试目录下的非 .py 夹具（见 split_paths），它们能被
-    # materialize 嫁接，但不能出现在 pytest 命令行上。这一步要排在
-    # materialize **之前**：只改了夹具 + 源码的 commit（夹具进 test_files，
-    # 所以过得了 is_candidate）在这里 scope 为空，跑不出任何结论，先克隆一次
-    # 再返回 [] 是白花一次 `git clone --local`
-    scope = [p for p in test_files if PurePosixPath(p).suffix == ".py"]
+    # test_files 是**路径**，scoped_test_command 要的是**选择器**，中间这层
+    # 翻译只能由适配器做：pytest 上两者恰好长得一样（路径就是选择器，滤掉
+    # 非 .py 的夹具即可），Maven 上完全是两回事（`-Dtest=` 只认全限定类名）。
+    # 这里曾写死 `suffix == ".py"`，于是 Maven 任务的 test_files 全被滤空 →
+    # 在 materialize 之前就 return [] → on_progress 看到 n=0，与「这个 commit
+    # 没有可用用例」这个正常结果无法区分。
+    # 这一步要排在 materialize **之前**：只改了夹具 + 源码的 commit（夹具进
+    # test_files，所以过得了 is_candidate）在这里选择器为空，跑不出任何结论，
+    # 先克隆一次再返回 [] 是白花一次 `git clone --local`
+    scope = adapter.test_selectors(test_files)
     if not scope:
         return []
     workdir = Path(workdir)

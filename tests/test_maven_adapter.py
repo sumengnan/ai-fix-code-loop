@@ -162,6 +162,16 @@ def scoped_run(tmp_path_factory) -> dict:
 
 
 @pytest.fixture(scope="module")
+def class_selector_run(tmp_path_factory) -> dict:
+    """只给类名、不带 `#方法` 的 scoped 跑 —— test_selectors 产出的形状。"""
+    repo = _write_project(tmp_path_factory.mktemp("mvn_class_sel"))
+    proc = subprocess.run(
+        MavenAdapter().scoped_test_command(["demo.CalcTest"]),
+        cwd=repo, capture_output=True, text=True)
+    return {"repo": repo, "proc": proc}
+
+
+@pytest.fixture(scope="module")
 def stale_run(tmp_path_factory, full_run) -> dict:
     """把跑完全量的目录（含 target/）整个复制过来，再跑一次 scoped。
 
@@ -228,6 +238,35 @@ def test_source_suffixes_is_java_only():
     assert MavenAdapter().source_suffixes() == (".java",)
 
 
+def test_test_selectors_translate_paths_into_class_names():
+    """`src/test/java/demo/CalcTest.java` → `demo.CalcTest`。
+
+    这一步不能省成「路径原样递给 scoped_test_command」：surefire 的
+    `-Dtest=` 认的是全限定类名，喂路径进去不报错，只是一个用例都不跑。
+    只给类名不带 `#方法` 是合法的，跑整个类（本文件的 test_selector_for_a_whole_class_really_runs_it
+    用真 mvn 钉住了这一点）。
+
+    映射不出标准布局的一律丢掉，不猜：猜出来的类名同样不报错、同样一个
+    用例都不跑，而那时看起来像「这个 commit 没有可用用例」。
+    """
+    got = MavenAdapter().test_selectors([
+        "src/test/java/demo/CalcTest.java",
+        "src/test/java/RootTest.java",
+        "src/test/resources/fixture.json",      # 测试资源，不是类
+        "svc/src/test/java/demo/ModTest.java",  # 多模块，本适配器不映射
+    ])
+    assert got == ["demo.CalcTest", "RootTest"], got
+
+
+def test_test_selectors_reject_the_pytest_shaped_input():
+    """反向：`.py` 路径不是 Java 测试类，不能被放行。
+
+    没有这一条，一个「原样返回 test_files」的实现能过上面那条的前两项吗 ——
+    不能，但一个「只要有后缀就拼个类名」的实现能。
+    """
+    assert MavenAdapter().test_selectors(["tests/test_calc.py"]) == []
+
+
 def test_report_paths_is_empty_when_nothing_ran(tmp_path):
     """报告缺失返回空列表，不抛 —— require_report 那一层才负责判定。"""
     assert MavenAdapter().report_paths(tmp_path) == []
@@ -288,6 +327,27 @@ def test_scoped_id_is_runnable(scoped_run):
     assert root.get("tests") == "1", dict(root.attrib)
     fs = parse_junit(paths, a.make_test_id)
     assert fs.ids == {"demo.CalcTest#addWorks"}, sorted(fs.ids)
+
+
+def test_selector_for_a_whole_class_really_runs_it(class_selector_run):
+    """`-Dtest=demo.CalcTest`（不带 `#方法`）真的跑起那个类，且只跑那个类。
+
+    test_selectors 把改动过的测试文件翻成裸类名，整条挖掘链路的阶段 1/2 都
+    靠它。这个语法只在文档里读到不算数：对不上的选择器不会报错，surefire
+    安静地一个用例都不跑，报告里 tests="0"，上层读成「复跑全过了」。
+
+    两个方向都要有：CalcTest 的三个用例都跑到（不是 0），OtherTest 一个都
+    没跑到（不是退化成全量 —— 已实测 `-Dtest=demo.CalcTest#` 这种带空方法名
+    的写法会被 surefire 当成没有过滤条件，把整个套件跑一遍）。
+    """
+    a = MavenAdapter()
+    paths = a.report_paths(class_selector_run["repo"], scoped=True)
+    assert [p.name for p in paths] == ["TEST-demo.CalcTest.xml"], \
+        [p.name for p in paths] + [class_selector_run["proc"].stdout[-2000:]]
+    fs = parse_junit(paths, a.make_test_id)
+    assert fs.ran == {"demo.CalcTest#addWorks", "demo.CalcTest#divideBlowsUp",
+                      "demo.CalcTest#alsoPasses"}, sorted(fs.ran)
+    assert "demo.OtherTest#alwaysPasses" not in fs.ran, sorted(fs.ran)
 
 
 def test_scoped_run_does_not_see_the_previous_runs_reports(stale_run):

@@ -86,6 +86,27 @@ def test_source_suffixes_is_python_only():
     assert PytestAdapter().source_suffixes() == (".py",)
 
 
+def test_test_selectors_are_the_paths_themselves_minus_the_fixtures():
+    """pytest 侧「改动过的测试文件路径 → scoped 命令认得的选择器」是恒等映射。
+
+    这一条是**回归钉**：把这件事从 eval/mine 挪进适配器时，pytest 侧的行为
+    必须逐点不变。只测 Maven 的话，一个顺手把 pytest 也改坏的实现（比如返回
+    类名、或把夹具一并放行）照样能过 Maven 那几条。
+
+    夹具（测试目录下的非 `.py`）必须被丢掉：它们跟着测试进 test_files 是为了
+    被 materialize 嫁接，但出现在 pytest 命令行上会让收集整轮中止。
+    """
+    got = PytestAdapter().test_selectors(
+        ["tests/test_calc.py", "tests/data/golden.json", "conftest.py",
+         "tests/fixtures/x.sql"])
+    assert got == ["tests/test_calc.py", "conftest.py"], got
+
+
+def test_test_selectors_is_empty_when_only_fixtures_changed():
+    """全是夹具时返回空 —— verify_commit 靠这个空值在 materialize 之前收手。"""
+    assert PytestAdapter().test_selectors(["tests/data/golden.json"]) == []
+
+
 def test_locate_source_picks_deepest_repo_frame(buggy_repo):
     trace = (
         'Traceback (most recent call last):\n'

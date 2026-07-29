@@ -1,4 +1,5 @@
 import subprocess
+from pathlib import Path
 
 from aifix.adapters.maven_adapter import MavenAdapter
 from aifix.adapters.pytest_adapter import PytestAdapter
@@ -520,6 +521,69 @@ async def test_empty_scope_returns_before_materializing(history_repo, tmp_path,
                               tmp_path / "v")
     assert got == []
     assert calls == [], "scope 为空时不该 materialize（里面含一次 git clone）"
+
+
+_JAVA_TEST = "src/test/java/demo/CalcTest.java"
+
+
+@pytest.fixture
+def java_history_repo(tmp_path: Path) -> dict:
+    """一个 Maven 布局的 git 仓库，两个提交，**不跑 mvn**。
+
+    专门用来盯 verify_commit 交给 run_scoped 的 scope 长什么样：那一步在
+    materialize 之后、任何测试真正跑起来之前，把 run_scoped 换成间谍就够了。
+    真跑 mvn 的验收在 tests/test_maven_mining.py。
+    """
+    repo = tmp_path / "javahist"
+    (repo / "src/main/java/demo").mkdir(parents=True)
+    (repo / "src/test/java/demo").mkdir(parents=True)
+    (repo / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+    (repo / "src/main/java/demo/Calc.java").write_text(
+        "package demo;\npublic class Calc { int add(int a, int b)"
+        " { return a - b; } }\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    _commit(repo, "init")
+    base = _rev(repo, "HEAD")
+
+    (repo / "src/main/java/demo/Calc.java").write_text(
+        "package demo;\npublic class Calc { int add(int a, int b)"
+        " { return a + b; } }\n", encoding="utf-8")
+    (repo / _JAVA_TEST).write_text(
+        "package demo;\nclass CalcTest { void addWorks() {} }\n",
+        encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    _commit(repo, "fix: add 应为加法")
+    return {"path": repo, "base": base, "commit": _rev(repo, "HEAD")}
+
+
+async def test_scope_is_translated_into_adapter_selectors(
+        java_history_repo, tmp_path, monkeypatch):
+    """交给 run_scoped 的是**选择器**，不是改动过的测试文件路径。
+
+    两件事一起坏过：scope 写死 `suffix == ".py"`，Maven 任务的 test_files
+    全是 `.java` → scope 为空 → 在 materialize 之前就 return []，
+    on_progress 看到 n=0，与「这个 commit 没有可用用例」无法区分。而只把
+    后缀放宽（或添一个 `.java`）也不成立 —— scope 原样进
+    scoped_test_command，surefire 的 `-Dtest=` 不认路径，喂进去不报错，
+    只是一个用例都不跑。
+    """
+    import aifix.eval.mine as mine
+    from aifix.adapters.base import FailureSet
+
+    seen: list[list[str]] = []
+
+    async def spy_scoped(worktree, adapter, test_ids, **kw):
+        seen.append(list(test_ids))
+        # 阶段 1 拿不到红用例就会提前返回 —— 正合适，本条只看 scope
+        return FailureSet(failures={}, ran=frozenset())
+
+    monkeypatch.setattr(mine, "run_scoped", spy_scoped)
+    h = java_history_repo
+    got = await verify_commit(str(h["path"]), h["commit"], h["base"],
+                              [_JAVA_TEST], MavenAdapter(), tmp_path / "v")
+    assert got == []
+    assert seen == [["demo.CalcTest"]], seen
 
 
 def _commit(repo, msg: str) -> None:

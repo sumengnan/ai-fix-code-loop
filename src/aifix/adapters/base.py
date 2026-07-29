@@ -79,6 +79,18 @@ class ProjectAdapter(Protocol):
     # 依据，衡量的是 Detector 定位**源文件**的能力，掺进数据文件会稀释它。
     def source_suffixes(self) -> tuple[str, ...]: ...
 
+    # 把「本次 commit 改动过的测试文件路径」翻译成 scoped_test_command 认得的
+    # 选择器。这不是恒等映射，只是在 pytest 上恰好长得像恒等映射：pytest 的
+    # 选择器就是路径，surefire 的 `-Dtest=` 只认全限定类名。
+    # `eval/mine.verify_commit` 曾经写死 `suffix == ".py"` 当作这一步：Maven
+    # 任务的 test_files 全是 `.java` → 空 scope → 在 materialize 之前就
+    # return []，on_progress 看到的是 n=0，与「这个 commit 没有可用用例」这个
+    # 正常结果无法区分。而只把后缀放宽同样不成立 —— 路径原样进 `-Dtest=`，
+    # surefire 不报错，安静地一个用例都不跑。
+    # 翻不出来的路径（夹具、测试资源、非标准布局）一律丢掉，不猜：猜错的
+    # 选择器在两种适配器上都是静默的。
+    def test_selectors(self, test_files: list[str]) -> list[str]: ...
+
     def make_test_id(self, classname: str, name: str, file: str | None) -> str: ...
 
     def locate_source(self, failure: Failure, repo: Path) -> list[SourceCandidate]: ...

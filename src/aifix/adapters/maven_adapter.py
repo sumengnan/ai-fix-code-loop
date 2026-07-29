@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .base import Failure, SourceCandidate
 
@@ -22,6 +22,7 @@ _FOREIGN = ("org.junit.", "org.opentest4j.", "java.", "jdk.", "sun.")
 # 只映射标准布局的产品代码。多模块（`<module>` 各有自己的 src/main/java）
 # 是另一件事，这里不猜。
 _MAIN_SRC = "src/main/java"
+_TEST_SRC = "src/test/java"
 
 
 class MavenAdapter:
@@ -73,6 +74,31 @@ class MavenAdapter:
         # 栈帧映射到 src/main/java 下的 `.java`，把 pom.xml 塞进 gold_files
         # 等于给 Detector 记一个它按设计就拿不到的分。
         return (".java",)
+
+    def test_selectors(self, test_files: list[str]) -> list[str]:
+        """`src/test/java/demo/CalcTest.java` → `demo.CalcTest`。
+
+        `-Dtest=` 认的是全限定类名，不认路径。只给类名不带 `#方法` 是合法的，
+        跑整个类 —— 已实测（surefire 3.2.5）：`-Dtest=demo.CalcTest` 只跑
+        CalcTest 的用例，同工程的 OtherTest 一个都没跑到。
+
+        非 `.java`（src/test/resources 下的测试资源）与非标准布局
+        （多模块的 `<module>/src/test/java/...`）一律丢掉，与 locate_source
+        只映射 `src/main/java` 是同一条线：这里猜出来的类名不会让 mvn 报错，
+        surefire 只是安静地一个用例都不跑，而那副样子与「这个 commit 没有
+        可用用例」完全一样。
+        """
+        out: list[str] = []
+        for p in test_files:
+            pp = PurePosixPath(p)
+            if pp.suffix != ".java":
+                continue
+            try:
+                rel = pp.relative_to(_TEST_SRC)
+            except ValueError:
+                continue
+            out.append(".".join([*rel.parent.parts, rel.stem]))
+        return out
 
     def make_test_id(self, classname: str, name: str, file: str | None) -> str:
         """surefire 的 -Dtest= 选择器语法就是 `全限定类名#方法名`。

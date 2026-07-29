@@ -132,7 +132,7 @@ def test_adapter_matches_the_protocol_member_for_member(cls):
     import inspect
     # 防空转：成员列表是从协议对象上反射出来的，协议一旦改成别的写法
     # （比如成员只剩注解）这里会变成空列表，循环一次不跑而测试照样绿
-    assert len(_PROTOCOL_MEMBERS) == 8, _PROTOCOL_MEMBERS
+    assert len(_PROTOCOL_MEMBERS) == 9, _PROTOCOL_MEMBERS
     assert isinstance(getattr(cls, "name", None), str) and cls.name
     for member in _PROTOCOL_MEMBERS:
         impl = getattr(cls, member, None)
