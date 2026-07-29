@@ -98,10 +98,31 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
     # 住「一个字节都没碰」。这一道管的是另一件事 —— 碰了，但补丁被自己的反向
     # 补丁抵消了，touched 非空而暂存区为空。两者的 fact 分开记：复盘要区分的
     # 是模型的行为，不是判定的结果。
-    if verdict is Verdict.BETTER and not wt.commit(f"fix: {target}",
-                                                   paths=touched):
-        verdict = Verdict.SAME
-        trace.fact("patch_cancelled_out", target)
+    # 交付失败必须在这里落地，不能让它裸穿上去。`git add -- <路径列表>` 有两
+    # 种真实的失败形态（都实测过）：某条路径匹配不到（模型新建了 helper.py，
+    # 改完又发补丁把它删掉 —— touched 里还留着它）时 git 退 128 且**一条都不
+    # 暂存**；新文件命中 .gitignore 时退 1，而别的路径**已经**暂存了。
+    #
+    # 让 RuntimeError 上抛的后果不是「报错」而是**失联**：run_once 的 try 里
+    # 只有 finally: trace.close()，_cmd_run 也不接，`with Worktree` 退出把
+    # worktree 删掉，report_node 根本执行不到 —— 用户拿到一段裸 traceback，
+    # report.md 不存在，本次 run 前面几个 failure **已经提交进交付分支**的修复
+    # 也没人告诉他。这与「变异撞车时把半小时成果捞出来」是同一类问题的另一侧。
+    #
+    # 接住之后降级成 SAME 走既有的回滚通路：这一个 failure 没交付成，是事实；
+    # 别的 failure 已经交付的提交留在分支上，报告照常产出并写明出了什么事。
+    delivery_error: str | None = None
+    if verdict is Verdict.BETTER:
+        try:
+            committed = wt.commit(f"fix: {target}", paths=touched)
+        except RuntimeError as e:
+            verdict = Verdict.SAME
+            delivery_error = str(e)
+            trace.fact("delivery_failed", delivery_error)
+        else:
+            if not committed:
+                verdict = Verdict.SAME
+                trace.fact("patch_cancelled_out", target)
 
     trace.fact("verdict", verdict.value)
     if flaky:
@@ -166,10 +187,14 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
                 "consecutive_failures": 0, **common}
 
     wt.rollback()
+    # 交付失败要盖过 fix_node 记下的守卫原因：模型这一轮做对了（补丁打上去、
+    # 测试也转绿了），栽的是交付那一步，报的原因必须是这一步。
+    reason = ("交付失败（git add 未能暂存改动）" if delivery_error
+              else state.get("abort_reason") or "max_attempts")
     if state["attempt"] >= cfg.max_attempts:
         results.append({"test_id": target, "verdict": verdict.value,
                         "attempts": state["attempt"],
-                        "abort_reason": state.get("abort_reason") or "max_attempts"})
+                        "abort_reason": reason})
         return {"verdict": verdict.value, "current": None, "attempt": 0,
                 "results": results, "diagnosis": None,
                 "consecutive_failures": state.get("consecutive_failures", 0) + 1,

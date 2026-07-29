@@ -162,6 +162,25 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                     _backfill_in_flight_result(state)
                     break
 
+    except Exception as e:
+        # 报告是用户手里**唯一**的成果凭据：worktree 退出时就被删了，分支上
+        # 有没有东西、修好了几个、下一步该干什么，全写在报告里。异常裸穿出去
+        # 的后果不是「报错」而是失联 —— 这次 run 前面几个 failure 可能已经把
+        # 修复提交进交付分支了，而用户只看到一段调用栈。
+        #
+        # 所以这里不吞异常、只保证报告先落地：记成一次中止（abort_kind
+        # 另记，评测据此把它算作评测故障而不是模型没修好），渲染、落盘，
+        # 然后照常返回。退出码由 _cmd_run 负责，管道里区分得出来。
+        state["abort"] = state.get("abort") or f"运行异常中断：{type(e).__name__}：{e}"
+        state["abort_kind"] = state.get("abort_kind") or "crash"
+        trace.fact("crash", f"{type(e).__name__}: {e}")
+        trace.fact("abort", state["abort"])
+        trace.fact("abort_kind", "crash")
+        _backfill_in_flight_result(state)
+        _record_run_summary(trace, state)
+        state.update(report_node(state))
+        return state
+    else:
         _record_run_summary(trace, state)
         state.update(report_node(state))
     finally:
@@ -345,6 +364,10 @@ def _cmd_run(args) -> None:
         Path(args.repo).resolve(), config, run_id=uuid.uuid4().hex[:8],
         only_test=args.test, dry_run=args.dry_run))
     print(state["report_md"])
+    if state.get("abort_kind") == "crash":
+        # 报告先印出来（分支上可能真躺着可合并的修复），退出码再说明这次
+        # 是崩的：退 0 的话流水线里「跑完了」和「炸了但报告还在」没有区别。
+        raise SystemExit(1)
 
 
 def _cmd_mine(args) -> None:

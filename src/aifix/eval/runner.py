@@ -172,6 +172,12 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
         abort_reason=(row or {}).get("abort_reason") or state.get("abort"),
         origin=task.origin,
     )
+    if state.get("abort_kind") == "crash":
+        # run_once 不再让异常裸穿（那会连报告一起丢掉），改成记一次中止。
+        # 但对评测来说它仍是**评测故障**而不是模型没修好：把系统自己炸掉的
+        # 那一次算进修复成功率的分母，等于让被测模型替我们的 bug 背锅。
+        return result.model_copy(update={
+            "error": f"运行崩溃（评测故障，非模型失败）：{state.get('abort')}"})
     if state.get("abort_kind") == "wall":
         # 墙钟预算是评测调度器的属性，不是模型的属性：--parallel 8 时几个
         # 任务在同一台机器上抢 CPU 跑全量 pytest，墙钟耗尽的概率远高于

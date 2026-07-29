@@ -59,7 +59,15 @@ class Worktree:
         return _git(self.path, "diff").stdout
 
     def rollback(self) -> None:
-        """丢弃未提交的改动。已 commit 的轮次不受影响。"""
+        """丢弃未提交的改动。已 commit 的轮次不受影响。
+
+        先 `reset` 再 `checkout`：暂存了但没提交的内容同样属于「未提交的改
+        动」。少这一句时，`git checkout -- .` 是**从索引**往工作区拷 —— 半个
+        暂存区会被原样还原回工作区，等于没回滚。这不是理论边界：新文件命中
+        .gitignore 时 `git add` 以 1 退出，而同一条命令里别的路径已经暂存了
+        （实测），随后的回滚就落在这个状态上。
+        """
+        _git(self.path, "reset", "-q")
         _git(self.path, "checkout", "--", ".")
         _git(self.path, "clean", "-fd")
 
