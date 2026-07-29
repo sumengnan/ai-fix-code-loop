@@ -67,3 +67,35 @@ def test_price_map_rejects_tiered_format(monkeypatch):
 def test_price_map_accepts_flat_format(monkeypatch):
     monkeypatch.setenv("AIFIX_PRICE_MAP", '{"deepseek-v4-pro": [3.0, 6.0]}')
     assert AifixConfig().price_map["deepseek-v4-pro"] == [3.0, 6.0]
+
+
+def test_validation_errors_never_echo_the_api_key(monkeypatch):
+    """配置校验失败时，报错里不许出现 api_key —— 哪怕只是前缀。
+
+    真实踩到的：跑评测时 source 了整份 .env，里面的 HARNESS_* 被嵌套的
+    HarnessConfig（它的 env_prefix 正是 HARNESS_）一并吸走，其中一个值的格式
+    对不上，当场 ValidationError —— 而 pydantic 默认会把出错字段的
+    **input_value 整个回显**，那是一个 dict，里面躺着 api_key。
+
+    泄漏量取决于 pydantic 对 repr 的截断长度（实测约前 10 个字符），而那不是
+    任何人承诺过的东西。任何一次配置写错都会把这段东西打进 stderr、日志、
+    CI 输出 —— 密钥不该有这种出场方式。
+
+    修法是 model_config 里的 hide_input_in_errors=True。
+    """
+    import pydantic
+    canary = "sk-CANARY123456789"
+    for route in ("DETECTOR", "FIXER"):
+        monkeypatch.setenv(f"AIFIX_{route}__API_KEY", canary)
+        monkeypatch.setenv(f"AIFIX_{route}__MODEL", "m")
+    # 这一条会被嵌套的 HarnessConfig 读到并解析失败，从而把错误挂在
+    # detector / fixer 这一层 —— input_value 于是是整个嵌套 dict
+    monkeypatch.setenv("HARNESS_MODEL_PRICE_TIERS_BY_MODEL", "{{ 不是合法 JSON")
+
+    # 必须先确认这一路真的还会炸。第三方哪天改了字段名，构造就会成功，
+    # 「没泄漏」的断言随之变成恒真 —— 那时该让这条测试红，而不是静默失效。
+    with pytest.raises(pydantic.ValidationError) as excinfo:
+        AifixConfig()
+    text = str(excinfo.value)
+    assert canary not in text, text[:400]
+    assert canary[:9] not in text, text[:400]   # 连前缀也不许

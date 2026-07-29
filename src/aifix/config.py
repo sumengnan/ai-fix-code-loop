@@ -17,8 +17,16 @@ class AifixConfig(BaseSettings):
     # 代价必须写明：**拼错的配置名不会报错，只会静默失效**。已经删掉的字段
     # 同理 —— AIFIX_ALLOW_TEST_EDITS=true 至今仍会被安静吸收（见下方注释）。
     # 所以配置项改名/删除时，光删字段不够，得同步改文档。
+    # hide_input_in_errors=True 是**安全**要求，不是美观要求：pydantic 默认会把
+    # 出错字段的 input_value 整个回显进异常消息，而嵌套路由（detector / fixer）
+    # 那一层的 input_value 是一整个 dict，里面躺着 api_key。真实踩到过 ——
+    # source 了整份 .env，其中的 HARNESS_* 被嵌套的 HarnessConfig（它的
+    # env_prefix 正是 HARNESS_）一并吸走，一个值格式对不上就当场 ValidationError，
+    # 密钥前缀跟着进了 stderr。泄漏多少取决于 pydantic 对 repr 的截断长度，
+    # 而那不是任何人承诺过的东西。见 tests/test_config.py 的哨兵测试。
     model_config = SettingsConfigDict(
-        env_prefix="AIFIX_", env_nested_delimiter="__", extra="ignore")
+        env_prefix="AIFIX_", env_nested_delimiter="__", extra="ignore",
+        hide_input_in_errors=True)
 
     detector: HarnessConfig = Field(default_factory=HarnessConfig)
     fixer: HarnessConfig = Field(default_factory=HarnessConfig)
