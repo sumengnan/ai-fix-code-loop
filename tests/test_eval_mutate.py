@@ -369,9 +369,40 @@ async def test_unreadable_source_does_not_abort_the_round(tmp_path):
 
 
 async def test_refuses_a_repo_that_is_already_red(tmp_path):
-    """本来就红的仓库上做变异，分不清红是变异造成的还是本来就有的。"""
+    """本来就红的仓库上做变异，分不清红是变异造成的还是本来就有的。
+
+    抛的必须是 UnusableBaseline 而不是裸 RuntimeError：这是「你的仓库不满足
+    前提」，不是「变异这段代码崩了」。CLI 要照前者印一句人话、照后者印调用栈，
+    类型分不开就只能一律当崩溃处理。
+    """
+    from aifix.eval.mutate import UnusableBaseline
+
     repo = _make_red_repo(tmp_path)
-    with pytest.raises(RuntimeError, match="不是全绿"):
+    with pytest.raises(UnusableBaseline, match="不是全绿") as exc:
+        await mutate_tasks(str(repo), PytestAdapter(), max_tasks=1,
+                           workdir=tmp_path / "w")
+    # 点名到具体用例，而不是只报个数 —— 用户下一步要去修的就是它们
+    assert "test_calc.py::" in str(exc.value), str(exc.value)
+
+
+async def test_refuses_a_repo_whose_suite_never_ran(tmp_path, monkeypatch):
+    """报告在、一个用例都没跑到：这不是全绿，是压根没跑。
+
+    与上一条同类（前提不成立，不是崩溃），所以走同一个异常类型 —— 放行的话
+    下面每个变异的 scoped 也跑不到东西，整轮静默产出 0 个任务，与「这些变异
+    都没弄红测试」无法区分。
+    """
+    from aifix.adapters.base import FailureSet
+    from aifix.eval import mutate as mut
+    from aifix.eval.mutate import UnusableBaseline
+
+    repo = _make_green_repo(tmp_path)
+
+    async def empty_suite(*a, **kw):
+        return FailureSet(failures={}, ran=frozenset())
+
+    monkeypatch.setattr(mut, "run_full_suite", empty_suite)
+    with pytest.raises(UnusableBaseline, match="一个用例都没跑到"):
         await mutate_tasks(str(repo), PytestAdapter(), max_tasks=1,
                            workdir=tmp_path / "w")
 

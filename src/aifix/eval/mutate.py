@@ -66,6 +66,24 @@ _BOOL_OPS: dict[type, tuple[str, str]] = {
 }
 
 
+class UnusableBaseline(RuntimeError):
+    """母本仓库不满足变异的前提：HEAD 不是全绿，或者压根没跑到用例。
+
+    独立成类**只为了让调用方能把它跟崩溃分开**。这两件事在语义上差得很远：
+
+    - 「你给的仓库本来就红」是用户的输入问题，出路明确（先修红，或改用
+      `aifix mine` 从 git history 里挖真实任务）。该印一句人话就退出。
+    - 「变异这段代码自己炸了」是 bug，该把调用栈原样甩出来给人看。
+
+    类型分不开时 `_cmd_mutate` 只有两个选择：要么一律裸抛（前一种情况下用户
+    先滚 20 行 asyncio 内部帧，唯一有用的那句埋在最底下），要么一律 catch
+    成人话（后一种情况下真 bug 的现场被抹掉）。两个都不能接受。
+
+    继承 RuntimeError 的理由同 DuplicateTaskIds：这里原本抛的就是
+    RuntimeError，按那个类型接的调用方不该因为换了个名字就漏接。
+    """
+
+
 class DuplicateTaskIds(RuntimeError):
     """出口自检没过：产出的 task_id 有撞车。**带着已验证的任务一起抛。**
 
@@ -437,16 +455,18 @@ async def mutate_tasks(repo: str, adapter: PytestAdapter, max_tasks: int = 10,
         green = await run_full_suite(tree, adapter, require_report=True)
         baseline_secs = time.monotonic() - t0
         if green.ids:
-            raise RuntimeError(
+            shown = sorted(green.ids)[:3]
+            more = f"，等 {len(green.ids)} 个" if len(green.ids) > len(shown) else ""
+            raise UnusableBaseline(
                 f"仓库 HEAD（{head[:8]}）不是全绿，无法做变异："
                 f"{len(green.ids)} 个用例已经在红"
-                f"（{'、'.join(sorted(green.ids)[:3])}）。"
+                f"（{'、'.join(shown)}{more}）。"
                 "基线不干净时，变异后的新失败分不清是变异造成的还是本来就有的")
         if not green.ran:
             # 报告存在但一个用例都没跑到（收集整轮中止）。这不是「全绿」，
             # 而是压根没跑 —— 放行的话下面每个变异的 scoped 也跑不到东西，
             # 整轮静默产出 0 个任务，与「这些变异都没弄红测试」无法区分
-            raise RuntimeError(
+            raise UnusableBaseline(
                 f"仓库 HEAD（{head[:8]}）的全量一个用例都没跑到"
                 f"（worktree={tree}），本次结果不可信")
         index = _test_index(green.ran)

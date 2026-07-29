@@ -491,7 +491,7 @@ def _cmd_mine(args) -> None:
 def _cmd_mutate(args) -> None:
     # 延迟导入：eval 子包依赖 cli 模块（run_once），提到模块顶部会形成循环导入
     from .adapters.pytest_adapter import PytestAdapter, resolve_test_python
-    from .eval.mutate import DuplicateTaskIds, mutate_tasks
+    from .eval.mutate import DuplicateTaskIds, UnusableBaseline, mutate_tasks
     from .eval.task import write_jsonl
 
     repo = Path(args.repo).resolve()
@@ -510,6 +510,15 @@ def _cmd_mutate(args) -> None:
             str(repo), PytestAdapter(python=test_python),
             max_tasks=args.max_tasks, max_new_failures=args.max_new_failures,
             scope=args.scope, seed=args.seed, on_progress=progress))
+    except UnusableBaseline as e:
+        # 前提没满足，不是崩溃 —— 甩调用栈会把唯一有用的那句话埋在 20 行
+        # asyncio 内部帧底下。挡住之后必须给出路：变异要的是一份全绿母本，
+        # 红着的仓库本身就是 mine 的输入（红转绿的 commit 才是它要挖的东西）。
+        raise SystemExit(
+            f"变异中止：{e}\n"
+            "  变异任务需要一份全绿的母本仓库：先把上面这些用例修绿再来，\n"
+            "  或者换用 `aifix mine <repo>` —— 它从 git history 里挖真实的"
+            "红转绿 commit，不要求当前 HEAD 全绿。")
     except DuplicateTaskIds as e:
         # 撞车仍然是错误：撞车的任务集在评测里会静默退化成「评测故障」。
         # 但验证一个候选要真跑一遍测试，一轮变异跑掉半小时是常事 —— 让异常

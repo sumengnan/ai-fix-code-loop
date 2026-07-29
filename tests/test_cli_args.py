@@ -288,6 +288,41 @@ def test_cmd_mutate_salvages_tasks_and_fails_with_a_readable_message(
     assert not out.exists(), "撞车的任务集绝不能落在用户会拿去 eval 的路径上"
 
 
+def test_cmd_mutate_reports_a_dirty_baseline_without_a_traceback(
+        tmp_path, monkeypatch):
+    """基线不干净是**用户的前提没满足**，不是程序崩了 —— 不该甩调用栈。
+
+    这条挡的是真实体感：在一个本来就红的仓库上敲 `aifix mutate .`，屏幕上先
+    滚 20 行 asyncio 内部帧，唯一有用的那句话埋在最底下。CLI 里其他每一处预期
+    失败（没有适配器、task_id 撞车）都转译成了人话，这一处不该例外。
+    """
+    from aifix import cli as cli_mod
+    from aifix.eval.mutate import UnusableBaseline
+
+    async def boom(*a, **kw):
+        raise UnusableBaseline(
+            "仓库 HEAD（a82144f5）不是全绿，无法做变异：2 个用例已经在红"
+            "（tests/test_cart.py::test_排行）。基线不干净时，变异后的新失败"
+            "分不清是变异造成的还是本来就有的")
+
+    monkeypatch.setattr("aifix.eval.mutate.mutate_tasks", boom)
+    out = tmp_path / "tasks.jsonl"
+    args = cli_mod.build_parser().parse_args(
+        ["mutate", str(tmp_path), "--out", str(out)])
+
+    with pytest.raises(SystemExit) as exc:
+        cli_mod._cmd_mutate(args)
+
+    msg = str(exc.value)
+    assert "不是全绿" in msg, "原因要原样带出来"
+    assert "tests/test_cart.py::test_排行" in msg, "点名到用例，用户才知道去修哪个"
+    assert "Traceback" not in msg
+    assert "asyncio" not in msg, "不该露出调用栈里的内部帧"
+    # 要给出出路：mutate 需要全绿母本，红着的仓库该走 mine
+    assert "mine" in msg, "挡住之后要告诉用户还能干什么"
+    assert not out.exists(), "什么都没产出，不该留下一个空文件"
+
+
 # ======== 诊断三件套：replay / ingest / stats ========
 
 def test_replay_subcommand_flags():
