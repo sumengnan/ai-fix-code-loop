@@ -38,6 +38,9 @@ _HR = "──"
 # 假话 —— 说错原因比不说原因更糟，读的人会照着它去改一个没问题的配置。
 _COST_UNKNOWN = "未知"
 
+# 推理默认只留一行的量。刻意远小于 max_chars（2000）：见 _oneline 的说明。
+_REASONING_MAX = 200
+
 
 def render(run_dir: Path, step: int | None = None,
            full: bool = False, max_chars: int = 2000) -> str:
@@ -215,6 +218,50 @@ def _clip(text: str, full: bool, max_chars: int) -> str:
             + f"\n…（已截断，原文共 {len(text)} 字符；full=True 可看完整内容）")
 
 
+def _merge_deltas(events: list[dict]) -> list[dict]:
+    """把**连续**的同类 delta 拼回一条。
+
+    `TextDelta` / `ReasoningDelta` 是流式增量，一条只带几个 token。
+    `agents/runner.consume` 早就在这么做（`"".join(parts)`），回放这一侧漏了，
+    于是同一批事件在两处被解释成两种东西：一处是增量，一处是完整消息。
+    一条一行的后果不只是难看 —— `_clip` 是按单条截的，每条只有几个字符，
+    阈值永远不触发：**整个回放里最长的那段反而不设上限，`--full` 加不加一样**。
+
+    只合并**相邻**的同类事件，不按类型收拢全部：中间隔着一次工具调用的两段
+    输出是两次独立的产出，收拢会把先后顺序抹掉。理由与 `_group_steps` 按连续
+    分组同一条。
+
+    拷贝而不是就地改：调用方的事件列表还要给 `_step_key` 用，渲染不该有副作用。
+    """
+    out: list[dict] = []
+    for ev in events:
+        kind = ev.get("type")
+        if (kind in ("TextDelta", "ReasoningDelta")
+                and out and out[-1].get("type") == kind):
+            prev_data = out[-1].get("data") or {}
+            out[-1]["data"] = {
+                **prev_data,
+                "text": (prev_data.get("text") or "")
+                        + ((ev.get("data") or {}).get("text") or "")}
+        else:
+            out.append(dict(ev))
+    return out
+
+
+def _oneline(label: str, text: str, full: bool, max_chars: int) -> str:
+    """压成一行：换行与连续空白折成单空格，再按阈值截，截断留痕。
+
+    只给推理用。推理是整个回放里最长、信息密度最低的一段，而复盘要看的是
+    模型**做了什么**（工具调用、补丁、判定），不是它怎么想的 —— 默认一行的
+    量足够看出「这一步在往哪个方向想」。要判断「它是真理解了还是在凑断言」
+    时才需要全文，那是少数几次，用 --full。
+    """
+    flat = " ".join(text.split())
+    if not full and 0 < max_chars < len(flat):
+        flat = flat[:max_chars] + f"…（推理共 {len(flat)} 字符，--full 看全文）"
+    return f"{label}：{flat}"
+
+
 def _block(label: str, text: str, full: bool, max_chars: int) -> str:
     """`label：正文`，多行正文缩进对齐，读起来不至于串行。"""
     clipped = _clip(text, full, max_chars)
@@ -270,7 +317,7 @@ def _render_step(index: int, events: list[dict], full: bool, max_chars: int,
     # 一个几千字的补丁印两遍只是把输出撑长，所以第二次只报名字；但万一某条
     # 路径只发 ToolStarted，参数不能就这么丢了，于是按 id 记一下印过没有。
     args_shown: set[str] = set()
-    for ev in events:
+    for ev in _merge_deltas(events):
         kind = ev.get("type", "?")
         data = ev.get("data") or {}
         tag = f"  [{kind}] "
@@ -280,9 +327,15 @@ def _render_step(index: int, events: list[dict], full: bool, max_chars: int,
             lines.append(tag + f"本段会话第 {data.get('step')} 步开始")
         elif kind == "StepFinished":
             lines.append(tag + f"本段会话第 {data.get('step')} 步结束")
-        elif kind in ("TextDelta", "ReasoningDelta"):
-            label = "模型输出" if kind == "TextDelta" else "模型思考"
-            lines.append(tag + _block(label, data.get("text", ""), full, max_chars))
+        elif kind == "ReasoningDelta":
+            # 推理走 _oneline 与自己的阈值，不跟正文共用 max_chars：正文是
+            # **结果**（诊断 JSON、最终回复），推理是**过程**，两者该看的量
+            # 差一个数量级。共用一个阈值时，把它调到能读推理，补丁就被截没了。
+            lines.append(tag + _oneline("模型思考", data.get("text", ""),
+                                        full, _REASONING_MAX))
+        elif kind == "TextDelta":
+            lines.append(tag + _block("模型输出", data.get("text", ""),
+                                      full, max_chars))
         elif kind == "ToolCallRequested":
             for tc in data.get("tool_calls", []):
                 lines.append(tag + f"请求调用工具 {tc.get('name')}（id={tc.get('id')}）")

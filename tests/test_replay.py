@@ -43,6 +43,21 @@ def _text(t):
             StreamChunk(type="done", usage=Usage(10, 5, 15))]
 
 
+def _split(text: str, kind: str, size: int = 3):
+    """把一段文本切成流式小块 —— 真实端点就是这么吐的。
+
+    一次性给整段（`_text` 那样）测不出合并：只有一条 delta 时，合不合并
+    的输出一模一样。
+    """
+    return [StreamChunk(type=kind, text=text[i:i + size])
+            for i in range(0, len(text), size)]
+
+
+def _streamed(reasoning: str, text: str):
+    return (_split(reasoning, "reasoning") + _split(text, "text")
+            + [StreamChunk(type="done", usage=Usage(10, 5, 15))])
+
+
 def _tool(name, args):
     return [StreamChunk(type="tool_call", tool_call_delta=ToolCallDelta(
                 index=0, id="c1", name=name, arguments=args)),
@@ -125,6 +140,70 @@ async def test_truncation_is_marked_and_full_disables_it(run_dir):
     # full=True 时原文完整，且不留任何截断标记
     assert "return a + b" in full
     assert "已截断" not in full
+
+
+# 远超 _REASONING_MAX（200）—— 短推理不会被截，测不出「压成一行」那条。
+# 要**远**超：只比阈值长一点时，截断后补上的标记与行首前缀会让整行反而更长，
+# 「行变短了」这种间接断言会误报。下面直接断尾巴没了。
+_THINK = "栈帧最深处是断言失败的位置，未必是缺陷所在，要往上游看。" * 20
+
+
+@pytest.fixture
+async def streamed_run_dir(buggy_repo) -> Path:
+    """Detector 分片吐出推理与正文 —— 真实端点的形状。"""
+    await run_once(buggy_repo, AifixConfig(), run_id="rp2",
+                   detector_client=_Scripted([_streamed(_THINK, _DIAG)]),
+                   fixer_client=_Scripted([
+                       _tool("apply_patch", json.dumps({"diff": _PATCH})),
+                       _text("已修复")]))
+    d = buggy_repo / ".aifix" / "runs" / "rp2"
+    kinds = [json.loads(x)["type"] for x in
+             (d / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    # 前提：这次 run 真的落下了多条 delta。端点替身哪天改成一次性返回，
+    # 下面三条会全部变成恒真的空断言，而不是失败。
+    assert kinds.count("ReasoningDelta") > 1 and kinds.count("TextDelta") > 1
+    return d
+
+
+async def test_streamed_text_is_merged_into_one_entry(streamed_run_dir):
+    """流式增量必须先拼回整句再渲染，一条 delta 一行读不了。
+
+    `agents/runner.consume` 早就在这么做（`"".join(parts)`）；这条钉的是
+    回放这一侧同样得做，否则同一批事件在两处被解释成两种东西。
+    """
+    out = render(streamed_run_dir)
+
+    # 两个 agent 各说一次话，就该只有两条「模型输出」
+    assert out.count("模型输出") == 2, "分片没有被合并成一条"
+    assert out.count("模型思考") == 1
+    # 断在**那一行**上，不是断 `_DIAG in out`：`RunFinished` 里带着框架拼好的
+    # 最终消息，不合并也照样能让整份输出包含 _DIAG —— 那条断言恒真。
+    said = [ln for ln in out.splitlines() if "模型输出" in ln]
+    assert any(_DIAG in ln for ln in said), "正文没有被拼回完整的一条"
+
+
+async def test_long_reasoning_is_clipped_to_a_single_line(streamed_run_dir):
+    """推理默认压成一行：它是整个回放里最长、信息密度最低的一段。
+
+    截断标记照旧要留 —— 悄悄截断是这个项目最忌讳的形状。
+    """
+    out = render(streamed_run_dir)
+
+    think = [ln for ln in out.splitlines() if "模型思考" in ln]
+    assert len(think) == 1, "推理没有被压成一行"
+    assert _THINK[:30] in think[0], "推理开头没了，截的位置不对"
+    assert _THINK not in think[0], "推理没有被截断"
+    assert "--full" in think[0], "截断了却没告诉人怎么看全文"
+    # 补丁正文不受这个阈值影响：它比 200 字符短，但走的是另一条路径，
+    # 别把「推理压一行」误伤成「所有长文本都压一行」。
+    assert "return a + b" in out
+
+
+async def test_full_shows_the_whole_reasoning(streamed_run_dir):
+    out = render(streamed_run_dir, full=True)
+
+    assert _THINK in out
+    assert "--full" not in out
 
 
 async def test_replay_does_not_claim_attribution_is_missing(run_dir):
