@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import re
 import shutil
 import tempfile
@@ -427,6 +428,24 @@ def build_parser() -> argparse.ArgumentParser:
                     "幂等 —— 同一批产物灌任意多次，表里的行数不变。")
     ing.add_argument("--repo", default=".")
 
+    iss = sub.add_parser(
+        "issue", help="issue 驱动：一条 /aifix 评论 → 一个 PR",
+        description="在 GitHub Actions 里被 issue_comment 事件调起。"
+                    "整条流水线一次跑完，中途不停下来等人签字 —— 唯一那道人闸"
+                    "在最终的 PR 上。")
+    iss_sub = iss.add_subparsers(dest="issue_cmd", required=True)
+    ish = iss_sub.add_parser(
+        "handle", help="处理一次 issue_comment 事件", epilog=_TEST_PYTHON_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="读事件载荷 → 判授权 → 写复现测试 → 红检 → 跑核心循环 → "
+                    "开 PR。退出码只有崩溃时才非 0：写不出复现、没修好都是正常"
+                    "结论，让它们退非 0 的话 Actions 页面会满屏红叉，而其中大半"
+                    "根本不是错误。")
+    ish.add_argument("--repo", default=".")
+    ish.add_argument("--event", default=os.environ.get("GITHUB_EVENT_PATH"),
+                     help="事件载荷 JSON 的路径。默认取环境变量 "
+                          "GITHUB_EVENT_PATH（Actions 会写好）")
+
     st = sub.add_parser(
         "stats", help="跨 run 汇总：适配器、守卫、可疑信号",
         description="数据来自 .aifix/trajectory.db，不会自己更新，先跑一次 "
@@ -443,7 +462,7 @@ def _dispatch() -> dict[str, Any]:
     这种失败在手工试用时最容易被当成「跑了但没输出」。
     """
     return {"run": _cmd_run, "reproduce": _cmd_reproduce, "mine": _cmd_mine,
-            "mutate": _cmd_mutate,
+            "mutate": _cmd_mutate, "issue": _cmd_issue,
             "eval": _cmd_eval, "eval-report": _cmd_eval_report,
             "replay": _cmd_replay, "ingest": _cmd_ingest, "stats": _cmd_stats}
 
@@ -548,6 +567,29 @@ def _print_cost(tokens: int, usd: float, config: AifixConfig) -> None:
         print(f"- 成本：未知（{tokens:,} tokens，未配 AIFIX_PRICE_MAP）")
     else:
         print(f"- 成本：${usd:.4f}（{tokens:,} tokens）")
+
+
+def _cmd_issue(args) -> None:
+    """`aifix issue handle` 的入口。退出码由 handle() 的通路决定。"""
+    from .issue.event import load_payload
+    from .issue.github import GitHubClient
+    from .issue.handle import handle
+
+    if not args.event:
+        # 本地调试忘了设这个变量是最常见的第一次失败。裸 FileNotFoundError
+        # 只会说某个路径不存在，一个字都不提示它本该由 Actions 提供。
+        print("没有事件载荷路径：既没给 --event，环境变量 GITHUB_EVENT_PATH 也是空的。\n"
+              "  在 GitHub Actions 里它由平台写好；本地调试可以自己造一份"
+              "（tests/fixtures/ 下有一个真实形状的样例）。")
+        raise SystemExit(1)
+
+    payload = load_payload(args.event)
+    repo = Path(args.repo).resolve()
+    full = ((payload.get("repository") or {}).get("full_name") or "")
+    res = asyncio.run(handle(payload, repo, AifixConfig(),
+                             GitHubClient(full)))
+    print(f"通路：{res.path}" + (f" · PR：{res.pr_url}" if res.pr_url else ""))
+    raise SystemExit(res.exit_code)
 
 
 def _cmd_mine(args) -> None:

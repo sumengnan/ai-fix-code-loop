@@ -7,6 +7,8 @@ import copy
 import json
 from pathlib import Path
 
+import pytest
+
 from aifix.agents.reproducer import Reproduction
 from aifix.config import AifixConfig
 from aifix.issue.handle import handle
@@ -207,3 +209,34 @@ async def test_a_crash_exits_nonzero_and_still_reports(tmp_path):
     res, gh, _ = await _handle(_payload(), tmp_path, state=st)
     assert res.exit_code == 1 and res.path == "crashed"
     assert gh.statuses and "异常" in gh.statuses[-1][1]
+
+
+# ---------------------------------------------------------------- CLI 入口
+
+def test_issue_handle_is_wired_into_the_dispatch_table():
+    """加了 parser 却忘了接分派表：argparse 解析成功、什么都不做、退出码 0。"""
+    from aifix.cli import _dispatch, build_parser
+    a = build_parser().parse_args(["issue", "handle"])
+    assert a.cmd == "issue" and a.issue_cmd == "handle"
+    assert "issue" in _dispatch()
+
+
+def test_event_path_defaults_to_the_actions_env(monkeypatch):
+    """Actions 把载荷路径写在 GITHUB_EVENT_PATH 里。要显式传的话，workflow
+    每次都得重复一遍那个变量名 —— 而写错了不会报错，只会读不到文件。"""
+    from aifix.cli import build_parser
+    monkeypatch.setenv("GITHUB_EVENT_PATH", "/tmp/ev.json")
+    assert build_parser().parse_args(["issue", "handle"]).event == "/tmp/ev.json"
+
+
+def test_missing_event_path_is_a_readable_error(tmp_path, monkeypatch, capsys):
+    """本地调试忘了设那个变量是最常见的第一次失败。裸 FileNotFoundError 只会
+    说某个路径不存在，一个字都不提示它本该由 Actions 提供。"""
+    from aifix.cli import _cmd_issue, build_parser
+    monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
+    args = build_parser().parse_args(
+        ["issue", "handle", "--repo", str(tmp_path)])
+    with pytest.raises(SystemExit) as e:
+        _cmd_issue(args)
+    assert e.value.code == 1
+    assert "GITHUB_EVENT_PATH" in capsys.readouterr().out
