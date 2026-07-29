@@ -4,7 +4,6 @@
 手写的 JUnit 只能证明我们理解得自洽，证明不了 pytest 真的这么写（全局约束 4）。
 """
 import json
-from pathlib import Path
 
 from harness.llm.base import StreamChunk
 from harness.sandbox.local import LocalSandbox

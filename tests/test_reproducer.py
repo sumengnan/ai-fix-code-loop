@@ -97,6 +97,32 @@ def test_parse_rejects_a_target_id_pointing_at_another_file():
         _ok(target_test_id="tests/test_other.py::test_x"), _TEST_DIRS) is None
 
 
+def test_parse_rejects_a_stem_that_only_looks_like_a_prefix():
+    """主干比对必须按**词边界**，不能是裸子串。
+
+    `test_a` 是 `tests/test_ab.py::test_x` 的子串，裸 in 判定会放行 —— 于是写
+    下去的是 A、红检跑的是 B。B 若恰好是仓库里本来就红的用例，红检通过、
+    fixer 被派去修它，而 issue 里那个 bug 一个字没动。
+    """
+    assert parse_reproduction(json.dumps({
+        "can_reproduce": True, "test_file": "tests/test_a.py",
+        "test_code": "x", "target_test_id": "tests/test_ab.py::test_x",
+        "missing_info": []}), _TEST_DIRS) is None
+
+
+def test_parse_accepts_a_maven_style_selector():
+    """Maven 的选择器与文件路径毫无前缀关系（com.example.FooTest#testBar），
+    但主干 FooTest 一定在里面。收紧边界不能把它误杀 —— `::` 是 pytest 的语法，
+    M5 的裂缝 5 就是把它当通用格式写死栽的。
+    """
+    r = parse_reproduction(json.dumps({
+        "can_reproduce": True,
+        "test_file": "src/test/java/com/example/FooTest.java",
+        "test_code": "x", "target_test_id": "com.example.FooTest#testBar",
+        "missing_info": []}), ["src/test"])
+    assert r is not None
+
+
 def test_parse_rejects_a_test_file_outside_the_test_dirs():
     """写进产品目录等于绕开「不许改测试文件」的整套前提：那道守卫按
     test_dirs 判定，落在 src/ 下的文件它不认，修复阶段的 agent 可以随手改掉

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import PurePosixPath
 
 from pydantic import BaseModel, ValidationError
@@ -101,7 +102,13 @@ def _is_coherent(r: Reproduction, test_dirs: list[str]) -> bool:
     # 的语法，M5 的裂缝 5 就是把它当通用格式写死栽的。Maven 的选择器长成
     # `com.example.FooTest#testBar`，与文件路径毫无前缀关系，但主干 FooTest
     # 一定在里面。主干比对两种格式都成立，且照样挡得住指向另一个文件的 id。
-    return PurePosixPath(r.test_file).stem in r.target_test_id
+    #
+    # 按**词边界**比，不用裸 `in`：`test_a` 是 `tests/test_ab.py::test_x` 的
+    # 子串，裸子串会放行 —— 于是写下去的是 A、红检跑的是 B，而 B 若恰好是仓库
+    # 里本来就红的用例，红检通过、fixer 被派去修它，issue 里那个 bug 一个字没动。
+    stem = PurePosixPath(r.test_file).stem
+    return re.search(rf"(?<!\w){re.escape(stem)}(?!\w)",
+                     r.target_test_id) is not None
 
 
 def parse_reproduction(raw: str, test_dirs: list[str]) -> Reproduction | None:
