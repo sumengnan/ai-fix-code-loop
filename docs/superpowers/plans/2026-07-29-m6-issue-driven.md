@@ -72,7 +72,7 @@
 | 文件 | 职责 | 动作 |
 |---|---|---|
 | `src/aifix/agents/reproducer.py` | **新建** | 系统提示、prompt 构造、JSON 解析。形制照 `agents/detector.py` |
-| `src/aifix/nodes/reproduce.py` | **新建** | `reproduce_node`（带工具的 AgentLoop）+ `red_check`（零 LLM） |
+| `src/aifix/reproduce.py` | **新建** | `reproduce`（带只读工具的 AgentLoop）+ `red_check`（零 LLM）+ 落盘 |
 | `src/aifix/issue/event.py` | **新建** | 读 `$GITHUB_EVENT_PATH`，解析成 `IssueEvent`；命令解析；授权判定 |
 | `src/aifix/issue/github.py` | **新建** | 回帖、编辑状态评论、开 PR。薄壳，走 `gh` CLI |
 | `src/aifix/issue/handle.py` | **新建** | 编排：event → reproduce → `run_once` → 三条交付通路 |
@@ -150,9 +150,11 @@ def test_parse_rejects_a_test_file_outside_the_test_dirs():
 
 系统提示里必须写死的三条：只产出一条测试函数；**不许修改任何已有文件**；测试必须针对 issue 描述的行为断言，不许写恒真断言。
 
-### 任务 2：`reproduce_node` + `red_check`
+### 任务 2：`reproduce` + `red_check`
 
-**背景**：`reproduce_node` 是带工具的 AgentLoop（`read_file` + `grep`，**不给 `apply_patch`**），拿到 JSON 后由确定性代码落盘。`red_check` 零 LLM，判两件事：
+> **实现时的更正**：原表把它放在 `src/aifix/nodes/reproduce.py`。**它不是 LangGraph 节点**——图的入口是 `run_once`，而按决策 4，复现必须发生在 `run_once` 之前（测试要先进 HEAD）。放进 `nodes/` 会让人以为它是 `build_graph()` 装配的一环。已改为顶层 `src/aifix/reproduce.py`。
+
+**背景**：`reproduce` 是带只读工具的 AgentLoop（`read_file` / `list_files` / `grep`，**不给 `apply_patch`，也不给 `run_tests`**），拿到 JSON 后由确定性代码落盘。不给 `run_tests` 的理由和不给 `apply_patch` 同级：让模型自己跑测试，「这条测试红不红」的判定权就落到了它手里，而红检是这一步唯一的确定性证据。`red_check` 零 LLM，判两件事：
 
 1. 目标用例**必须红**
 2. 红的形态**不能是收集错误**——`ImportError` 说明模型猜错了模块，它红得没有信息量。这一类要打回，不能当成"复现成功"
