@@ -14,11 +14,12 @@ from typing import Any
 from .budget import RunBudget
 from .config import AifixConfig
 from .delivery import Worktree
-from .graph import AifixState, check_circuit_breaker, new_state
+from .graph import (MODEL_ABORT_KIND, AifixState,
+                    check_circuit_breaker, new_state)
 from .nodes.baseline import COLLECTION_ABORT_KIND, baseline_node
 from .nodes.detect import detect_node
 from .nodes.fix import fix_node
-from .nodes.preflight import preflight_node
+from .nodes.preflight import preflight_node, probe_model
 from .nodes.report import (cost_is_unknown, count_fixed, render_report,
                            report_node)
 from .nodes.verify import verify_node
@@ -98,6 +99,21 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
     if state["abort"]:
         state["report_md"] = render_report(state)
         return state
+
+    # 模型可达性挡在 baseline **之前**：全量测试要跑好几分钟，而端点不通
+    # 一秒就能查出来。dry_run 豁免 —— `--dry-run` 的承诺是「不花一分钱，不
+    # 调用任何模型」，探针也是模型调用，不豁免那句话就成了假话。
+    #
+    # 只在 run_once 自己要建真客户端时才探（fixer_client is None）：调用方注入
+    # 了 client，说明它已经决定了模型是什么 —— 评测的替身、测试的脚本 —— 探一
+    # 个替身证明不了端点可达，反而会白白吃掉它脚本里的第一轮，让后面每一步都
+    # 错位一格。
+    if not dry_run and fixer_client is None:
+        bad = await probe_model(config)
+        if bad:
+            state["abort"], state["abort_kind"] = bad, MODEL_ABORT_KIND
+            state["report_md"] = render_report(state)
+            return state
 
     artifact_dir = Path(repo) / ".aifix" / "runs" / run_id
     state["artifact_dir"] = str(artifact_dir)
@@ -427,6 +443,11 @@ def build_parser() -> argparse.ArgumentParser:
                     "而这张表是事后诊断用的，晚几分钟没有代价。"
                     "幂等 —— 同一批产物灌任意多次，表里的行数不变。")
     ing.add_argument("--repo", default=".")
+    ing.add_argument("--runs-dir", default=None, metavar="DIR",
+                     help="改从这个目录扫 run 产物（库仍落在 --repo 下）。"
+                          "给 Actions 用：runner 是临时的，每次 run 的产物各自"
+                          "消失，默认目录下永远只有一个 run。把 aifix/traces "
+                          "分支 clone 下来指到这里，历史就重新连成一片")
 
     iss = sub.add_parser(
         "issue", help="issue 驱动：一条 /aifix 评论 → 一个 PR",
@@ -484,7 +505,8 @@ def _cmd_run(args) -> None:
         # 文件顶上不该粘着几十行进度
         progress=None if args.quiet else TerminalProgress()))
     print(state["report_md"])
-    if state.get("abort_kind") in ("crash", COLLECTION_ABORT_KIND):
+    if state.get("abort_kind") in ("crash", COLLECTION_ABORT_KIND,
+                                  MODEL_ABORT_KIND):
         # 报告先印出来（分支上可能真躺着可合并的修复），退出码再说明这次
         # 是崩的：退 0 的话流水线里「跑完了」和「炸了但报告还在」没有区别。
         #
@@ -739,10 +761,11 @@ def _cmd_replay(args) -> None:
 
 def _cmd_ingest(args) -> None:
     repo = Path(args.repo).resolve()
-    n = ingest(repo)
+    runs_dir = Path(args.runs_dir).resolve() if args.runs_dir else None
+    n = ingest(repo, runs_dir=runs_dir)
     if not n:
-        # 与「灌了 0 个」分开说：这里其实是没找到产物，多半是 --repo 指错了
-        print(f"没有可灌的 run：{repo / '.aifix' / 'runs'} 下"
+        # 与「灌了 0 个」分开说：这里其实是没找到产物，多半是路径指错了
+        print(f"没有可灌的 run：{runs_dir or repo / '.aifix' / 'runs'} 下"
               "没有带 facts.jsonl 的目录。")
         return
     # 报的是**本次处理**的 run 数，不是新增数：灌库幂等，重灌同一批仍报同一个

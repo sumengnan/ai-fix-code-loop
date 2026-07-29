@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 from typing import Any
 
+from ..config import AifixConfig
 from ..delivery import ensure_clean
 from ..graph import AifixState
 from .baseline import detect_adapter
@@ -51,3 +53,39 @@ def preflight_node(state: AifixState) -> dict[str, Any]:
     except RuntimeError as e:
         return {"abort": str(e)}
     return {"adapter_name": adapter.name, "abort": None}
+
+
+async def probe_model(config: AifixConfig, client: Any = None) -> str | None:
+    """发一次极小的调用确认模型端点可达。可达返回 None，否则返回中止理由。
+
+    不做这一步的话，端点不通的表现是：每一轮都修不好 → 重试到上限 → 连续失败
+    熔断 → 报告写「连续 N 个 failure 均未修复，疑似系统性问题」。**跑了几十
+    分钟，最后给出一句指错方向的诊断**，而真相是 key 配错了或端点不通。
+
+    与本模块开头 `_bad_test_python` 那段是同一条理由，只是换了一个依赖：能在
+    一秒内确定的前提，不该拖到几分钟后以别人的面目暴露。
+
+    探的是 **fixer** 那条路由：detector 可以配成另一个端点，但真正干活、也真正
+    花钱的是 fixer；两条都探等于把最常见的场景（同一个端点）探两遍。detector
+    自己不通时仍会以「诊断解析失败」降级，那条路径本来就有兜底。
+
+    只读第一个 chunk 就够：要确认的是**连得上、认得出凭据**，不是模型会说什么。
+    """
+    from harness.llm.openai_compat import OpenAICompatibleClient
+    from harness.types import Message, Role
+
+    c = client or OpenAICompatibleClient(config.fixer)
+    try:
+        async with contextlib.aclosing(
+                c.stream([Message(role=Role.USER, content="ping")], [])) as st:
+            async for _ in st:
+                break
+    except Exception as e:
+        return (f"模型端点不可达：{type(e).__name__}：{e}\n"
+                f"  这不是修复失败，是这次 run 还没开始就没跑起来。\n"
+                f"  本次用的模型：{config.fixer.model}\n"
+                f"  依次检查 AIFIX_FIXER__BASE_URL / AIFIX_FIXER__API_KEY，"
+                f"以及这台机器能不能出网到那个地址。\n"
+                f"  在 GitHub Actions 上尤其要确认端点**没有 IP 白名单** —— "
+                f"runner 的出口 IP 是动态的。")
+    return None

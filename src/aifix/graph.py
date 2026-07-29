@@ -12,6 +12,11 @@ from .config import AifixConfig
 # 去 import 整个 baseline 模块（连带 harness 沙箱）。
 COLLECTION_ABORT_KIND = "collect"
 
+# `abort_kind` 的另一个取值：配置的模型端点连不上。与 collect 同类 —— 说的都是
+# 「跑这次 run 的环境不对」，不是「模型没修好」。分类必须对：评测据此把它划进
+# **评测故障**而不是成绩，否则模型要替我们的网络背锅。
+MODEL_ABORT_KIND = "model"
+
 
 class AifixState(TypedDict, total=False):
     """LangGraph 的宏观状态：跨 failure 的进度。

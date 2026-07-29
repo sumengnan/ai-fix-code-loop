@@ -15,6 +15,7 @@ from typing import Any
 from ..adapters.pytest_adapter import resolve_test_python
 from ..cli import run_once
 from ..config import AifixConfig
+from ..graph import MODEL_ABORT_KIND
 from ..nodes.baseline import COLLECTION_ABORT_KIND
 from ..signals import same_file
 from .task import Task, TaskResult
@@ -155,6 +156,15 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
                            detector_client=detector_client,
                            fixer_client=fixer_client)
 
+    if state.get("abort_kind") == MODEL_ABORT_KIND:
+        # 端点不通是**跑评测这台机器**的属性，不是被测模型的属性：换一台能
+        # 出网的机器，同一个模型就能修。与收集错误同类，走评测故障。
+        #
+        # 必须排在收集错误那条**之前**：探针挡在 baseline 之前，baseline_ids
+        # 是空的，于是这种情况会被下面那条更笼统的「baseline 未复现目标用例」
+        # 吸走，报告说「这个任务失效了」—— 又一句指错方向的诊断。
+        return blank.model_copy(update={
+            "error": f"模型端点不可达（评测故障，非模型失败）：{state.get('abort')}"})
     if state.get("abort_kind") == COLLECTION_ABORT_KIND:
         # 与墙钟中止同类，属于**评测故障**：baseline 全是收集错误说的是
         # 「跑评测的这台机器上缺东西」，是环境的属性，不是被测模型的属性 ——
