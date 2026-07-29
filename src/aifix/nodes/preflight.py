@@ -74,8 +74,12 @@ async def probe_model(config: AifixConfig, client: Any = None) -> str | None:
     from harness.llm.openai_compat import OpenAICompatibleClient
     from harness.types import Message, Role
 
-    c = client or OpenAICompatibleClient(config.fixer)
     try:
+        # 构造也必须在 try 里：没配 API key 时客户端在**构造阶段**就抛，而那
+        # 是最常见的第一次失败。留在外面的话异常会裸穿出 run_once（探针挡在
+        # 它那个 try 之前），用户拿到一段 openai 的调用栈、没有报告、没有下
+        # 一步 —— 而这恰恰是 preflight 存在的全部理由。
+        c = client or OpenAICompatibleClient(config.fixer)
         async with contextlib.aclosing(
                 c.stream([Message(role=Role.USER, content="ping")], [])) as st:
             async for _ in st:

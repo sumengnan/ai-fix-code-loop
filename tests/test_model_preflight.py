@@ -122,3 +122,21 @@ async def test_eval_counts_it_as_a_harness_failure(history_repo, monkeypatch):
     # 必须落在**这一条**分支上：baseline 还没跑，baseline_ids 是空的，
     # 「baseline 未复现目标用例」那条更笼统的分支会把它吸走并报「任务失效」
     assert "端点不可达" in res.error
+
+
+async def test_a_missing_api_key_is_caught_by_the_probe(monkeypatch):
+    """没配 key 是**最常见的第一次失败**，而客户端在**构造阶段**就会抛。
+
+    构造若留在 try 之外，异常会裸穿出 run_once（探针挡在那个 try 之前），
+    用户拿到一段 openai 的调用栈，没有报告、没有下一步 —— 而这恰恰是 preflight
+    存在的全部理由。
+    """
+    class _Boom:
+        def __init__(self, *a, **k):
+            raise RuntimeError(
+                "Missing credentials. Please pass an `api_key` ...")
+
+    monkeypatch.setattr(
+        "harness.llm.openai_compat.OpenAICompatibleClient", _Boom)
+    why = await probe_model(AifixConfig())
+    assert why and "AIFIX_FIXER__API_KEY" in why
