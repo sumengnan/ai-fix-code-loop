@@ -11,7 +11,7 @@ from ..adapters.junit import parse_junit
 from ..adapters.maven_adapter import MavenAdapter
 from ..adapters.pytest_adapter import (PytestAdapter, imports_outside_worktree,
                                        resolve_test_python)
-from ..graph import AifixState, trace_of
+from ..graph import COLLECTION_ABORT_KIND, AifixState, trace_of
 
 # 全项目唯一的适配器注册表。preflight_node 按插入顺序逐个 detect()，
 # adapter_for 按名字取，两种用法共用这一份数据 —— 曾经
@@ -117,6 +117,109 @@ def detect_adapter(repo: Path,
     return None
 
 
+# 判据的两个阈值，**同时成立**才中止。分开两条是因为它们防的不是同一件事：
+#
+# 条数下限防的是「小样本上的比例没有意义」。单独一条文件级 error 极可能就是
+# 这个仓库自己的 bug（某个模块被改名、忘了提交一个文件），那正是 aifix 该修
+# 的活；而且代价有界 —— 队列里就它一条，最多烧掉一个 failure 的预算。用比例
+# 拦它的话（1/1 = 100%）aifix 会在一整类正常仓库上打不开。
+#
+# 比例下限防的是「个别文件导不进来」被误当成环境故障。严格过半而不是「一条
+# 都不许」：真实仓库里确实可能有个别测试文件本来就 import 失败。
+#
+# 两条阈值在 pytest 与 Maven 上的做功并不一样，这一点必须写明白：**pytest
+# 只要有一条收集错误就会中断整轮收集**（实测 pytest 9.1.1，exit 2，报告里
+# 只剩那几条文件级 <error>，别的测试一个都没跑），所以 pytest 侧的占比在有
+# 收集错误时**恒为 1.0**，真正做功的只有条数那一条。比例那一条是给 Maven
+# 用的：surefire 不中断，一个测试类 @BeforeAll 炸了别的类照跑，报告里
+# 类级 error 与用例级失败是真会混在一起的。
+COLLECTION_ABORT_MIN_COUNT = 2
+COLLECTION_ABORT_RATIO = 0.5
+
+
+def file_level_ids(ids: list[str], adapter: ProjectAdapter) -> list[str]:
+    """baseline 里哪些 id 指的是一整个测试文件 / 测试类，而不是单个用例。
+
+    判据问适配器，不自己写一套语法。`eval/mine` 曾写死 `"::" not in i`，
+    而 `::` 是 pytest 的语法 —— Maven 的 id 一个都没有，于是**每一个**
+    Maven id 都被判成文件级。这里若重蹈覆辙，后果是对称的：一个纯用例
+    失败的 Maven baseline 会被整个误判成环境故障、当场中止。
+    """
+    return [i for i in ids if adapter.is_file_level_id(i)]
+
+
+def _collection_hint(adapter: ProjectAdapter) -> list[str]:
+    """针对具体适配器的「下一步该干什么」。
+
+    只有 pytest 那条路才谈解释器：Maven 走的是 `mvn`，劝人换 Python 解释器
+    是一句假话，而本项目把「消息说了一件代码没做的事」与数字造假同等对待。
+    """
+    if not isinstance(adapter, PytestAdapter):
+        return ["  最常见的成因是构建环境不完整（依赖没拉全、离线仓库缺件）—— "
+                "先在目标项目里手工跑一次测试命令，确认它自己能跑起来。"]
+    return [
+        "  最常见的成因：跑测试用的解释器里没有目标项目的测试依赖"
+        "（典型报错 ModuleNotFoundError: No module named '...'）。",
+        f"  本次用的测试解释器：{adapter.python}",
+        "  修法：把 AIFIX_TEST_PYTHON 指向**目标项目自己**的解释器，例如",
+        "    export AIFIX_TEST_PYTHON=/path/to/目标项目/.venv/bin/python",
+        "  先自己确认一句：那个解释器在目标项目里 `-m pytest -q` 能正常收集。",
+    ]
+
+
+def collection_error_abort(ids: list[str],
+                           adapter: ProjectAdapter) -> str | None:
+    """baseline 里文件级 error 占比过高 → 返回中止理由；否则 None。
+
+    存在的理由（实测挖出来的）：pytest 收集阶段整轮中断时**照样写出一份完整
+    的 JUnit 报告**，里面是一条条文件级 `<error>`。`_check_report` 拦的是
+    「一份报告都没写出来」，所以它一个异常都不会抛 —— 那些 error 被
+    `make_test_id` 老老实实翻译成可重跑的 node id，进 baseline_ids，进 queue。
+    于是 Detector 和 Fixer 被派去修「目标机器上没装某个包」这件事：真花钱，
+    连续失败熔断在第 3 个之后中止，而报告里那 3 行写的是「模型没修好」——
+    一个成绩，其实是一次故障；走评测的话会被记成模型的失分。
+
+    **中止而不是过滤**。过滤（把文件级 id 从队列里剔掉、剩下的真失败照修）
+    在这里是错的，有两个理由。一是 pytest 侧过滤完队列必然是空的（收集一中
+    断，报告里除了这些 error 什么都没有），「还剩的真失败」并不存在，run 会
+    以「修复 0 / 0、全绿、没活干」收场 —— 正是这条修复要消灭的那副样子。
+    二是更根本的：收集错误意味着**这份 baseline 是残缺的**，pytest 压根没跑
+    到后面的测试，我们不知道这个仓库其余部分是红是绿。悄悄扔掉几条 id 会把
+    「测量没做成」伪装成「测量做完了，只是少几条」。测量不可信时唯一诚实的
+    动作是停下来说清楚。
+
+    返回消息而不是抛异常：调用方要把它变成一次**有种类的中止**（报告照渲染、
+    评测记成故障而不是失分），抛出去会被 run_once 记成 crash。
+    """
+    if not ids:
+        return None
+    bad = file_level_ids(ids, adapter)
+    if len(bad) < COLLECTION_ABORT_MIN_COUNT:
+        return None
+    if len(bad) <= len(ids) * COLLECTION_ABORT_RATIO:
+        return None
+    shown = bad[:5]
+    more = f"（共 {len(bad)} 条，只列前 {len(shown)} 条）" if len(bad) > len(shown) else ""
+    return "\n".join([
+        # 这句话既做中止理由、又做开了逃生口时的警告，所以**不写「已中止」**：
+        # 逃生口开着的时候它并没有中止，一句自相矛盾的消息比没有消息更坏。
+        # 「中止」二字由报告的 `> **中止**：` 前缀负责说。
+        f"本次 baseline 的 {len(ids)} 个失败里有 {len(bad)} 个是"
+        "**整个测试文件 / 测试类没能跑起来**（收集阶段就失败，"
+        "不是某个用例断言不过）—— 这批 baseline 不可信。",
+        "  **这不是模型的问题，也不是这些测试本身的问题**："
+        "把它们当成待修用例排进队列，Detector 与 Fixer 会被派去修"
+        "「这台机器上缺了点什么」这件事，会真花钱，而报告最后写的是"
+        "「模型没修好」—— 一个成绩，其实是一次故障。",
+        *_collection_hint(adapter),
+        f"  没跑起来的{more}：",
+        *(f"    {i}" for i in shown),
+        "  如果确认这些**就是**这个仓库自己的 bug（例如某个模块被改名，"
+        "几个测试文件一起 import 不到），设 AIFIX_ALLOW_COLLECTION_ERRORS=1 "
+        "跳过这道闸，照常排队开修。",
+    ])
+
+
 def _check_report(worktree: Path, paths: list[Path], required: bool) -> None:
     """required 时至少要有一份报告，否则抛 —— 「没跑成」不能冒充「跑完了、全绿」。
 
@@ -206,11 +309,38 @@ async def baseline_node(state: AifixState) -> dict[str, Any]:
     的测量，没有下一轮可以兜底。测试进程没跑成时返回空集合，队列就是空的，
     run 以「修复 0 / 0、全绿、没活干」正常收场、退出码 0 —— 用户得到的是一句
     「你的仓库没问题」，而真相是测试压根没跑起来。
+
+    `require_report=True` 只拦得住「一份报告都没写出来」。报告写出来了、里面
+    却全是收集错误，是另一条缝，由 `collection_error_abort` 拦（见那里）。
+
+    `baseline_ids` 在中止分支里**照旧返回**：它是这一跑的真实测量结果，报告
+    与 trace 都不该因为我们不信任它就假装没看见。不可信的是「拿它当工单」这个
+    动作，所以被清空的是 queue。
     """
     adapter = adapter_from_state(state)
     warn_if_patch_may_be_invisible(state, adapter)
     fs = await run_full_suite(Path(state["worktree_path"]), adapter,
                               require_report=True)
     ids = sorted(fs.ids)
-    return {"baseline_ids": ids, "queue": list(ids),
-            "_failures": dict(fs.failures)}
+    out: dict[str, Any] = {"baseline_ids": ids, "queue": list(ids),
+                           "_failures": dict(fs.failures),
+                           "abort": None, "abort_kind": None}
+    bad = collection_error_abort(ids, adapter)
+    if bad is None:
+        return out
+    trace = trace_of(state)
+    if state["config"].allow_collection_errors:
+        # 逃生口开着也要留痕：一条被静默绕过的守卫等于没有守卫。写 stderr 是
+        # 因为报告要等整个 run 跑完才渲染，而这句话得在花钱之前说出来。
+        trace.fact("collection_errors_allowed",
+                   len(file_level_ids(ids, adapter)))
+        print(f"⚠️  警告：{bad}\n"
+              "    AIFIX_ALLOW_COLLECTION_ERRORS 已开启，"
+              "这批 id 会照常排队开修。", file=sys.stderr, flush=True)
+        return out
+    # 事实自己记：run_once 只在预算 / 崩溃两条路上记 abort，这条中止发生在
+    # 那之前。replay 与 trajectory 读的是事实，不是渲染出来的报告。
+    trace.fact("abort", bad)
+    trace.fact("abort_kind", COLLECTION_ABORT_KIND)
+    return {**out, "queue": [], "abort": bad,
+            "abort_kind": COLLECTION_ABORT_KIND}

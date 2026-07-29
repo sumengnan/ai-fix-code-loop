@@ -86,7 +86,9 @@ flowchart TD
 
 跑之前先做一次近似探测（`warn_if_patch_may_be_invisible`）：拿测试解释器问一句「worktree 里这些顶层包会从哪个文件导入」，凡是解析到 worktree **之外**的就往 stderr 打警告并在 trace 里记一条事实。它要挡的是「目标项目把自己可编辑安装进了那个解释器，于是每一轮验的都是源仓库里没打补丁的代码」——测试照绿、结论是假的。只报警不拦截，理由与边界见[适配器](adapters.md#换来的真实风险可编辑安装会让验证悄悄失效)。
 
-写入：`baseline_ids`、`queue`、`_failures`。
+跑完解析出 id 之后还有一道闸（`collection_error_abort`）：baseline 里**文件级收集错误**占比过高（条数 ≥ 2 且严格过半）时中止整个 run，`abort_kind = "collect"`。`require_report=True` 只拦得住「一份报告都没写出来」；报告写出来了、里面却全是「某个测试文件没能导入」，是另一条缝 —— 那些 error 会被翻译成可重跑的 node id 排进队列，然后模型被派去修「这台机器上缺了点什么」。判据、阈值取舍与绕过办法见[安全边界](safety.md#baseline-全是收集错误collect-中止)。
+
+写入：`baseline_ids`、`queue`、`_failures`、`abort`、`abort_kind`。中止时 `queue` 清空而 `baseline_ids` **照旧写**：它是这一跑的真实测量，不可信的是「拿它当工单」这个动作。
 
 随后 `run_once` 做两件事：`--test` 把队列过滤到只剩一个用例；`--dry-run` 把队列清空（不调用任何模型，接一个陌生项目时先看清工作量）。
 

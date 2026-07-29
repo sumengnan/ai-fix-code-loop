@@ -5,6 +5,13 @@ from typing import Any, TypedDict
 
 from .config import AifixConfig
 
+# `abort_kind` 的一个取值：baseline 里文件级收集错误占比过高，这批测量不可信。
+# 判据与消息在 nodes/baseline.collection_error_abort，常量放在这里是因为
+# **abort_kind 的契约由这个模块定义**，而读它的有三方（报告、CLI 退出码、
+# 评测的成绩/故障分类）—— 常量若跟着判据走，nodes/report 就得为了一个字符串
+# 去 import 整个 baseline 模块（连带 harness 沙箱）。
+COLLECTION_ABORT_KIND = "collect"
+
 
 class AifixState(TypedDict, total=False):
     """LangGraph 的宏观状态：跨 failure 的进度。
@@ -59,9 +66,10 @@ class AifixState(TypedDict, total=False):
 
     results: list[dict[str, Any]]
     abort: str | None
-    # 中止的**种类**（budget.exhaustion 的取值：tokens / usd / wall；熔断为
-    # None）。abort 是给人看的消息，种类是给程序判的：评测要据此区分
-    # 「模型没在预算内修好」（成绩）与「评测调度器的墙钟耗尽」（故障）。
+    # 中止的**种类**（budget.exhaustion 的取值：tokens / usd / wall；运行
+    # 崩溃为 crash；baseline 全是收集错误为 collect；熔断为 None）。abort 是
+    # 给人看的消息，种类是给程序判的：评测要据此区分「模型没在预算内修好」
+    # （成绩）与「评测调度器的墙钟耗尽 / 这台机器缺依赖」（故障）。
     abort_kind: str | None
     report_md: str
 

@@ -70,6 +70,21 @@ class AifixConfig(BaseSettings):
     # 但那是提醒，不是保证。
     test_python: str | None = None
 
+    # 允许「baseline 里文件级收集错误占比过高」的仓库照常排队开修
+    # （`AIFIX_ALLOW_COLLECTION_ERRORS`）。默认关：那种 baseline 绝大多数时候
+    # 是环境坏了 —— 测试依赖没装在这个解释器里 —— 而把它当工单排队会真花钱，
+    # 并把一次故障记成模型的失分（见 nodes/baseline.collection_error_abort）。
+    #
+    # 它**不是**一个没接线的旋钮（那种旋钮已经因为「给人可以打开的错觉」被
+    # 删过一次，见文件末尾的 allow_test_edits）：baseline_node 真的读它，
+    # 打开时还会往 stderr 出声并往 trace 记一条事实。
+    #
+    # 存在的理由是那道闸有真实的误判面：几个测试文件一起 import 不到同一个
+    # **仓库自己的**模块（改名、忘了提交）时，那是个真 bug，值得修，而判据
+    # 分不出它和「少装了一个第三方包」。没有这个开关的话，那类仓库上 aifix
+    # 直接打不开，用户唯一的出路是去改 aifix 的源码。
+    allow_collection_errors: bool = False
+
     budget_usd: float = 2.0
     budget_tokens: int = 500_000
     budget_wall_seconds: float = 1800.0

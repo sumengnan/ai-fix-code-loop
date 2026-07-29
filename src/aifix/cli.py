@@ -13,7 +13,7 @@ from .budget import RunBudget
 from .config import AifixConfig
 from .delivery import Worktree
 from .graph import AifixState, check_circuit_breaker, new_state
-from .nodes.baseline import baseline_node
+from .nodes.baseline import COLLECTION_ABORT_KIND, baseline_node
 from .nodes.detect import detect_node
 from .nodes.fix import fix_node
 from .nodes.preflight import preflight_node
@@ -385,9 +385,13 @@ def _cmd_run(args) -> None:
         Path(args.repo).resolve(), config, run_id=uuid.uuid4().hex[:8],
         only_test=args.test, dry_run=args.dry_run))
     print(state["report_md"])
-    if state.get("abort_kind") == "crash":
+    if state.get("abort_kind") in ("crash", COLLECTION_ABORT_KIND):
         # 报告先印出来（分支上可能真躺着可合并的修复），退出码再说明这次
         # 是崩的：退 0 的话流水线里「跑完了」和「炸了但报告还在」没有区别。
+        #
+        # 收集错误中止同样退非 0，理由是同一条：这次**没测成**。预算耗尽
+        # （tokens / usd / wall）相反，那是正常收场 —— 活干到钱花完为止，
+        # 结论仍然可信，所以仍退 0。
         raise SystemExit(1)
 
 

@@ -40,6 +40,8 @@
 
 `PytestAdapter` 的 argv[0] 曾经写死 `sys.executable`。那等于要求**目标项目的测试依赖装在 aifix 自己的解释器里** —— 真实项目从不满足这一条。实测：拿 aifix 的 venv 去跑 `ai-harness-framework` 的测试是 **11 个 collection error**（`Interrupted: 11 errors during collection`，一个用例都没跑到），换它自己的 `.venv` 是 **673 passed / 3 skipped**。
 
+那 11 个 collection error **不是空气**：pytest 收集中断时照样写出一份完整的 JUnit 报告，里面是一条条文件级 `<error>`，`make_test_id` 会老老实实把它们翻译成 11 个可重跑的 node id 排进队列。所以用错解释器的后果不止是「一个用例都没跑到」，还是「11 个凭空捏造的工单」。`baseline` 之后有一道闸专门查这件事并当场中止，判据见[安全边界](safety.md#baseline-全是收集错误collect-中止)。
+
 现在按三级取值，先到先得：
 
 | 来源 | 取值 | 说明 |

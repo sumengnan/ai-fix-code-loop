@@ -14,6 +14,7 @@ from typing import Any
 
 from ..cli import run_once
 from ..config import AifixConfig
+from ..nodes.baseline import COLLECTION_ABORT_KIND
 from ..signals import same_file
 from .task import Task, TaskResult
 from .workspace import prepare_task_repo
@@ -138,6 +139,19 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
                            detector_client=detector_client,
                            fixer_client=fixer_client)
 
+    if state.get("abort_kind") == COLLECTION_ABORT_KIND:
+        # 与墙钟中止同类，属于**评测故障**：baseline 全是收集错误说的是
+        # 「跑评测的这台机器上缺东西」，是环境的属性，不是被测模型的属性 ——
+        # 换一台把依赖装齐的机器，同一个模型就能修。记进修复成功率的分母，
+        # 等于让模型替我们的环境背锅，而这正是这条守卫要消灭的东西。
+        #
+        # 必须排在下面那条「baseline 未复现目标用例」**之前**：收集一中断，
+        # target_test 当然不在 baseline_ids 里，于是这种情况会被那条更笼统的
+        # 分支吸走，用户拿到的是「这个任务失效了」——一句指错方向的诊断，
+        # 真相是这一整批任务都还没开始跑就已经不可信了。
+        return blank.model_copy(update={
+            "error": f"baseline 全是收集错误（评测故障，非模型失败）："
+                     f"{state.get('abort')}"})
     if task.target_test not in state["baseline_ids"]:
         # 任务失效（源仓库变了、环境不同、测试本身不稳定）。这与「没修好」
         # 是两回事 —— 混进成功率会让被测系统替评测的问题背锅。

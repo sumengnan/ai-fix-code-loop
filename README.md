@@ -197,8 +197,11 @@ aifix stats                 跨 run 汇总
 | `AIFIX_CONSECUTIVE_FAILURE_LIMIT` | `3` | 连着几个没修好就中止整个 run |
 | `AIFIX_PRICE_MAP` | `{}` | `{"模型名": [输入价/1k, 输出价/1k]}` |
 | `AIFIX_TEST_PYTHON` | 自动探测 | 跑**目标项目**测试用的解释器。不配就找源仓库的 `.venv/bin/python` / `venv/bin/python`，再没有才退回 aifix 自己的解释器 |
+| `AIFIX_ALLOW_COLLECTION_ERRORS` | `false` | 允许「baseline 里全是测试文件收集失败」的仓库照常开修。默认关，见下 |
 
 **为什么需要 `AIFIX_TEST_PYTHON`**：目标项目的测试依赖装在**它自己**的环境里。写死 aifix 的解释器等于要求你把别人的依赖装进 aifix 的 venv —— 实测拿 aifix 的 venv 去跑 `ai-harness-framework`：11 个 collection error，一个用例都没跑到；换它自己的 `.venv`：673 passed。配了一个不可执行的路径时 **preflight 当场拒绝启动**，不会拖到 baseline 才以「测试没跑成」的面目出现。
+
+**用错解释器时会当场停下**：那 11 个 collection error 不是空气 —— pytest 收集中断时照样写出一份完整的 JUnit 报告，里面是一条条文件级 `<error>`，它们会被翻译成可重跑的 node id 排进队列。aifix 在 baseline 之后查一次占比（文件级 id 条数 ≥ 2 且严格过半即中止），中止消息里写明这不是模型的问题并指向 `AIFIX_TEST_PYTHON`，退出码 1。判据与绕过办法（`AIFIX_ALLOW_COLLECTION_ERRORS`）见[安全边界](docs/safety.md#baseline-全是收集错误collect-中止)。
 
 **配它就要知道一个陷阱**：目标项目若把自己可编辑安装（`pip install -e .`）进了那个解释器，`import <目标包>` 可能解析到**源仓库**而不是 worktree 里那份打了补丁的代码 —— 测试照跑照绿，验证的却是没打补丁的代码。aifix 在 baseline 之前做一次近似探测并往 stderr 出声，但那是提醒不是保证。可靠的自保是在目标项目的 pytest 配置里设 `pythonpath`（如 `[tool.pytest.ini_options] pythonpath = ["src"]`）。细节见 [适配器文档](docs/adapters.md#用哪个解释器跑-pytest)。
 
@@ -208,7 +211,7 @@ aifix stats                 跨 run 汇总
 
 ## 项目状态
 
-- **571 个测试**，全绿（2026-07-29 实测。全量耗时 378 / 384 / 388 / 420 / 466 / 581 / 658 / 678 秒——同一台机器连跑八次，最大差 79%，所以这里给的是八个读数而不是一个"权威"数字；本机装了 `mvn`，Maven 那批是真跑的）。约 5,400 行实现、10,000 行测试
+- **592 个测试**，全绿（2026-07-29 实测。全量耗时 378 / 384 / 388 / 420 / 466 / 581 / 658 / 678 / 726 秒——同一台机器连跑九次，最大差 92%，所以这里给的是九个读数而不是一个"权威"数字；本机装了 `mvn`，Maven 那批是真跑的）。约 5,500 行实现、10,200 行测试
 - 依赖 [ai-harness-framework](https://github.com/sumengnan/ai-harness-framework)（同作者，提供 AgentLoop / 沙箱 / 预算 / 遥测）
 - 第一阶段（M1 闭环 → M2 靠谱 → M3 可度量 → M3b 成本闸 → M4 有结论 → M5 跨语言与可诊断）已完成
 

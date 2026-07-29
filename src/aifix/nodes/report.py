@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from ..budget import fmt_usd
+from ..graph import COLLECTION_ABORT_KIND
 
 _VERDICT_CN = {"better": "已修复", "same": "未改善", "worse": "引入回归"}
 
@@ -99,10 +100,19 @@ def render_report(state: dict[str, Any]) -> str:
     ]
     if abort:
         lines += [f"> **中止**：{abort}", ""]
+    # 「修复 x / y」在收集错误中止下长得和一个成绩一模一样，而这次根本没开修：
+    # 分母是一批本就不该存在的工单数（每一条都是「某个测试文件没能导入」），
+    # 分子是「一个都没轮到」。用户实测里看到的正是这一行 ——「修复 0 / 11」——
+    # 它把一次环境故障读成了模型的失分。别的中止（预算耗尽、熔断）不在此列：
+    # 那时 baseline 是可信的，分母有意义，已修好的那些也该被数出来。
+    fixed_line = (
+        "- 修复：—（baseline 不可信，一个用例都没开修，见上方中止说明）"
+        if state.get("abort_kind") == COLLECTION_ABORT_KIND
+        else f"- 修复：**{fixed} / {total}**")
     lines += [
         f"- 适配器：{state['adapter_name']}",
         f"- 分支：`{state['branch']}`",
-        f"- 修复：**{fixed} / {total}**",
+        fixed_line,
         f"- 成本：{cost}",
         "",
         "| 测试用例 | 结果 | 尝试次数 | 中止原因 |",
