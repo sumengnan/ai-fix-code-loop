@@ -489,6 +489,27 @@ def _cmd_stats(args) -> None:
     print(_render_stats(query_stats(db), db))
 
 
+def _fmt_fixed(row: dict[str, Any]) -> str:
+    """一组 run 的修复数，**带完整性标注**。
+
+    三种形状，不能合并成一个数字：
+    - 全都解得出 → 合计就是合计
+    - 一个都解不出 → 破折号；写 0 等于替库里没有的数据下「一个都没修好」的结论
+    - 混着 → 最阴的一种。SQL 的 sum() 跳过 NULL，「1 次修好 2 个 + 2 次不知道」
+      聚合出来是 2，与「3 次一共修好 2 个」逐字节相同。读的人拿到一个看着正常
+      的假数字，而且没有任何线索能发现它是假的 —— 所以必须把「有几行取不到」
+      一并印出来，而不是只给一个求和值。
+    """
+    fixed, unknown = row.get("fixed"), row.get("unknown") or 0
+    runs = row.get("runs")
+    if fixed is None:
+        return f"修复 —（{runs} 次 run 都取不到修复数）"
+    if unknown:
+        return (f"修复 ≥{fixed} 个用例"
+                f"（不完整：{runs} 次 run 里有 {unknown} 次取不到修复数）")
+    return f"修复 {fixed} 个用例"
+
+
 def _render_stats(stats: dict[str, Any], db: Path) -> str:
     """把 query_stats 的三张小结渲染成人能读的中文。
 
@@ -502,9 +523,8 @@ def _render_stats(stats: dict[str, Any], db: Path) -> str:
     if not by_adapter:
         lines.append("  （库里还没有 run 记录）")
     for adapter, row in by_adapter.items():
-        fixed = row.get("fixed")
         lines.append(f"  {adapter or '未知'}：run {row.get('runs')} 次 · "
-                     f"修复 {'—' if fixed is None else fixed} 个用例")
+                     + _fmt_fixed(row))
 
     lines += ["", f"{hr} 守卫触发（按次数降序）{hr}"]
     hits = stats.get("guard_hits") or []

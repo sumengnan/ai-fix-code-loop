@@ -344,7 +344,26 @@ def test_没有_fact_的老产物回退解_report_md(tmp_path: Path) -> None:
 def test_query_stats_按_adapter_聚合_run_数与修复数(repo: Path) -> None:
     trajectory.ingest(repo)
     stats = trajectory.query_stats(repo)
-    assert stats["by_adapter"] == {"pytest": {"runs": 3, "fixed": 1}}
+    # unknown=0：这三个 run 的修复数都解得出来，合计是完整的
+    assert stats["by_adapter"] == {
+        "pytest": {"runs": 3, "fixed": 1, "unknown": 0}}
+
+
+def test_query_stats_单独报告取不到修复数的行数(repo: Path) -> None:
+    """`sum(fixed)` 跳过 NULL，光看合计分不出「修了 1 个」和「修了 1 个 +
+    2 次不知道」。unknown 是这个合计的完整性凭据，必须单独给出来。
+    """
+    for name in ("r_x", "r_y"):
+        d = repo / ".aifix" / "runs" / name
+        d.mkdir()
+        (d / "facts.jsonl").write_text(
+            json.dumps({"run_id": name, "key": "adapter", "value": "pytest"})
+            + "\n", encoding="utf-8")
+    trajectory.ingest(repo)
+
+    row = trajectory.query_stats(repo)["by_adapter"]["pytest"]
+
+    assert row == {"runs": 5, "fixed": 1, "unknown": 2}
 
 
 def test_query_stats_守卫触发次数按种类降序(repo: Path) -> None:

@@ -607,3 +607,34 @@ def test_stats_shows_a_dash_when_the_fixed_count_is_unknown(repo, capsys):
     # 恰好叫 pytest-of-<user>，含子串的取法会取到抬头
     pytest_line = [ln for ln in out.splitlines() if ln.startswith("  pytest：")]
     assert pytest_line and "修复 1" in pytest_line[0], pytest_line
+
+
+def test_stats_marks_a_partially_unknown_fixed_count_as_incomplete(repo, capsys):
+    """混合 NULL：一组里有的 run 解得出修复数、有的解不出。
+
+    这是「取不到被静默算成 0」真正的判据。上面那条用例造的老 run 连 adapter
+    都是 NULL，于是单独成组、整组全 NULL，破折号照常出现 —— 恰好躲开了洞。
+    这里的老 run **带 adapter**，与真产物同组：SQL 的 sum() 跳过 NULL，聚合
+    出来是一个看着完全正常的「修复 1 个用例」，而真相是「1 次修好 1 个，
+    另外 2 次不知道」。读的人没有任何办法看出这个数字不完整。
+    """
+    for name in ("r_nofix_1", "r_nofix_2"):
+        d = repo / ".aifix" / "runs" / name
+        d.mkdir()
+        # 只有 adapter，没有 fixed 也没有 report.md —— 修复数取不到
+        (d / "facts.jsonl").write_text(
+            json.dumps({"run_id": name, "key": "adapter", "value": "pytest"})
+            + "\n", encoding="utf-8")
+    _run_cmd(["ingest", "--repo", str(repo)])
+    capsys.readouterr()
+    _run_cmd(["stats", "--repo", str(repo)])
+    out = capsys.readouterr().out
+
+    line = next((ln for ln in out.splitlines()
+                 if ln.startswith("  pytest：")), None)
+    assert line, out
+    assert "run 5 次" in line, line
+    # 硬要求：渲染出来的东西要让人一眼看出这个数字不完整
+    assert "2 次取不到修复数" in line, line
+    # 且不许再给一个看着完整的求和值
+    assert "· 修复 1 个用例" not in line, line

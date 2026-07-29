@@ -231,9 +231,13 @@ def _resolve_db(db_or_repo: Path | str) -> Path:
 def query_stats(db_or_repo: Path | str) -> dict[str, Any]:
     """跨 run 的三张小结。
 
-    - `by_adapter`：{adapter: {"runs": n, "fixed": m}}。`fixed` 可能是 None
-      —— 那一批 run 的报告一个都没解出修复数时，写 0 就是在说「一个都没修
-      好」，那是另一回事。
+    - `by_adapter`：{adapter: {"runs": n, "fixed": m, "unknown": k}}。
+      `fixed` 可能是 None —— 那一批 run 的报告一个都没解出修复数时，写 0 就
+      是在说「一个都没修好」，那是另一回事。
+      `unknown` 是这一组里**修复数取不到的行数**，它不是冗余：SQL 的 `sum()`
+      跳过 NULL，一组里混着「解得出」和「解不出」时会聚合出一个看着完全正
+      常的数（1 次修好 2 个 + 2 次不知道 → `sum` 给 2），而单看这个数没有
+      任何办法判断它是不是完整的。渲染侧据此标注。
     - `guard_hits`：[(种类, 次数)]，按次数降序。
     - `signal_runs`：[(run_id, 可疑信号条数)]，按条数降序。
     """
@@ -245,11 +249,14 @@ def query_stats(db_or_repo: Path | str) -> dict[str, Any]:
         return empty
     con = sqlite3.connect(db)
     try:
+        # `sum(fixed IS NULL)` 与 `sum(fixed)` 必须一起取：前者是后者的完整
+        # 性凭据。只取后者的话，「取不到」被 sum 跳过，产出的合计与「这几次
+        # 都修了 0 个」逐字节相同。
         by_adapter = {
-            adapter: {"runs": n, "fixed": fixed}
-            for adapter, n, fixed in con.execute(
-                "SELECT adapter, count(*), sum(fixed) FROM runs "
-                "GROUP BY adapter ORDER BY count(*) DESC, adapter")}
+            adapter: {"runs": n, "fixed": fixed, "unknown": unknown}
+            for adapter, n, fixed, unknown in con.execute(
+                "SELECT adapter, count(*), sum(fixed), sum(fixed IS NULL) "
+                "FROM runs GROUP BY adapter ORDER BY count(*) DESC, adapter")}
         # 按 value 的 **JSON 文本** 分组，解 JSON 放到 Python 里做：标量的
         # JSON 编码是唯一的（json.dumps("empty_diff") 恒为 '"empty_diff"'），
         # 所以按文本分组与按值分组等价，却不依赖 SQLite 是否编进了 json1。
