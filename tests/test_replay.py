@@ -87,7 +87,9 @@ async def test_replay_shows_every_tool_call_and_result(run_dir):
     # 4. token 与成本：没配价格表时不许显示假的 $0.00
     assert "15" in out
     assert "$0.00" not in out
-    assert "未配置 AIFIX_PRICE_MAP" in out
+    # 说「未知」而不说原因：渲染器看到的只是 cost_usd 是 0，它不知道价格表
+    # 配没配（见 _COST_UNKNOWN）
+    assert "成本：未知" in out
     # 5. 领域事实：verdict 出现在写明归属的位置上
     verdict_block = [b for b in out.split("──") if "verdict" in b]
     assert verdict_block, "facts 里的 verdict 没被渲染"
@@ -196,11 +198,21 @@ async def test_unknown_step_number_is_reported(run_dir):
     assert "apply_patch" not in out
 
 
-def test_repo_stays_clean(buggy_repo):
-    """回放是只读的 —— 顺手守住这条，别让渲染器哪天开始写文件。"""
+async def test_repo_stays_clean(buggy_repo, run_dir):
+    """回放是只读的 —— 顺手守住这条，别让渲染器哪天开始写文件。
+
+    必须喂**真实的** run 目录：传一个不存在的 run 时 render 第一句
+    `if not run_dir.is_dir()` 就返回了，真正的渲染路径一行都没跑到 ——
+    这条断言配不上上面那句话，渲染器哪天开始写文件它也发现不了。
+    """
     before = subprocess.run(["git", "status", "--porcelain"], cwd=buggy_repo,
                             capture_output=True, text=True).stdout
-    render(buggy_repo / ".aifix" / "runs" / "无此 run")
+
+    out = render(run_dir, full=True)
+    render(run_dir, step=1)
+
+    # 前提：渲染路径真的跑到了（不是在「目录不存在」那一句就返回了）
+    assert "步骤" in out and "apply_patch" in out
     after = subprocess.run(["git", "status", "--porcelain"], cwd=buggy_repo,
                            capture_output=True, text=True).stdout
     assert before == after
@@ -324,3 +336,20 @@ async def test_facts_are_inserted_where_they_belong_not_piled_up_at_the_end(
     # run 级事实仍在（中止原因就挂在那儿），且开头那批保持原序排在最前
     assert "baseline_failures" in out
     assert out.index("baseline_failures") < first_sub_step
+
+
+def test_usage_does_not_blame_a_price_map_it_knows_nothing_about():
+    """「未知（未配置 AIFIX_PRICE_MAP）」把一个渲染器不知道的原因说成事实。
+
+    价格表配好了、但某一步的 usage 为 0 或字段缺失时（模型没回 usage、
+    这一步没发生模型调用），这句话就是假的。不知道原因就别说原因。
+    """
+    from aifix.replay import _fmt_usage
+
+    text = _fmt_usage({"usage": {"prompt": 10, "completion": 5, "total": 15},
+                       "model": "m"})
+
+    assert "未知" in text
+    assert "AIFIX_PRICE_MAP" not in text, text
+    # 区分度：真有成本时照常给数字，别把这一支也说成未知
+    assert "$0.5000" in _fmt_usage({"cost_usd": 0.5})

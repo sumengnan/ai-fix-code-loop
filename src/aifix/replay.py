@@ -31,7 +31,12 @@ _HR = "──"
 # 没配价格表时 effective_cost 恒为 0（或 None）—— 这个项目为「假的 $0.00」
 # 栽过两次（报告一次、对比表一次）。0 与「真的不花钱」在这里没法区分，
 # 宁可说不知道，也不要给一个看着精确的假数字。
-_COST_UNKNOWN = "未知（未配置 AIFIX_PRICE_MAP）"
+#
+# 不带原因：这一层看到的只是某一条事件里的 cost_usd 是 0 或缺失，它不知道
+# 价格表配没配。价格表配好了、而这一步的 usage 为 0 或字段缺失（模型没回
+# usage、这一步压根没发生模型调用）时，「未配置 AIFIX_PRICE_MAP」就是一句
+# 假话 —— 说错原因比不说原因更糟，读的人会照着它去改一个没问题的配置。
+_COST_UNKNOWN = "未知"
 
 
 def render(run_dir: Path, step: int | None = None,

@@ -505,7 +505,9 @@ def test_replay_renders_the_run_and_never_fakes_a_zero_cost(repo, capsys):
     assert "apply_patch" in out
     assert "return a + b" in out, "补丁正文要在，否则复盘看不到改了什么"
     assert "$0.00" not in out
-    assert "未配置 AIFIX_PRICE_MAP" in out
+    # 不带原因的「未知」：渲染器看到的只是 cost_usd 是 0，它不知道价格表
+    # 配没配（见 replay._COST_UNKNOWN）
+    assert "成本：未知" in out
 
 
 def test_replay_step_flag_is_wired_through(repo, capsys):
