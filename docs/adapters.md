@@ -58,7 +58,7 @@
 
 `make_test_id` 把 junit 报告里的一条 `<testcase>` 还原成**可以直接喂回 `scoped_test_command`** 的 id。pytest 侧三种形状全部来自实测：收集错误（`classname` 空，id 就是文件路径）、类内测试（`classname` 尾部超出模块路径的段是类名链，支持嵌套类）、模块级测试。
 
-`is_file_level_id` 问的是「这个 id 指的是一整个测试文件 / 测试类，而不是单个用例吗」。**收集阶段整体失败时报告里发的就是这种 id**：pytest 的测试文件导入失败发一条文件级 `<error>`，surefire 的测试类初始化失败发一条 `name` 为空的 `<testcase>`。挖任务时「测试文件在 `C^` 起不来、在 `C` 正常」是一整类候选 —— 实测本仓库 65 个候选 commit 里 32 个是那个形状。
+`is_file_level_id` 问的是「这个 id 指的是一整个测试文件 / 测试类，而不是单个用例吗」。**收集阶段整体失败时报告里发的就是这种 id**：pytest 的测试文件导入失败发一条文件级 `<error>`，surefire 的测试类初始化失败发一条 `name` 为空的 `<testcase>`。挖任务时「测试文件在 `C^` 起不来、在 `C` 正常」是一整类候选 —— 实测本仓库 65 个候选 commit 里 32 个是那个形状（2026-07-28 测；这个比例随仓库历史增长而变，重要的是它是**一整类**而不是零星几个）。
 
 `cases_under` 两侧都比**带分隔符的前缀**而不是裸 `startswith`：`tests/test_xyz.py::t` 不属于 `tests/test_x.py`，`demo.CalcTestHelper#x` 不属于 `demo.CalcTest`。
 
