@@ -335,6 +335,27 @@ def build_parser() -> argparse.ArgumentParser:
                      help="不印进度（进度本来就走 stderr，只在你连 stderr "
                           "一起收进日志时才需要它）")
 
+    rpr = sub.add_parser(
+        "reproduce", help="把一段缺陷报告译成一条复现测试（只到复现为止）",
+        epilog=_TEST_PYTHON_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="读一段自然语言的缺陷报告，写出一条复现测试并验证它在当前"
+                    "代码上**红着**，然后停下。不调用 fixer，不改任何产品代码。"
+                    "退出码 0 表示复现成功且红检通过 —— 这是个诊断命令，它问的"
+                    "问题就是「能不能复现」，退出码回答的是那个问题。"
+                    "（`aifix issue handle` 的口径不同：那边「写不出复现」是一条"
+                    "正常结论，退 0。）")
+    rpr.add_argument("repo", nargs="?", default=".")
+    rpr.add_argument("--issue-text", required=True, metavar="FILE",
+                     help="缺陷报告的文本文件。**首行当标题、其余当正文**，"
+                          "与 git commit message 同形 —— 拿历史上真实的修复"
+                          "commit message 直接喂进来就能量准确率")
+    rpr.add_argument("--title", default=None,
+                     help="覆盖标题；给了它，--issue-text 整个文件都算正文")
+    rpr.add_argument("--keep", action="store_true",
+                     help="保留写下去的测试文件。默认跑完删掉 —— 诊断命令"
+                          "不该改你的仓库，而红检必须让它真的落盘才跑得起来")
+
     mine = sub.add_parser(
         "mine", help="从 git history 挖任务集", epilog=_TEST_PYTHON_HELP,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -421,7 +442,8 @@ def _dispatch() -> dict[str, Any]:
     argparse 照样解析成功、一个分支都不匹配、退出码 0 —— 命令静默什么都不做，
     这种失败在手工试用时最容易被当成「跑了但没输出」。
     """
-    return {"run": _cmd_run, "mine": _cmd_mine, "mutate": _cmd_mutate,
+    return {"run": _cmd_run, "reproduce": _cmd_reproduce, "mine": _cmd_mine,
+            "mutate": _cmd_mutate,
             "eval": _cmd_eval, "eval-report": _cmd_eval_report,
             "replay": _cmd_replay, "ingest": _cmd_ingest, "stats": _cmd_stats}
 
@@ -451,6 +473,81 @@ def _cmd_run(args) -> None:
         # （tokens / usd / wall）相反，那是正常收场 —— 活干到钱花完为止，
         # 结论仍然可信，所以仍退 0。
         raise SystemExit(1)
+
+
+def _cmd_reproduce(args, client: Any = None) -> None:
+    """只到复现为止。零 fixer 调用。
+
+    client 是测试注入口，与 run_once 的 detector_client / fixer_client 同款：
+    产品路径永远传 None，由 reproduce() 自己按配置建。
+    """
+    from .adapters.pytest_adapter import resolve_test_python
+    from .nodes.baseline import detect_adapter
+    from .reproduce import red_check, reproduce, write_reproduction
+
+    repo = Path(args.repo).resolve()
+    text = Path(args.issue_text).read_text(encoding="utf-8")
+    if args.title is not None:
+        title, body = args.title, text
+    else:
+        title, _, body = text.partition("\n")
+
+    config = AifixConfig()
+    adapter = detect_adapter(
+        repo, python=resolve_test_python(repo, config.test_python))
+    if adapter is None:
+        print(f"没有适配器认领这个项目：{repo}")
+        raise SystemExit(1)
+
+    print(f"# aifix reproduce\n\n- 适配器：{adapter.name}\n- 标题：{title.strip()}\n")
+    out = asyncio.run(reproduce(repo, adapter, config, title.strip(),
+                                body.strip(), client=client))
+    _print_cost(out.tokens, out.cost_usd, config)
+
+    if out.reproduction is None or not out.reproduction.can_reproduce:
+        print(f"\n**未能复现。**\n\n{out.reason}")
+        raise SystemExit(1)
+
+    r = out.reproduction
+    target = repo / r.test_file
+    if target.exists():
+        # 覆盖掉一个真实的测试文件，代价不是「文件没了」（git 里还有），
+        # 是那一整个文件的用例在这次测量里凭空消失，而它们本该被计入。
+        print(f"\n**停手：`{r.test_file}` 已存在。**\n\n"
+              "  模型给出的路径撞上了仓库里已有的文件。换个 issue 措辞重试，"
+              "或先把那个文件挪开。")
+        raise SystemExit(1)
+
+    written = write_reproduction(repo, r)
+    ok = False          # red_check 抛出时下面那句 SystemExit 到不了，但别让
+    try:                # 「未定义」成为可能——这一行是给读代码的人看的
+
+        print(f"\n## 复现测试 · `{r.test_file}`\n\n"
+              f"```\n{r.test_code}```\n\n目标用例：`{r.target_test_id}`\n")
+        ok, reason = asyncio.run(red_check(repo, adapter, r.target_test_id))
+        if ok:
+            print("**红检通过** —— 这条测试在当前代码上失败，且失败在用例级。")
+        else:
+            print(f"**红检未通过。**\n\n{reason}")
+    finally:
+        # 诊断命令不该改用户的仓库。红检要求文件真的落盘，所以只能事后收拾。
+        if not args.keep:
+            written.unlink(missing_ok=True)
+        else:
+            print(f"\n（已保留 {written}）")
+    raise SystemExit(0 if ok else 1)
+
+
+def _print_cost(tokens: int, usd: float, config: AifixConfig) -> None:
+    """没配价格表时印「未知」而不是 $0.0000。
+
+    一行整齐的 $0.0000 会被读成「极其便宜」，而真相是这一列没数据。
+    这个项目为「假的 $0.00」栽过三次。
+    """
+    if cost_is_unknown(tokens, usd):
+        print(f"- 成本：未知（{tokens:,} tokens，未配 AIFIX_PRICE_MAP）")
+    else:
+        print(f"- 成本：${usd:.4f}（{tokens:,} tokens）")
 
 
 def _cmd_mine(args) -> None:
