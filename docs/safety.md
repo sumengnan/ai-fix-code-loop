@@ -57,6 +57,7 @@ Detector 那一路更彻底：`ToolRegistry()` 是**空的**，`max_steps=1`，�
 - **在哪**：`ApplyPatchTool._guard`（`src/aifix/tools/patch.py`）
 - **阈值**：没有阈值，无条件拒绝。判据是 `signals.under_dirs(path, adapter.test_dirs())`
 - **绕过的后果**：整个系统失去意义 —— 报告会写「已修复」，而补丁删的是断言。
+- **没有开关，这是有意的**：`AifixConfig` 里曾有一个 `allow_test_edits: bool = False`，从 M1 起就没有被任何地方读过（守卫一直是无条件的），已删除。删而不接，因为测试是这个系统判「修好了」的 **oracle** —— 允许 agent 改测试等于允许它改判卷标准。一个没接线的危险旋钮比没有旋钮更糟：它给人「需要时可以打开」的错觉。真要开这个口子是一次需要认真设计的改动（启动时的响亮警告、trace 里的显式记录、报告里的红字标注、评测里单独一列），不是把一个 bool 接上去。`tests/test_config.py::test_已移除的_allow_test_edits_不会复活` 钉住它不再回来。
 
 它的历史值得单独一节，见下面[「守卫本身也需要被攻击性地测试」](#守卫本身也需要被攻击性地测试)。
 
@@ -212,5 +213,5 @@ macOS 与 Windows 的文件系统默认不区分大小写。`a/TESTS/test_add.py
 ## 已知的局限
 
 - **静态信号挡不住「在测试覆盖范围内把实现改成特例硬编码」。** 那需要覆盖率差分甚至语义分析。这不是一个能靠加守卫彻底解决的问题 —— 它是**目标项目测试覆盖率作为系统天花板**的直接后果。实证案例见[评测](evaluation.md)的「规格套利」一节。
-- **`AifixConfig.allow_test_edits` 是一个死配置项。** 它声明在 `src/aifix/config.py`，但 `src/` 里没有任何地方读它 —— `ApplyPatchTool` 的测试文件守卫是无条件的。设置 `AIFIX_ALLOW_TEST_EDITS=true` 不报错，也不产生任何效果。失效方向是安全的（守卫照拦），但它现在是一个接受你的输入然后什么都不做的旋钮。
+- **配置项拼错不会报错。** `AifixConfig` 的 `model_config` 用 `extra="ignore"`，这是有意的 —— 它读的是进程环境，而进程环境不归它管：改成 `extra="forbid"`，上游镜像 / CI runner / 容器基座往里塞一个 `AIFIX_` 开头的变量就会让所有人启动失败。代价是 `AIFIX_MAX_ATTEMTPS=5` 这类拼写错误被静默吸收，看起来设上了，实际用的是默认值 —— 而报告里**没有**印出生效配置，所以这件事目前没有事后自查的办法，只能在设的时候拼对。同样的道理：一个配置项被删掉之后，对应的环境变量仍然设得上、仍然什么都不做（`AIFIX_ALLOW_TEST_EDITS` 就是这样一个已删字段）。
 - **成本闸中止时的清理不完整。** `consume()` 越线后 `aclose()` 只关掉了框架 `AgentLoop.run()` 的外层壳，真正持有 `ExitStack`（还原「打转纠偏」时调高的采样温度）和三个 OpenTelemetry span 的 `_run_from` 挂在原地，要等事件循环回收异步生成器才被终结。**升温泄漏给下一次调用的隐患仍然完整存在**，还原时机不确定。跑成本闸测试时打出来的 `Failed to detach context` 堆栈就是这件事的收据 —— 没有给它装 filter 消音，因为那等于撕掉收据、隐患照旧。真修需要给框架的 `run()` / `resume()` 各包一层 `contextlib.aclosing`。细节写在 `src/aifix/agents/runner.py`。

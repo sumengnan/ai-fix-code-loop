@@ -9,8 +9,23 @@ def test_defaults():
     assert c.budget_usd == 2.0
     assert c.budget_tokens == 500_000
     assert c.budget_wall_seconds == 1800.0
-    assert c.allow_test_edits is False
     assert c.fixer_max_steps == 25
+
+
+def test_已移除的_allow_test_edits_不会复活(monkeypatch):
+    """测试文件守卫无条件生效，没有任何配置项能关掉它。
+
+    这个字段声明过、但从来没有被 src/ 里任何地方读过（守卫是无条件的），
+    已删除。这条测试钉的不是「删干净了」而是「不许再悄悄加回来」：接一个
+    bool 上去就能让 agent 改测试，而测试正是这个项目判「修好了」的 oracle。
+    """
+    monkeypatch.setenv("AIFIX_ALLOW_TEST_EDITS", "true")
+    c = AifixConfig()
+    assert not hasattr(c, "allow_test_edits")
+    # 顺带钉住 extra="ignore" 的代价：环境变量被静默吸收，不报错也不生效。
+    # 这是有意的（不能让上游多设一个变量就让所有人起不来），但它意味着
+    # 拼错的配置名同样不会报错 —— 知道这一点，才不会误以为「设了就生效」。
+    assert "allow_test_edits" not in c.model_dump()
 
 
 def test_nested_env_overrides(monkeypatch):

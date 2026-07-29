@@ -551,10 +551,15 @@ class AifixConfig(BaseSettings):
     max_attempts: int = 3
     max_diff_lines: int = 300
     consecutive_failure_limit: int = 3
-    allow_test_edits: bool = False
 ```
 
 两条模型路由各是一个 `HarnessConfig`，复用框架配置类；`AIFIX_DETECTOR__MODEL` / `AIFIX_FIXER__MODEL` 嵌套环境变量由 pydantic-settings 原生支持。
+
+**`allow_test_edits: bool = False` 已移除。** 本节原先列过这个字段。它从 M1 起就没有被 `src/` 里任何地方读过 —— `ApplyPatchTool._guard` 的测试文件守卫是**无条件**的，`AIFIX_ALLOW_TEST_EDITS=true` 会被正常吸收、不报错、不产生任何效果。失效方向是安全的（守卫照拦，fails closed），但它是一个接受你的输入然后什么都不做的旋钮。
+
+**不接线而是删掉**，理由是本规格自己的核心主张：只有零 LLM 的确定性代码有资格说「修好了」，而**测试就是那个 oracle**。允许 agent 改测试等于允许它改判卷标准 —— M3 的真实验收里模型把 `add` 改成有状态函数去满足一个自相矛盾的断言，已经证明了它有多想走这条路。一个没接线的危险旋钮比没有旋钮更糟：它给人「需要时可以打开」的错觉。真要开这个口子，那是一次需要认真设计的改动 —— 至少要有启动时的响亮警告、trace 里的显式记录、报告里的红字标注、评测里单独一列 —— 而不是把一个 bool 接上去。
+
+（`model_config` 用 `extra="ignore"`，所以删除之后 `AIFIX_ALLOW_TEST_EDITS` 仍会被静默吸收。这是有意的：改成 `extra="forbid"`，上游多设一个 `AIFIX_` 开头的环境变量就会让所有人启动失败。代价是拼错的配置名同样不报错。）
 
 ### CLI
 

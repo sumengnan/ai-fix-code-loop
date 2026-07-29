@@ -11,6 +11,12 @@ class AifixConfig(BaseSettings):
     嵌套环境变量：AIFIX_DETECTOR__MODEL / AIFIX_FIXER__BASE_URL 等。
     """
 
+    # extra="ignore" 是**有意**的：这个类读的是进程环境，而进程环境不归它管。
+    # 上游镜像、CI runner、容器基座随时会往里塞 AIFIX_ 开头的变量，改成
+    # extra="forbid" 等于把「别人多设了一个环境变量」变成「所有人起不来」。
+    # 代价必须写明：**拼错的配置名不会报错，只会静默失效**。已经删掉的字段
+    # 同理 —— AIFIX_ALLOW_TEST_EDITS=true 至今仍会被安静吸收（见下方注释）。
+    # 所以配置项改名/删除时，光删字段不够，得同步改文档。
     model_config = SettingsConfigDict(
         env_prefix="AIFIX_", env_nested_delimiter="__", extra="ignore")
 
@@ -73,4 +79,17 @@ class AifixConfig(BaseSettings):
     # 它会在产物目录下留一个 sqlite 文件，按需开启。
     enable_checkpoint: bool = False
 
-    allow_test_edits: bool = False
+    # 这里曾有一个 allow_test_edits: bool = False，**已移除**：从 M1 起就没有
+    # 任何地方读它，ApplyPatchTool._guard 的测试文件守卫是无条件的。它不是
+    # 回归掉的，是从来没接上过。
+    #
+    # 不接线而是删掉，因为这个项目的核心主张是「只有零 LLM 的确定性代码有
+    # 资格说修好了」，而**测试就是那个 oracle**。允许 agent 改测试等于允许它
+    # 改判卷标准 —— M3 的真实验收里模型把 add 改成有状态函数去满足一个自相
+    # 矛盾的断言，已经证明它有多想走这条路。一个没接线的危险旋钮比没有旋钮
+    # 更糟：它给人「需要时可以打开」的错觉。真要开这个口子是一次需要认真设计
+    # 的改动（启动时的响亮警告、trace 里的显式记录、报告里的红字标注、评测里
+    # 单独一列），不是把一个 bool 接上去。理由见 docs/safety.md。
+    #
+    # 因为上面的 extra="ignore"，AIFIX_ALLOW_TEST_EDITS=true 现在仍会被静默
+    # 吸收 —— 与删除之前一样不产生任何效果，没有变得更糟。
