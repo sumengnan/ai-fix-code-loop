@@ -37,6 +37,8 @@ Detector 那一路更彻底：`ToolRegistry()` 是**空的**，`max_steps=1`，�
 
 所有子进程都由 `LocalSandbox(workspace=<worktree 路径>)` 启动，cwd 是 worktree。测试命令、`git apply`、`git diff`、`git ls-files` 全部在那里跑。
 
+pytest 那条命令的 argv[0] 是**目标项目自己的解释器**（`AIFIX_TEST_PYTHON`，或探测到的源仓库 `.venv/bin/python`；见[适配器](adapters.md#用哪个解释器跑-pytest)）。cwd 仍然是 worktree —— 解释器换了，被跑的代码没换。这一条正是下面「已知的局限」里那个陷阱的着力点：解释器带着自己的 site-packages 进来，而那里面可能有一条指回**源仓库**的路。
+
 ### 四、git：worktree + 分支
 
 改动只发生在 `<repo>/.aifix/runs/<run_id>/tree`，那是从 HEAD 创建的独立 worktree，挂在分支 `aifix/<run_id>` 上。主工作区**绝不被触碰**。
@@ -214,4 +216,5 @@ macOS 与 Windows 的文件系统默认不区分大小写。`a/TESTS/test_add.py
 
 - **静态信号挡不住「在测试覆盖范围内把实现改成特例硬编码」。** 那需要覆盖率差分甚至语义分析。这不是一个能靠加守卫彻底解决的问题 —— 它是**目标项目测试覆盖率作为系统天花板**的直接后果。实证案例见[评测](evaluation.md)的「规格套利」一节。
 - **配置项拼错不会报错。** `AifixConfig` 的 `model_config` 用 `extra="ignore"`，这是有意的 —— 它读的是进程环境，而进程环境不归它管：改成 `extra="forbid"`，上游镜像 / CI runner / 容器基座往里塞一个 `AIFIX_` 开头的变量就会让所有人启动失败。代价是 `AIFIX_MAX_ATTEMTPS=5` 这类拼写错误被静默吸收，看起来设上了，实际用的是默认值 —— 而报告里**没有**印出生效配置，所以这件事目前没有事后自查的办法，只能在设的时候拼对。同样的道理：一个配置项被删掉之后，对应的环境变量仍然设得上、仍然什么都不做（`AIFIX_ALLOW_TEST_EDITS` 就是这样一个已删字段）。
+- **可编辑安装能让验证悄悄失效，aifix 只出声、不解决。** 目标项目若把自己 `pip install -e .` 进了测试解释器，site-packages 里会留一条指向**源仓库**的路径记录，于是 `import <目标包>` 可能解析到源仓库那份**没打补丁**的代码 —— 测试照跑照绿，而 `verify`（系统里唯一有资格说「修好了」的地方）验的是原代码。这是这个项目最怕的那类失效：不崩溃、不报错，只有结论是假的。`baseline` 之前会跑一次 `imports_outside_worktree()` 并往 stderr 出声，但**它是近似**：它复现不了 `conftest.py` 里手写的 `sys.path` 改动、`--import-mode=importlib` 的细节和 rootdir 之外的插件，**返回空不等于安全**。不把它升级成拦截，是因为一个会误报的信号如果有权中止整个 run，用户为了跑起来就会去关掉它 —— 那比没有更糟。真正的自保是在目标项目的 pytest 配置里设 `pythonpath`。理由与实测见[适配器](adapters.md#换来的真实风险可编辑安装会让验证悄悄失效)。
 - **成本闸中止时的清理不完整。** `consume()` 越线后 `aclose()` 只关掉了框架 `AgentLoop.run()` 的外层壳，真正持有 `ExitStack`（还原「打转纠偏」时调高的采样温度）和三个 OpenTelemetry span 的 `_run_from` 挂在原地，要等事件循环回收异步生成器才被终结。**升温泄漏给下一次调用的隐患仍然完整存在**，还原时机不确定。跑成本闸测试时打出来的 `Failed to detach context` 堆栈就是这件事的收据 —— 没有给它装 filter 消音，因为那等于撕掉收据、隐患照旧。真修需要给框架的 `run()` / `resume()` 各包一层 `contextlib.aclosing`。细节写在 `src/aifix/agents/runner.py`。

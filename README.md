@@ -196,6 +196,11 @@ aifix stats                 跨 run 汇总
 | `AIFIX_MAX_DIFF_LINES` | `300` | 超过即判为整文件重写 |
 | `AIFIX_CONSECUTIVE_FAILURE_LIMIT` | `3` | 连着几个没修好就中止整个 run |
 | `AIFIX_PRICE_MAP` | `{}` | `{"模型名": [输入价/1k, 输出价/1k]}` |
+| `AIFIX_TEST_PYTHON` | 自动探测 | 跑**目标项目**测试用的解释器。不配就找源仓库的 `.venv/bin/python` / `venv/bin/python`，再没有才退回 aifix 自己的解释器 |
+
+**为什么需要 `AIFIX_TEST_PYTHON`**：目标项目的测试依赖装在**它自己**的环境里。写死 aifix 的解释器等于要求你把别人的依赖装进 aifix 的 venv —— 实测拿 aifix 的 venv 去跑 `ai-harness-framework`：11 个 collection error，一个用例都没跑到；换它自己的 `.venv`：673 passed。配了一个不可执行的路径时 **preflight 当场拒绝启动**，不会拖到 baseline 才以「测试没跑成」的面目出现。
+
+**配它就要知道一个陷阱**：目标项目若把自己可编辑安装（`pip install -e .`）进了那个解释器，`import <目标包>` 可能解析到**源仓库**而不是 worktree 里那份打了补丁的代码 —— 测试照跑照绿，验证的却是没打补丁的代码。aifix 在 baseline 之前做一次近似探测并往 stderr 出声，但那是提醒不是保证。可靠的自保是在目标项目的 pytest 配置里设 `pythonpath`（如 `[tool.pytest.ini_options] pythonpath = ["src"]`）。细节见 [适配器文档](docs/adapters.md#用哪个解释器跑-pytest)。
 
 **为什么没配价格表就拒绝启动**：不配价格表时成本恒为 0，美元闸永远不会触发。你设了上限，系统欣然接受，然后一分钱不拦。与其给一个假的保证，不如现在就停。
 
@@ -203,11 +208,13 @@ aifix stats                 跨 run 汇总
 
 ## 项目状态
 
-- **546 个测试**，全绿（2026-07-29 实测。全量耗时 378 / 384 / 466 / 581 / 678 秒——同一台机器连跑五次，最大差 79%，所以这里给的是四个读数而不是一个"权威"数字；本机装了 `mvn`，Maven 那批是真跑的）。约 5,400 行实现、10,000 行测试
+- **571 个测试**，全绿（2026-07-29 实测。全量耗时 378 / 384 / 388 / 420 / 466 / 581 / 658 / 678 秒——同一台机器连跑八次，最大差 79%，所以这里给的是八个读数而不是一个"权威"数字；本机装了 `mvn`，Maven 那批是真跑的）。约 5,400 行实现、10,000 行测试
 - 依赖 [ai-harness-framework](https://github.com/sumengnan/ai-harness-framework)（同作者，提供 AgentLoop / 沙箱 / 预算 / 遥测）
 - 第一阶段（M1 闭环 → M2 靠谱 → M3 可度量 → M3b 成本闸 → M4 有结论 → M5 跨语言与可诊断）已完成
 
 **还没做的**（都是有意留的，不是忘了）：覆盖率差分、SWE-bench Lite / Defects4J 的对外可比数字、任务/issue 驱动（输入变成自然语言，系统先写复现测试）、自动开 PR、第三个适配器。
+
+**已知限制**：目标项目把自己可编辑安装进测试解释器时，`import <目标包>` 可能解析到源仓库而不是打了补丁的 worktree —— aifix 只做一次**近似**探测并出声，不解决（解决它要么接管目标项目的安装方式，要么改写它的 `sys.path`）。那道探测复现不了 `conftest.py` 里手写的 `sys.path` 改动，**返回空不等于安全**。见 [适配器文档](docs/adapters.md#换来的真实风险可编辑安装会让验证悄悄失效)。
 
 **明确不做**：Web UI、Reviewer agent、主动扫描驱动、自动 merge。
 

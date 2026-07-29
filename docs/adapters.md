@@ -22,7 +22,7 @@
 
 | 成员 | `PytestAdapter` | `MavenAdapter` |
 |---|---|---|
-| `full_test_command() -> list[str]` | `python -B -m pytest -q -p no:cacheprovider -o junit_family=xunit1 --junitxml=.aifix-report.xml` | `mvn -B -q -o clean test -Dmaven.test.failure.ignore=true` |
+| `full_test_command() -> list[str]` | `<测试解释器> -B -m pytest -q -p no:cacheprovider -o junit_family=xunit1 --junitxml=.aifix-report.xml` | `mvn -B -q -o clean test -Dmaven.test.failure.ignore=true` |
 | `scoped_test_command(test_ids) -> list[str]` | 同上，换 `--junitxml=.aifix-recheck.xml`，末尾追加 id | 追加 `-Dtest=<逗号连接>` 与 `-DfailIfNoSpecifiedTests=false` |
 | `report_paths(worktree, scoped=False) -> list[Path]` | 单份：`.aifix-report.xml` 或 `.aifix-recheck.xml` | 整目录：`target/surefire-reports/TEST-*.xml` |
 
@@ -35,6 +35,39 @@
 - Maven 的 `clean`：`mvn test` **不清空** `target/surefire-reports/`，而 `report_paths` 只看文件系统当前状态。跑一次全量留下 A、B、C，再跑只测 A 的复跑，目录里仍躺着上一轮的 B、C —— flaky 确认据此判定，**不报错，只是判错**
 - Maven 的 `-Dmaven.test.failure.ignore=true`：测试一红 `mvn` 就以非 0 退出，而报告那时**已经写出来了**。不加的话调用方会把退出码读成「没跑成」，而「没跑成」和「跑完了、有红的」在这个项目里是两种完全不同的结论
 - `scoped` 参数是决定性的，不是排版细节：pytest 侧两份报告必须**不同名**（复跑会覆盖掉还要继续用的全量报告）；Maven 侧由 surefire 写在同一个目录，忽略这个参数即可
+
+### 用哪个解释器跑 pytest
+
+`PytestAdapter` 的 argv[0] 曾经写死 `sys.executable`。那等于要求**目标项目的测试依赖装在 aifix 自己的解释器里** —— 真实项目从不满足这一条。实测：拿 aifix 的 venv 去跑 `ai-harness-framework` 的测试是 **11 个 collection error**（`Interrupted: 11 errors during collection`，一个用例都没跑到），换它自己的 `.venv` 是 **673 passed / 3 skipped**。
+
+现在按三级取值，先到先得：
+
+| 来源 | 取值 | 说明 |
+|---|---|---|
+| 1. 显式配置 | `AIFIX_TEST_PYTHON` / `AifixConfig.test_python` | 用户说了算，优先级最高。指到一个不可执行的路径时 **preflight 当场中止** |
+| 2. 自动探测 | 源仓库的 `.venv/bin/python`，其次 `venv/bin/python`（Windows 是 `Scripts/python.exe`，未在真机验证） | 要求文件存在**且可执行** |
+| 3. 回退 | `sys.executable` | 改造之前的唯一行为，逐点不变 |
+
+**探测目标是源仓库，不是 worktree** —— 这不是风格问题：worktree 建在 `.aifix/runs/<id>/tree`（git worktree），评测建在 `git clone --local` 出来的临时目录，两者都**不含** `.venv`（它没被 git 跟踪）。照着 worktree 探，探测永远为空，整个功能静默退化成 `sys.executable` 而不报任何错。解释器路径是绝对的，跑测试的 cwd 是 worktree，跨目录用没有问题。
+
+注入点是**构造参数**（`PytestAdapter(python=...)`），不是新的协议方法：`full_test_command()` 不接参数是协议里写死的，而 `MavenAdapter` 根本不需要解释器（`mvn` 是外部命令）。代价是 `MavenAdapter.__init__` 也得收下这个参数并丢掉 —— 不收的话，`adapter_for` 那行 `ADAPTERS[name](python=...)` 会让任何 Maven 工程在**取适配器**时 `TypeError`。核心循环的四个节点（baseline / detect / fix / verify）统一走 `nodes.baseline.adapter_from_state`，只有它同时握着 `state["repo"]` 和 `state["config"]`；漏掉 fix 那一处的代价最隐蔽：`RunTestsTool` 会用另一个解释器复跑，模型看到的证据和 verify 的判定依据不是同一套环境，而两边都不报错。
+
+#### 换来的真实风险：可编辑安装会让验证悄悄失效
+
+目标项目如果把自己**可编辑安装**（`pip install -e .`）进了那个 venv，site-packages 里会留一条指向**源仓库**的路径记录。于是 `import <目标包>` 可能解析到源仓库那份**没打补丁**的代码，而不是 worktree 里打了补丁的那份 —— 测试照跑、照绿，验证却完全失去意义。这正是这个项目最怕的那类失效：不崩溃、不报错，只有结论是假的。
+
+`ai-harness-framework` 之所以没踩到，不是运气：它的 `.venv` 里**确实**躺着 `_editable_impl_ai_harness_framework.pth`，内容就是源仓库的 `src` 绝对路径；救它的是 `pyproject.toml` 里的 `pythonpath = ["src"]` —— pytest 会把 **worktree 的** `src` 插到 `sys.path` 最前，盖过那条记录。**这不普遍成立**：src 布局 + 没配 `pythonpath` 的项目就会中招。
+
+aifix **不解决**这件事（要么接管目标项目的安装方式，要么改写它的 `sys.path`，两件都超出适配器的职权），只在它发生时出声：`imports_outside_worktree()` 在 baseline 之前跑一次，拿目标解释器问「worktree 里这些顶层包会从哪个文件导入」，凡是解析到 worktree 之外的都往 stderr 打一条警告，并在 trace 里记一条 `imports_outside_worktree` 事实。
+
+这道探测的边界必须写清楚：
+
+- **它是近似**。它用 `python -c` 复现 pytest 的 `sys.path` 前几项（cwd + ini 里的 `pythonpath` + 环境里的 `PYTHONPATH`），复现不了 `conftest.py` 里手写的 `sys.path` 改动、`--import-mode=importlib` 的细节、rootdir 之外的插件。**返回空不等于安全。**
+- **它只报警，不拦截**。一个可能误报的信号如果有权中止整个 run，用户为了跑起来就会去关掉它，那比没有更糟。
+- **必须读 ini 里的 `pythonpath`**，否则「src 布局 + 配了 `pythonpath`」这个**正常且安全**的配置会被每次误报一次 —— 一条在最常见的健康配置上就会响的警告等于没有。
+- **写 stderr 而不是等报告**：报告在整个 run 结束后才渲染，而这句话要挡住的正是「跑了半小时、花了钱、结论是假的」。
+
+自保的办法只有一个，写在 `aifix run --help` 里：在目标项目的 pytest 配置里设 `pythonpath`。
 
 ### 分类路径
 

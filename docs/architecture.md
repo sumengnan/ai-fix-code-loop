@@ -60,8 +60,9 @@ flowchart TD
 
 ### `preflight` — 零 LLM
 
-`src/aifix/nodes/preflight.py`，26 行。
+`src/aifix/nodes/preflight.py`，53 行。
 
+- 校验测试解释器：`AIFIX_TEST_PYTHON` 显式配了一个不可执行的路径就当场中止。放在这里而不是留给 baseline，是因为到了那一步失败的表现是「没写出 JUnit 报告」，中止消息会说「测试进程没能正常跑完」—— 一句指向**目标项目**的话，而真相是 aifix 的配置写错了
 - 探测适配器：走 `baseline.detect_adapter`，**全项目唯一的探测入口**
 - 确认主工作区干净：`delivery.ensure_clean`，只看**已跟踪**文件（`git status --porcelain --untracked-files=no`）
 
@@ -82,6 +83,8 @@ flowchart TD
 `src/aifix/nodes/baseline.py`。跑一次全量测试，解析 JUnit XML，同时产出 id 列表与 `Failure` 对象。
 
 **整个 run 只跑这一次**。全量测试很贵，后续每轮 `verify` 各跑一次，那是判定必需的成本。
+
+跑之前先做一次近似探测（`warn_if_patch_may_be_invisible`）：拿测试解释器问一句「worktree 里这些顶层包会从哪个文件导入」，凡是解析到 worktree **之外**的就往 stderr 打警告并在 trace 里记一条事实。它要挡的是「目标项目把自己可编辑安装进了那个解释器，于是每一轮验的都是源仓库里没打补丁的代码」——测试照绿、结论是假的。只报警不拦截，理由与边界见[适配器](adapters.md#换来的真实风险可编辑安装会让验证悄悄失效)。
 
 写入：`baseline_ids`、`queue`、`_failures`。
 
