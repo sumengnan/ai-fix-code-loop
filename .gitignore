@@ -10,3 +10,6 @@ build/
 .DS_Store
 .claude/
 .idea/
+
+# CodeGraph 本地索引：是否建索引是使用者自己的决定，不该跟着仓库走
+.codegraph/
