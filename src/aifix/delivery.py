@@ -5,9 +5,28 @@ import subprocess
 from pathlib import Path
 
 
+# 交付提交的署名。**显式给，不用环境里那份。**
+#
+# 不给的话 git 不会报错，它会从主机名推断一个出来 —— 实测（2026-07-29，macOS）
+# 得到 `苏梦楠 <sumengnan@MacBook-Pro-5.local>`，GitHub 的 runner 上会是
+# `runner@fv-az….(none)` 这一类。两者都是查无此人的地址，而这条提交是要出现在
+# PR 上给人看的。
+#
+# 用 aifix 自己的身份而不是仓库主的，是因为这条提交**确实不是他写的**：它是一
+# 个待审的提议，署成他的名字等于替他签了字。
+COMMIT_NAME = "aifix"
+COMMIT_EMAIL = "aifix@users.noreply.github.com"
+
+
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", *args], cwd=repo,
                           capture_output=True, text=True)
+
+
+def _git_commit(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """带显式署名的 commit。见 COMMIT_NAME 上面那段。"""
+    return _git(repo, "-c", f"user.name={COMMIT_NAME}",
+                "-c", f"user.email={COMMIT_EMAIL}", "commit", *args)
 
 
 def ensure_clean(repo: Path) -> None:
@@ -114,7 +133,7 @@ class Worktree:
         staged = _git(self.path, "diff", "--cached", "--name-only")
         if not staged.stdout.strip():
             return False
-        res = _git(self.path, "commit", "-q", "-m", message)
+        res = _git_commit(self.path, "-q", "-m", message)
         if res.returncode != 0:
             raise RuntimeError(
                 f"交付失败：git commit 未能提交 {'、'.join(paths)} —— "

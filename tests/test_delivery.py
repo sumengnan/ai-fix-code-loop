@@ -2,7 +2,8 @@ import subprocess
 
 import pytest
 
-from aifix.delivery import Worktree, ensure_clean
+from aifix.delivery import (COMMIT_EMAIL, COMMIT_NAME, Worktree,
+                            ensure_clean)
 
 
 def _git(repo, *a):
@@ -219,3 +220,30 @@ def test_commit_reports_the_offending_path(buggy_repo):
     with Worktree(buggy_repo, run_id="abc123") as wt:
         with pytest.raises(RuntimeError, match="a/calc.py"):
             wt.commit("fix: x", paths=["a/calc.py"])
+
+
+def test_commit_uses_an_explicit_aifix_identity(
+        buggy_repo, fixed_source, monkeypatch):
+    """交付提交的作者必须是 aifix 自己，不能靠环境里那份身份。
+
+    不设身份时 git **不会失败**，它会从主机名推断一个出来 —— 实测（2026-07-29，
+    macOS）得到 `苏梦楠 <sumengnan@MacBook-Pro-5.local>`；GitHub 的 runner 上
+    会是 `runner@fv-az….(none)` 这一类。两者都是查无此人的地址，而这条提交是
+    要出现在 PR 上给人看的。
+
+    所以问题不是「提交不成功」，是**署名是假的**。顺带解决第二件事：那份推断
+    依赖 GECOS 与主机名解析，在精简容器里会失败，那时 commit 的 RuntimeError
+    会被 verify_node 接住、判定降级成 SAME、报告写「交付失败（git add 未能暂存
+    改动）」—— 一句指向 git add 的话，而真相在 commit 那一步。
+    """
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+
+    with Worktree(buggy_repo, run_id="ident") as wt:
+        (wt.path / "calc.py").write_text(fixed_source, encoding="utf-8")
+        assert wt.commit("fix: x", paths=["calc.py"]) is True
+
+    who = subprocess.run(
+        ["git", "log", "-1", "--format=%an <%ae>", "aifix/ident"],
+        cwd=buggy_repo, capture_output=True, text=True).stdout.strip()
+    assert who == f"{COMMIT_NAME} <{COMMIT_EMAIL}>", who
