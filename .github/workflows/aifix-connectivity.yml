@@ -1,0 +1,65 @@
+# 只回答一个问题：**从 GitHub 的 runner 上，够得着你的模型端点吗。**
+#
+# 这是接 aifix 之前该做的第一件事，也是唯一一件做不成就得推倒重来的事 ——
+# runner 的出口 IP 是 Azure 的动态大段，端点若有 IP 白名单，整条 Actions 路线
+# 不成立，而这个事实在写完全部胶水之后才发现的代价是几天。
+#
+# 手动触发：gh workflow run aifix-connectivity.yml
+name: aifix-connectivity
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # 什么都不需要：这个 job 只往外打 HTTP，不碰仓库。
+    permissions: {}
+
+    steps:
+      - name: runner 的出口 IP（拿去比对你的白名单）
+        run: |
+          echo "出口 IP：$(curl -sS --max-time 10 https://api.ipify.org || echo '取不到')"
+
+      - name: 端点可达性 + 凭据
+        env:
+          BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
+          KEY: ${{ secrets.AIFIX_API_KEY }}
+          MODEL: ${{ vars.AIFIX_MODEL }}
+        run: |
+          set -u
+          if [ -z "${BASE_URL:-}" ] || [ -z "${KEY:-}" ]; then
+            echo "::error::secrets.AIFIX_BASE_URL 或 secrets.AIFIX_API_KEY 没配"
+            exit 1
+          fi
+
+          # 一、GET /models —— 最便宜的一次握手。部分端点不实现它，所以
+          #     404 / 405 不当失败，留给下面那次真调用定论。
+          code=$(curl -sS --max-time 30 -o /tmp/models.json -w '%{http_code}' \
+                 "$BASE_URL/models" -H "Authorization: Bearer $KEY" || echo 000)
+          echo "GET /models → HTTP $code"
+          head -c 400 /tmp/models.json 2>/dev/null || true; echo
+
+          # 二、真发一次最小的 chat completion。这才是 aifix 实际走的那条路：
+          #     /models 通不代表 chat 通（鉴权范围、模型名、配额都可能只在这里炸）。
+          code=$(curl -sS --max-time 60 -o /tmp/chat.json -w '%{http_code}' \
+                 "$BASE_URL/chat/completions" \
+                 -H "Authorization: Bearer $KEY" \
+                 -H "Content-Type: application/json" \
+                 -d "{\"model\":\"${MODEL:-deepseek-v4-flash}\",
+                      \"max_tokens\":1,
+                      \"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
+                 || echo 000)
+          echo "POST /chat/completions → HTTP $code"
+          head -c 600 /tmp/chat.json 2>/dev/null || true; echo
+
+          case "$code" in
+            2*) echo "✅ 端点可达、凭据有效、模型名正确 —— Actions 这条路走得通" ;;
+            000) echo "::error::连不上（超时或 DNS）。最可能是端点有 IP 白名单，"\
+                      "而 runner 的出口 IP 是动态的 —— 见上面那行出口 IP"; exit 1 ;;
+            401|403) echo "::error::凭据被拒（HTTP $code）。key 错了，或这个 key 没有该模型的权限"; exit 1 ;;
+            404) echo "::error::路径或模型名不对（HTTP $code）。BASE_URL 要以 /v1 结尾，"\
+                      "vars.AIFIX_MODEL 要是端点认得的名字"; exit 1 ;;
+            *) echo "::error::HTTP $code，看上面的响应体"; exit 1 ;;
+          esac
