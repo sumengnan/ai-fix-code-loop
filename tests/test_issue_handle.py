@@ -454,3 +454,52 @@ async def test_the_wall_clock_spent_on_reproduce_is_deducted_too(tmp_path):
     # 两段各 0.05 秒都得算进去。只扣模型那一段的话，这里会 > 99.95
     assert seen["wall"] < 99.9, "复现与红检耗掉的墙钟没有从后面的额度里扣"
     assert seen["wall"] >= 99.0, "扣多了 —— 只该扣真正花掉的那点"
+
+
+# ---------------------------------------------------------------- 失败措辞与 trace
+
+async def test_no_convergence_is_not_worded_as_a_vague_issue(tmp_path):
+    """步数耗尽时**不能**让人去改 issue —— 改多少遍都没用。
+
+    这是 2026-07-30 第一次真跑（issue #1）撞出来的：回帖说「没能写出复现测试」，
+    而真相是模型翻了 25 步没作答。两者的下一步动作完全相反。
+    """
+    from aifix.reproduce import KIND_NO_CONVERGENCE
+    out = ReproduceOutcome(None, "模型翻了 25 步仍未给出复现测试",
+                           kind=KIND_NO_CONVERGENCE)
+    res, gh, _ = await _handle(_payload(), tmp_path, repro=out)
+    body = gh.comments[-1][1]
+    assert res.path == "no_repro"
+    # **标题本身**要分得开。恒定的「没能写出复现测试」正是那次误导的来源：
+    # 它读起来像「你的 issue 不够清楚」，而真相是系统这边该调参数。
+    head = body.splitlines()[0]
+    assert "没能写出复现测试" not in head, f"标题没有区分度：{head}"
+    assert "步" in head or "收敛" in head
+
+
+async def test_missing_info_is_worded_as_a_request_to_the_human(tmp_path):
+    """反向对照：真的是信息不足时，措辞就该指向人去补 issue。"""
+    from aifix.agents.reproducer import Reproduction
+    from aifix.reproduce import KIND_MISSING_INFO
+    out = ReproduceOutcome(
+        Reproduction(can_reproduce=False, missing_info=["没说触发的输入"]),
+        reason="issue 里的信息不足以写出复现测试，还缺：\n  - 没说触发的输入",
+        kind=KIND_MISSING_INFO)
+    res, gh, _ = await _handle(_payload(), tmp_path, repro=out)
+    head = gh.comments[-1][1].splitlines()[0]
+    assert "信息不足" in head, f"标题没指向人去补 issue：{head}"
+
+
+async def test_the_reproduce_events_are_written_to_a_trace(tmp_path):
+    """复现这一步的事件必须落盘，**哪怕后面根本走不到 run_once**。
+
+    第一次真跑时这条通路没有任何 trace（RunTrace 建在 run_once 里），artifact
+    是空的 —— 于是「模型这 25 步在读什么」这个唯一有诊断价值的问题无从回答。
+    失败时恰恰最需要它。
+    """
+    out = ReproduceOutcome(None, "翻不出来", kind="no_convergence",
+                           tokens=42, events=[{"fake": "event"}])
+    await _handle(_payload(), tmp_path, repro=out)
+    runs = list((tmp_path / ".aifix" / "runs").glob("*/events.jsonl"))
+    assert runs, "没有留下任何 trace"
+    assert (runs[0].parent / "facts.jsonl").is_file()

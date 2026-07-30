@@ -25,6 +25,8 @@ from ..graph import COLLECTION_ABORT_KIND, MODEL_ABORT_KIND
 from ..delivery import COMMIT_EMAIL, COMMIT_NAME
 from ..traces import TRACES_BRANCH
 from ..nodes.report import count_fixed
+from ..reproduce import (KIND_MISSING_INFO, KIND_NO_CONVERGENCE,
+                         KIND_UNPARSEABLE)
 from .event import authorize
 from .github import GitHubClient
 
@@ -49,6 +51,42 @@ def _git(repo: Path, *args: str) -> str:
         raise RuntimeError(
             f"git {' '.join(args)} 失败（{res.returncode}）：{res.stderr.strip()}")
     return res.stdout
+
+
+# 三种「没写出复现」的标题。**分开写不是措辞洁癖**：它们的下一步动作完全
+# 不同，而人只会读第一行。恒定的「没能写出复现测试」读起来像「你的 issue 不
+# 够清楚」，于是运维侧的问题被交给了报 issue 的人 —— 他改多少遍都没用。
+_REPRO_HEADLINES = {
+    KIND_MISSING_INFO: "**issue 信息不足，写不出复现测试。**",
+    KIND_NO_CONVERGENCE: "**模型没在步数内收敛，这一轮没有产出。**",
+    KIND_UNPARSEABLE: "**模型的输出解析不出复现测试。**",
+}
+
+
+def _repro_failure_comment(out: Any) -> str:
+    head = _REPRO_HEADLINES.get(
+        getattr(out, "kind", ""), "**没能写出复现测试。**")
+    return f"{head}\n\n{out.reason}"
+
+
+def _trace_reproduce(repo: Path, run_id: str, out: Any) -> None:
+    """把复现这一步的事件与结论落进 `.aifix/runs/<run_id>/`。
+
+    失败不能影响主流程：这是诊断数据，不是产出。磁盘满、路径没权限都不该让
+    一次本来能交付的 run 变成失败。
+    """
+    from ..trace import RunTrace
+    try:
+        t = RunTrace(Path(repo) / ".aifix" / "runs" / run_id, run_id=run_id)
+        try:
+            t.fact("reproduce_kind", getattr(out, "kind", "") or "unknown")
+            t.fact("reproduce_tokens", int(getattr(out, "tokens", 0) or 0))
+            if getattr(out, "events", None):
+                t.record_events(out.events)
+        finally:
+            t.close()
+    except Exception:                           # noqa: BLE001 —— 见上
+        pass
 
 
 def _pr_body(state: dict[str, Any], target: str, issue_number: int,
@@ -134,10 +172,22 @@ async def handle(
     # 从这里开始计时，一直算到 run_once 之前 —— 红检跑的是真测试，耗时不是
     # 可以忽略的量，只掐模型调用那一段等于漏掉一大半。
     t0 = time.monotonic()
+    run_id = uuid.uuid4().hex[:8]
     out = await reproduce_fn(repo, adapter, config, ev.title, ev.body)
+
+    # **复现这一步也要落 trace**，哪怕后面根本走不到 run_once。
+    #
+    # 第一次真跑（2026-07-30，issue #1）时它整段没有 trace —— RunTrace 建在
+    # run_once 里，而这条通路走不到那儿，artifact 是空的。于是「模型这 25 步
+    # 在读什么」这个唯一有诊断价值的问题，一个字都答不出来。失败时恰恰最需要它。
+    #
+    # 用**同一个 run_id**：RunTrace 以追加模式开文件，随后 run_once 建的那个
+    # 会往同一份 events.jsonl 里继续写，一次 run 的证据留在一个目录里。
+    _trace_reproduce(repo, run_id, out)
+
     r = out.reproduction
     if r is None or not r.can_reproduce:
-        gh.comment(ev.number, f"**没能写出复现测试。**\n\n{out.reason}")
+        gh.comment(ev.number, _repro_failure_comment(out))
         return HandleResult(0, "no_repro")
 
     written = write_reproduction(repo, r)
@@ -189,7 +239,6 @@ async def handle(
         "budget_wall_seconds": max(
             0.0, config.budget_wall_seconds - (time.monotonic() - t0))})
 
-    run_id = uuid.uuid4().hex[:8]
     state = await run_fn(repo, run_config, run_id=run_id,
                          only_test=r.target_test_id)
 

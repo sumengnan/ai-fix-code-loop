@@ -178,5 +178,12 @@ async def test_an_unreproducible_issue_stops_before_spending_on_the_fixer(
     assert res.path == "no_repro" and not ran
     assert not gh.prs
     assert "没说触发的输入" in gh.comments[-1]
-    # 仓库没被碰过：没有多出提交，也没有留下文件
-    assert _git(buggy_repo, "status", "--porcelain").strip() == ""
+    # 源码没被碰过：没有多出提交、没有留下测试文件。
+    #
+    # 但 `.aifix/` **应该**在 —— 这条通路现在会落一份 trace（模型读了什么、
+    # 为什么放弃）。第一次真跑时它没有，于是失败的那一轮什么证据都没留下。
+    dirty = [ln for ln in _git(buggy_repo, "status", "--porcelain").splitlines()
+             if ln.strip()]
+    assert dirty == ["?? .aifix/"], dirty
+    assert (buggy_repo / ".aifix").is_dir()
+    assert not list((buggy_repo / "tests").glob("test_issue_*.py"))
