@@ -1,0 +1,16 @@
+{"run_id": "38107c59", "key": "reproduce_kind", "value": "ok"}
+{"run_id": "38107c59", "key": "reproduce_tokens", "value": 31625}
+{"run_id": "38107c59", "key": "test_python", "value": "/home/runner/work/ai-fix-code-loop/ai-fix-code-loop/.venv/bin/python"}
+{"run_id": "38107c59", "key": "baseline_failures", "value": 1}
+{"run_id": "38107c59", "key": "baseline_failure_ids", "value": ["tests/test_cli_reproduce.py::test_nonexistent_issue_text_gives_human_message_not_traceback"]}
+{"run_id": "38107c59", "key": "suspect_anchor", "value": "traceback", "failure": "tests/test_cli_reproduce.py::test_nonexistent_issue_text_gives_human_message_not_traceback", "attempt": 1}
+{"run_id": "38107c59", "key": "suspect_in_traceback", "value": true, "failure": "tests/test_cli_reproduce.py::test_nonexistent_issue_text_gives_human_message_not_traceback", "attempt": 1}
+{"run_id": "38107c59", "key": "suspect_file", "value": "src/aifix/cli.py", "failure": "tests/test_cli_reproduce.py::test_nonexistent_issue_text_gives_human_message_not_traceback", "attempt": 1}
+{"run_id": "38107c59", "key": "diff_lines", "value": 6, "failure": "tests/test_cli_reproduce.py::test_nonexistent_issue_text_gives_human_message_not_traceback", "attempt": 1}
+{"run_id": "38107c59", "key": "touched", "value": ["src/aifix/cli.py"], "failure": "tests/test_cli_reproduce.py::test_nonexistent_issue_text_gives_human_message_not_traceback", "attempt": 1}
+{"run_id": "38107c59", "key": "verdict", "value": "better", "failure": "tests/test_cli_reproduce.py::test_nonexistent_issue_text_gives_human_message_not_traceback", "attempt": 1}
+{"run_id": "38107c59", "key": "adapter", "value": "pytest"}
+{"run_id": "38107c59", "key": "branch", "value": "aifix/38107c59"}
+{"run_id": "38107c59", "key": "fixed", "value": 1}
+{"run_id": "38107c59", "key": "spent_tokens", "value": 27023}
+{"run_id": "38107c59", "key": "spent_usd", "value": 0.08146400000000001}
