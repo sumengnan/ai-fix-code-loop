@@ -1,0 +1,16 @@
+{"run_id": "b854a94b", "key": "reproduce_kind", "value": "ok"}
+{"run_id": "b854a94b", "key": "reproduce_tokens", "value": 255756}
+{"run_id": "b854a94b", "key": "test_python", "value": "/home/runner/work/ai-fix-code-loop/ai-fix-code-loop/.venv/bin/python"}
+{"run_id": "b854a94b", "key": "baseline_failures", "value": 35}
+{"run_id": "b854a94b", "key": "suspect_unanchored", "value": true, "failure": "tests/test_cli_reproduce_model_header.py::test_header_includes_model_name", "attempt": 1}
+{"run_id": "b854a94b", "key": "suspect_in_traceback", "value": false, "failure": "tests/test_cli_reproduce_model_header.py::test_header_includes_model_name", "attempt": 1}
+{"run_id": "b854a94b", "key": "suspect_file", "value": "tests/test_cli_reproduce_model_header.py", "failure": "tests/test_cli_reproduce_model_header.py::test_header_includes_model_name", "attempt": 1}
+{"run_id": "b854a94b", "key": "violation", "value": "test_edit", "failure": "tests/test_cli_reproduce_model_header.py::test_header_includes_model_name", "attempt": 1}
+{"run_id": "b854a94b", "key": "diff_lines", "value": 14, "failure": "tests/test_cli_reproduce_model_header.py::test_header_includes_model_name", "attempt": 1}
+{"run_id": "b854a94b", "key": "touched", "value": ["conftest.py", "src/aifix/cli.py"], "failure": "tests/test_cli_reproduce_model_header.py::test_header_includes_model_name", "attempt": 1}
+{"run_id": "b854a94b", "key": "verdict", "value": "better", "failure": "tests/test_cli_reproduce_model_header.py::test_header_includes_model_name", "attempt": 1}
+{"run_id": "b854a94b", "key": "adapter", "value": "pytest"}
+{"run_id": "b854a94b", "key": "branch", "value": "aifix/b854a94b"}
+{"run_id": "b854a94b", "key": "fixed", "value": 1}
+{"run_id": "b854a94b", "key": "spent_tokens", "value": 220468}
+{"run_id": "b854a94b", "key": "spent_usd", "value": 0.6778062}
