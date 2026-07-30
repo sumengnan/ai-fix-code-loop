@@ -141,6 +141,16 @@ class AifixConfig(BaseSettings):
     # **会从后面修复那一步的额度里扣掉**（见 issue/handle.py 里那段），所以花的
     # 不是额外的钱，是同一份预算里更靠前的一段。
     reproducer_max_tokens: int = 250_000
+    # 复现这一步最多能用掉整份预算的几成。**没有这一条，扣减会把修复步饿死。**
+    #
+    # 实测（2026-07-30，issue #2，pro 跑 25 步）：复现把 AIFIX_BUDGET_USD=0.50
+    # 全吃光，run_once 拿到 $0、当场中止，报告只写「美元预算耗尽：$0 / $0」——
+    # 一句看不出是被前一步吃光的话。扣减本身是对的（不扣就超支），错的是**没有
+    # 分配**：没有任何东西保证后面那一步还剩下钱。
+    #
+    # 0.4 不是精算出来的：复现只跑一轮，修复要试 max_attempts 次，所以后者该
+    # 拿大头。真正的依据要等一批任务的数据，那时这个数应该按实测重定。
+    reproducer_budget_share: float = 0.4
     detector_max_tokens: int = 20_000
     loop_detect_window: int = 3
     tool_result_max_chars: int = 8000

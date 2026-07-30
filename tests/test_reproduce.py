@@ -5,6 +5,8 @@
 """
 import json
 
+import pytest
+
 from harness.llm.base import StreamChunk, ToolCallDelta
 from harness.sandbox.local import LocalSandbox
 from harness.usage import Usage
@@ -222,3 +224,43 @@ async def test_a_token_overrun_is_also_no_convergence(buggy_repo):
         client=_Scripted([_tool_call("read_file", '{"path": "calc.py"}')]))
     assert out.kind == "no_convergence", out.reason
     assert "解析" not in out.reason
+
+
+async def test_reproduce_cannot_eat_the_whole_dollar_budget(buggy_repo, monkeypatch):
+    """复现最多花掉整份预算的一部分，剩下的留给修复。
+
+    实测（2026-07-30，issue #2）：pro 跑 25 步把 AIFIX_BUDGET_USD=0.50 全吃光，
+    run_once 拿到 $0 当场中止，报告写「美元预算耗尽：$0 / $0」—— 一句看不出是
+    被前一步吃光的话。
+    """
+    seen = {}
+    real = __import__("aifix.agents.runner", fromlist=["consume"]).consume
+
+    async def _spy(stream, cost_cap=None, **k):
+        seen["cap"] = cost_cap
+        return await real(stream, cost_cap=cost_cap, **k)
+
+    monkeypatch.setattr("aifix.reproduce.consume", _spy)
+    cfg = AifixConfig(budget_usd=0.50, reproducer_budget_share=0.4)
+    await reproduce(buggy_repo, PytestAdapter(), cfg, "t", "b",
+                    client=_Scripted([_text("x")]))
+    assert seen["cap"] == pytest.approx(0.20)
+
+
+async def test_no_dollar_gate_when_no_budget_is_set(buggy_repo, monkeypatch):
+    """budget_usd 为 0 是「不设闸」，不是「额度已扣光」。
+
+    传 0.0 进去会让 consume 把**第一次**调用就掐掉 —— 恰好在闸本不该存在的
+    时候把它关死（与 fix_node 里 `0.0 or None` 那处同款）。
+    """
+    seen = {}
+
+    async def _spy(stream, cost_cap=None, **k):
+        seen["cap"] = cost_cap
+        from aifix.agents.runner import consume as real
+        return await real(stream, cost_cap=cost_cap, **k)
+
+    monkeypatch.setattr("aifix.reproduce.consume", _spy)
+    await reproduce(buggy_repo, PytestAdapter(), AifixConfig(budget_usd=0.0),
+                    "t", "b", client=_Scripted([_text("x")]))
+    assert seen["cap"] is None
