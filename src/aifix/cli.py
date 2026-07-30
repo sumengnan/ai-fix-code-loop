@@ -533,7 +533,11 @@ def _cmd_reproduce(args, client: Any = None) -> None:
     from .reproduce import red_check, reproduce, write_reproduction
 
     repo = Path(args.repo).resolve()
-    text = Path(args.issue_text).read_text(encoding="utf-8")
+    issue_path = Path(args.issue_text)
+    if not issue_path.is_file():
+        print(f"--issue-text 指定的文件不存在：{issue_path}")
+        raise SystemExit(1)
+    text = issue_path.read_text(encoding="utf-8")
     if args.title is not None:
         title, body = args.title, text
     else:
