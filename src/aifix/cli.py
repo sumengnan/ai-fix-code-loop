@@ -540,7 +540,10 @@ def _cmd_reproduce(args, client: Any = None) -> None:
         print(f"没有适配器认领这个项目：{repo}")
         raise SystemExit(1)
 
-    print(f"# aifix reproduce\n\n- 适配器：{adapter.name}\n- 标题：{title.strip()}\n")
+    print(
+        f"# aifix reproduce\n\n"
+        f"- 模型：{config.fixer.model}\n"
+        f"- 适配器：{adapter.name}\n- 标题：{title.strip()}\n")
     out = asyncio.run(reproduce(repo, adapter, config, title.strip(),
                                 body.strip(), client=client))
     _print_cost(out.tokens, out.cost_usd, config)
