@@ -61,7 +61,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-          AIFIX_FIXER__MODEL: deepseek-v4-pro
+          # 两条路由都先用 flash。第一次真跑要验的是**链路通不通**，不是修复
+          # 质量 —— 拿贵的模型去验管道，贵在了不产生信息的地方。
+          # 等链路稳了再把 fixer 换回 pro（那时候差异才读得出来）。
+          AIFIX_FIXER__MODEL: deepseek-v4-flash
           AIFIX_FIXER__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
           AIFIX_FIXER__API_KEY: ${{ secrets.AIFIX_API_KEY }}
           AIFIX_DETECTOR__MODEL: deepseek-v4-flash
