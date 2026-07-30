@@ -26,7 +26,8 @@ jobs:
         env:
           BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
           KEY: ${{ secrets.AIFIX_API_KEY }}
-          MODEL: ${{ vars.AIFIX_MODEL }}
+          # 与主 workflow 同一个旋钮，探的是真正干活的那条路由
+          MODEL: ${{ vars.AIFIX_FIXER__MODEL || 'deepseek-v4-flash' }}
         run: |
           set -u
           if [ -z "${BASE_URL:-}" ] || [ -z "${KEY:-}" ]; then
@@ -60,6 +61,6 @@ jobs:
                       "而 runner 的出口 IP 是动态的 —— 见上面那行出口 IP"; exit 1 ;;
             401|403) echo "::error::凭据被拒（HTTP $code）。key 错了，或这个 key 没有该模型的权限"; exit 1 ;;
             404) echo "::error::路径或模型名不对（HTTP $code）。BASE_URL 要以 /v1 结尾，"\
-                      "vars.AIFIX_MODEL 要是端点认得的名字"; exit 1 ;;
+                      "vars.AIFIX_FIXER__MODEL 要是端点认得的名字"; exit 1 ;;
             *) echo "::error::HTTP $code，看上面的响应体"; exit 1 ;;
           esac

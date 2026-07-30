@@ -91,3 +91,29 @@ def test_checkout_is_not_shallow():
 def test_concurrency_is_scoped_per_issue():
     """手滑连点两次 = 两倍开销，而且两个 run 会抢同一个 worktree 路径。"""
     assert "github.event.issue.number" in _DOC["concurrency"]["group"]
+
+
+def test_both_model_routes_are_configurable_without_editing_this_file():
+    """换模型不该需要改 workflow。
+
+    `issue_comment` 的 workflow 只从**默认分支**加载，所以改这个文件要走一次
+    提交、评审、合并才生效 —— 那个摩擦足以让人干脆不换模型，于是「诊断用便宜
+    的、修复用强的」这条设计在实践中就名存实亡了。
+
+    两条路由**各自独立**：它们本来就可以是两个供应商。
+    """
+    step = next(s for s in _job()["steps"] if "aifix issue handle" in s.get("run", ""))
+    for key in ("AIFIX_FIXER__MODEL", "AIFIX_DETECTOR__MODEL"):
+        expr = step["env"][key]
+        assert f"vars.{key}" in expr, f"{key} 没接仓库 variable"
+        assert "||" in expr, f"{key} 没有缺省值，没配就会跑一个空模型名"
+
+    # 反向对照：两条不能指向同一个 variable —— 那样就没法分开配了
+    assert step["env"]["AIFIX_FIXER__MODEL"] != step["env"]["AIFIX_DETECTOR__MODEL"]
+
+
+def test_model_names_are_variables_not_secrets():
+    """与价格表同一条理由：secret 在日志里被遮成 ***，跑错模型时你从日志里
+    根本看不出来。而模型名不是机密。"""
+    assert "secrets.AIFIX_FIXER__MODEL" not in _RAW
+    assert "secrets.AIFIX_DETECTOR__MODEL" not in _RAW

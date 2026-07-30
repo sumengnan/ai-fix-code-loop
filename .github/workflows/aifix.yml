@@ -61,15 +61,33 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-          # 两条路由都先用 flash。第一次真跑要验的是**链路通不通**，不是修复
-          # 质量 —— 拿贵的模型去验管道，贵在了不产生信息的地方。
-          # 等链路稳了再把 fixer 换回 pro（那时候差异才读得出来）。
-          AIFIX_FIXER__MODEL: deepseek-v4-flash
-          AIFIX_FIXER__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
-          AIFIX_FIXER__API_KEY: ${{ secrets.AIFIX_API_KEY }}
-          AIFIX_DETECTOR__MODEL: deepseek-v4-flash
-          AIFIX_DETECTOR__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
-          AIFIX_DETECTOR__API_KEY: ${{ secrets.AIFIX_API_KEY }}
+          # 两条路由的模型都从仓库 variable 读，缺省时退回 flash。
+          #
+          #   gh variable set AIFIX_FIXER__MODEL    --body deepseek-v4-pro
+          #   gh variable set AIFIX_DETECTOR__MODEL --body deepseek-v4-flash
+          #
+          # variable 名与环境变量**同名**：设什么就是什么，不用记一层映射。
+          # 换模型因此不必改这个文件——而改它要合进默认分支才生效
+          # （issue_comment 的 workflow 只从默认分支加载），一次换模型要走一次
+          # 提交、评审、合并，那个摩擦足以让人干脆不换。
+          #
+          # 缺省是 flash 而不是 pro：这个默认值会在「还没配就先跑一次」时生效，
+          # 那种时候要验的是链路通不通，不是修复质量——拿贵的模型验管道，贵在
+          # 了不产生信息的地方。
+          #
+          # 用 variable 不用 secret：模型名不是机密，而 secret 在日志里会被遮成
+          # ***，跑错模型时你从日志里根本看不出来（与价格表同一条理由，见下）。
+          # 端点与 key 也各自可配，不设就沿用同一套——两条路由**本来就可以是
+          # 两个供应商**（诊断挑便宜的、修复挑强的，未必出自同一家）。不设时
+          # 行为与之前完全一致，加这两条不引入任何默认变化。
+          #   gh secret set AIFIX_DETECTOR_BASE_URL   # 只在换供应商时才需要
+          #   gh secret set AIFIX_DETECTOR_API_KEY
+          AIFIX_FIXER__MODEL: ${{ vars.AIFIX_FIXER__MODEL || 'deepseek-v4-flash' }}
+          AIFIX_FIXER__BASE_URL: ${{ secrets.AIFIX_FIXER_BASE_URL || secrets.AIFIX_BASE_URL }}
+          AIFIX_FIXER__API_KEY: ${{ secrets.AIFIX_FIXER_API_KEY || secrets.AIFIX_API_KEY }}
+          AIFIX_DETECTOR__MODEL: ${{ vars.AIFIX_DETECTOR__MODEL || 'deepseek-v4-flash' }}
+          AIFIX_DETECTOR__BASE_URL: ${{ secrets.AIFIX_DETECTOR_BASE_URL || secrets.AIFIX_BASE_URL }}
+          AIFIX_DETECTOR__API_KEY: ${{ secrets.AIFIX_DETECTOR_API_KEY || secrets.AIFIX_API_KEY }}
 
           # 价格表用 variable 不用 secret：它不是机密，而放进 secret 会被日志
           # 遮蔽成 ***，你反而看不出它配没配对 —— 而没配价格表的后果是美元闸
