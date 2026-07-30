@@ -18,8 +18,11 @@ from aifix.adapters.base import Failure
 from aifix.adapters.junit import parse_junit
 from aifix.adapters.maven_adapter import MavenAdapter
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("mvn") is None, reason="本机没有 mvn，跳过 Maven 适配器测试")
+from tests.conftest import maven_skip_mark  # noqa: E402
+
+# 判据是「mvn -o 跑不跑得起来」，不是「mvn 在不在」——
+# 见 conftest.maven_offline_reason 里那段实测。
+pytestmark = maven_skip_mark()
 
 # surefire 与 junit-jupiter 都钉死版本：Maven 3.9 默认生命周期绑的是
 # surefire 2.12.4，那个版本跑不了 JUnit 5，不钉版本夹具会静默一个用例都不跑。

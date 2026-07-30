@@ -1,12 +1,77 @@
 """共享夹具：一个可复现的、带失败测试的临时 git 仓库。"""
 from __future__ import annotations
 
+import functools
+import shutil
 import subprocess
 import sys
 import sysconfig
+import tempfile
 from pathlib import Path
 
 import pytest
+
+
+# Maven 那三个测试文件的跳过判据。
+#
+# **不能只查 `mvn` 在不在**——那是实测栽过的（2026-07-30，issue #2 的真跑）：
+# GitHub 的 ubuntu 镜像自带 Maven，于是判据成立、测试照跑，而 runner 的 `~/.m2`
+# 是空的、适配器命令里带 `-o`（离线），19 个用例全红。它们出现在 aifix 的
+# baseline 里，被当成待修的 bug 排进队列。
+#
+# 真正的前提是「**`mvn -o` 能把这几个钉死版本的构件解析出来**」，所以判据就去
+# 探这件事。代价是有 mvn 的机器上每个会话多花约 8 秒，换掉一整类「不跳过、
+# 真失败」的假红。
+#
+# 版本与三个测试文件里的 pom 保持一致。真出现漂移时的表现是**那个文件的测试
+# 不跳过而是失败**——与修这条之前一样，没有变得更糟。
+_PROBE_POM = """<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>probe</groupId><artifactId>probe</artifactId><version>1.0</version>
+  <properties><maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding></properties>
+  <dependencies><dependency>
+    <groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId>
+    <version>5.10.2</version><scope>test</scope></dependency></dependencies>
+  <build><plugins>
+    <plugin><groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-surefire-plugin</artifactId><version>3.2.5</version></plugin>
+    <plugin><groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-compiler-plugin</artifactId><version>3.13.0</version></plugin>
+  </plugins></build>
+</project>
+"""
+
+_PROBE_TEST = """package p;
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+class ProbeTest { @Test void ok() { assertTrue(true); } }
+"""
+
+
+@functools.lru_cache(maxsize=1)
+def maven_offline_reason() -> str | None:
+    """`mvn -o` 跑得起来就返回 None，否则返回跳过的理由。整个会话只探一次。"""
+    if shutil.which("mvn") is None:
+        return "本机没有 mvn"
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "src" / "test" / "java" / "p").mkdir(parents=True)
+        (root / "pom.xml").write_text(_PROBE_POM, encoding="utf-8")
+        (root / "src" / "test" / "java" / "p" / "ProbeTest.java").write_text(
+            _PROBE_TEST, encoding="utf-8")
+        res = subprocess.run(["mvn", "-B", "-q", "-o", "test"], cwd=root,
+                             capture_output=True, text=True)
+    if res.returncode != 0:
+        return ("本机 ~/.m2 里缺 junit-jupiter 5.10.2 / surefire 3.2.5，"
+                "`mvn -o` 离线跑不起来")
+    return None
+
+
+def maven_skip_mark():
+    reason = maven_offline_reason()
+    return pytest.mark.skipif(reason is not None,
+                              reason=f"跳过 Maven 测试：{reason}")
 
 
 @pytest.fixture

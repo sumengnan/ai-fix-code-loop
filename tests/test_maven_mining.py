@@ -26,8 +26,11 @@ from aifix.eval.mine import mine_tasks
 from aifix.eval.workspace import prepare_task_repo
 from aifix.nodes.baseline import run_full_suite
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("mvn") is None, reason="本机没有 mvn，跳过 Maven 挖掘验收")
+from tests.conftest import maven_skip_mark  # noqa: E402
+
+# 判据是「mvn -o 跑不跑得起来」，不是「mvn 在不在」——
+# 见 conftest.maven_offline_reason 里那段实测。
+pytestmark = maven_skip_mark()
 
 # 与 tests/test_maven_adapter.py 同一份 pom：surefire 与 junit-jupiter 都钉死
 # 版本（Maven 3.9 默认绑的 surefire 2.12.4 跑不了 JUnit 5，不钉版本会静默
