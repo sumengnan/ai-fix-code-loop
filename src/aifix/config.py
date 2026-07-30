@@ -110,14 +110,19 @@ class AifixConfig(BaseSettings):
     # 而是环境坏了 / prompt 崩了 / 今天这个模型不行。继续跑只是匀速烧钱。
     consecutive_failure_limit: int = 3
     fixer_max_steps: int = 25
-    # 复现测试那一步的步数上限。**刻意小于 fixer_max_steps**：fixer 要 25 步
-    # 是因为它靠 run_tests 的反馈来回迭代补丁；reproducer 只有读工具，读够了
-    # 就该作答，多给的步数不会变成更好的测试，只会变成更长的翻阅。
+    # 复现测试那一步的步数上限。**与 fixer 齐平，不是更小** —— 这个取值改过
+    # 一次，更正留在这里，因为最初那个前提是反的。
     #
-    # 这个字段是**实测逼出来的**：第一次真跑（2026-07-30，issue #1）沿用了
-    # fixer 的 25 步，模型翻了 25 步没吐出 JSON，整轮以「达到 max_steps 上限」
-    # 收场 —— 一次既没结论也没产出的空跑。
-    reproducer_max_steps: int = 12
+    # 当初设 12 的理由：「reproducer 只有读工具，读够了就该作答，比 fixer 需要
+    # 更少步数」。实测（2026-07-30，issue #2，flash 与 pro 各跑一轮）**两个模型
+    # 都在 12 步用尽而不作答**，而回放显示它们没迷路：pro 的第 12 步在读
+    # tests/conftest.py 弄清 buggy_repo 夹具 —— 它在认真准备。
+    #
+    # 前提错在哪：fixer 拿到的是 traceback **加一份指名道姓的诊断**，只需确认
+    # 那一处；reproducer 拿到的是一段人话，要把整套测试脚手架逆推出来（命令、
+    # 参数解析、这个仓库的测试写法、夹具、替身）才写得出一条**跑得起来**的测试。
+    # **写复现比修 bug 需要更多探索，不是更少。**
+    reproducer_max_steps: int = 25
     # 复现这一步的 token 上限。**必须有**：它在 run_once 之外发起调用，如果不
     # 给独立上限，一次不收敛的复现能把整个 run 的额度吃掉大半。
     #
@@ -131,9 +136,11 @@ class AifixConfig(BaseSettings):
     # 66,721。此前配 60k 的后果是**两个上限同时卡住**，失败消息说不清是哪个在限
     # 制——而它们的下一步动作不同（调步数 vs 换模型）。
     #
-    # 120k 留出余量，让 steps 成为唯一的约束：那样「12 步没答出来」才是一句
-    # 干净的结论。
-    reproducer_max_tokens: int = 120_000
+    # 250k 是配合 25 步的余量，让 steps 成为唯一的约束：那样「用满步数没答出来」
+    # 才是一句干净的结论。代价要说清楚 —— 按 pro 的价目这一步跑满约 $1，但它
+    # **会从后面修复那一步的额度里扣掉**（见 issue/handle.py 里那段），所以花的
+    # 不是额外的钱，是同一份预算里更靠前的一段。
+    reproducer_max_tokens: int = 250_000
     detector_max_tokens: int = 20_000
     loop_detect_window: int = 3
     tool_result_max_chars: int = 8000
