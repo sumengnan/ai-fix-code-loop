@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from harness.sandbox.base import Sandbox
 from harness.tools.base import ToolRegistry
-from harness.tools.builtins.fs_tools import ListFilesTool, ReadFileTool
+from harness.tools.builtins.fs_tools import ListFilesTool
 from harness.types import Message, Role
 
 from ..adapters.base import Failure, ProjectAdapter
 from ..tools.patch import ApplyPatchTool
+from ..tools.read import ReadFileTool
 from ..tools.search import GrepTool
 from ..tools.tests import RunTestsTool
 from .detector import Diagnosis
@@ -14,7 +15,8 @@ from .detector import Diagnosis
 SYSTEM_PROMPT = """你是一个修复代码缺陷的工程师。工作区是一个 git worktree，你的改动被隔离在这里。
 
 可用工具：
-- read_file / list_files：查看代码
+- read_file / list_files：查看代码。**大文件用 offset 分段读** ——
+  截断消息会告诉你下一段从第几行开始，重复读同一段永远拿回同一段
 - grep：按正则搜索
 - apply_patch：应用 unified diff（唯一的修改手段）
 - run_tests：跑目标失败用例，验证你的改动

@@ -21,7 +21,7 @@ from harness.reliability.budget import BudgetTracker
 from harness.sandbox.base import Sandbox
 from harness.sandbox.local import LocalSandbox
 from harness.tools.base import ToolRegistry
-from harness.tools.builtins.fs_tools import ListFilesTool, ReadFileTool
+from harness.tools.builtins.fs_tools import ListFilesTool
 
 from .adapters.base import ProjectAdapter
 from .agents.reproducer import (SYSTEM_PROMPT, Reproduction, build_prompt,
@@ -29,6 +29,7 @@ from .agents.reproducer import (SYSTEM_PROMPT, Reproduction, build_prompt,
 from .agents.runner import consume
 from .config import AifixConfig
 from .nodes.baseline import file_level_ids, run_scoped
+from .tools.read import ReadFileTool
 from .tools.search import GrepTool
 
 
