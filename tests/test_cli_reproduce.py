@@ -158,3 +158,18 @@ def test_refuses_to_overwrite_an_existing_file(buggy_repo, issue_file, capsys):
     assert e.value.code == 1
     assert "已存在" in capsys.readouterr().out
     assert victim.read_text(encoding="utf-8") == "# 别人的文件\n"
+
+
+def test_nonexistent_issue_text_gives_human_message_not_traceback(buggy_repo, capsys):
+    """--issue-text 指向不存在的文件时，应给出一句能看懂的话并退出码 1，
+    而不是甩出 FileNotFoundError 调用栈。
+
+    参照 _cmd_issue 对缺少事件载荷的处理。
+    """
+    nonexistent = buggy_repo / "does_not_exist.md"
+    with pytest.raises(SystemExit) as e:
+        _cmd_reproduce(_args(buggy_repo, nonexistent))
+    assert e.value.code == 1
+    captured = capsys.readouterr()
+    assert "does_not_exist.md" in captured.out or "does_not_exist.md" in captured.err
+    assert "--issue-text" in captured.out or "--issue-text" in captured.err
