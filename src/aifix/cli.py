@@ -131,6 +131,12 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
             t0 = time.monotonic()
             state.update(await baseline_node(state))
             trace.fact("baseline_failures", len(state["baseline_ids"]))
+            # **id 也要记**，不只是数目。实测（2026-07-30，issue #2）baseline 里
+            # 有 35 个红是 aifix 自己造成的（环境泄漏 + Maven 判据查错对象），
+            # 而 facts 里只有一个「35」——查清它们是谁，全靠 PR 正文里那段给人
+            # 看的告警。诊断数据要能被**程序**查，否则 stats 永远看不出「哪些红
+            # 是环境造成的」。
+            trace.fact("baseline_failure_ids", sorted(state["baseline_ids"]))
             # ran 取自报告里真正跑出结果的用例数 —— 只报红的数目分不出
             # 2/14 还是 2/2000，而后者意味着后面每轮 verify 都要再跑一次
             prog.baseline(ran=state.get("_ran", len(state["baseline_ids"])),

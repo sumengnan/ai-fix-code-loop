@@ -324,3 +324,25 @@ async def test_fix_records_no_violation_when_clean(buggy_repo, tmp_path):
         trace.close()
 
     assert [f for f in _facts(tmp_path) if f["key"] == "violation"] == []
+
+
+async def test_baseline_records_which_tests_failed_not_just_how_many(
+        buggy_repo, tmp_path):
+    """baseline 要记下**是哪些**用例红了，不只是数目。
+
+    实测（2026-07-30，issue #2）：runner 上 baseline 有 35 个红，而 facts 里
+    只有一个「35」—— 查清它们是谁全靠 PR 正文里那段**给人看**的告警。
+    诊断数据要能被程序查，否则 stats 永远看不出「哪些红是环境造成的」。
+    """
+    import json
+
+    from aifix.cli import run_once
+    from aifix.config import AifixConfig
+
+    st = await run_once(buggy_repo, AifixConfig(), run_id="ids",
+                        dry_run=True)
+    facts = (buggy_repo / ".aifix" / "runs" / "ids" / "facts.jsonl")
+    recs = [json.loads(ln) for ln in facts.read_text(encoding="utf-8").splitlines()]
+    ids = next(r["value"] for r in recs if r["key"] == "baseline_failure_ids")
+    assert ids == sorted(st["baseline_ids"])
+    assert "tests/test_calc.py::test_add" in ids
