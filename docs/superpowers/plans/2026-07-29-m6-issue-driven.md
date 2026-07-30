@@ -417,6 +417,14 @@ jobs:
 
 runner 的出口 IP 是 Azure 的动态大段。**你的模型 endpoint 若有 IP 白名单，整条 Actions 路线要推倒重来**——不值得等胶水全写完才发现。
 
+> **实测（2026-07-30）**：`.github/workflows/aifix-connectivity.yml` 连着触发三次，出口 IP 分别是 `20.55.14.50` / `20.163.63.241` / `4.236.173.166` —— 三个不同的 Azure 段。
+>
+> 所以「把 runner 的 IP 加进白名单」不是一个可行的绕法：没有一个稳定的 IP 可加。GitHub 的 `GET /meta` 会给出 Actions 的地址段，但那个列表极大且经常变，拿去当白名单不现实。
+>
+> 端点若确实有白名单，只剩两条路：让端点放开，或换自建 runner。
+
+**凭据那一半还没验**（需要 `secrets.AIFIX_API_KEY` / `secrets.AIFIX_BASE_URL`）。已确认的是：workflow 能被触发、守卫在缺配置时按设计报出原因、出口网络本身通（`api.ipify.org` 请求成功）。
+
 - [x] **步骤 2：写 workflow，合进默认分支**
 - [ ] **步骤 3：真实 issue 端到端验收**
 
