@@ -503,3 +503,30 @@ async def test_the_reproduce_events_are_written_to_a_trace(tmp_path):
     runs = list((tmp_path / ".aifix" / "runs").glob("*/events.jsonl"))
     assert runs, "没有留下任何 trace"
     assert (runs[0].parent / "facts.jsonl").is_file()
+
+
+async def test_a_pr_creation_failure_is_reported_not_thrown(tmp_path):
+    """开 PR 失败同样不能裸抛 —— 分支**已经推上去了**，成果还在。
+
+    实测（2026-07-30，issue #2）：`gh pr create` 撞上仓库设置
+    「Allow GitHub Actions to create and approve pull requests」默认关闭，
+    异常穿出去 → job 红、issue 上一条帖都没有、人不知道分支叫什么。
+    而那条分支上躺着一条可用的复现测试。
+
+    上一轮只包了 push，漏了这一步 —— 同一类失联的第二处。
+    """
+    class _Boom(_Gh):
+        def create_pr(self, head, title, body, base=None):
+            raise RuntimeError(
+                "GitHub Actions is not permitted to create or approve pull requests")
+
+    gh = _Boom()
+    fakes, _ = _fakes()
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    res = await handle(_payload(), tmp_path, AifixConfig(), gh, **fakes)
+    assert res.exit_code == 1 and res.path == "pr_failed"
+    body = gh.comments[-1][1]
+    # 分支名必须在里面：那是人接手的唯一入口
+    assert "aifix/deadbeef" in body
+    # 而且要指出**具体那个设置**，不是一句「开 PR 失败了」
+    assert "create and approve pull requests" in body

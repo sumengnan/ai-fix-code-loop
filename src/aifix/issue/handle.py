@@ -278,7 +278,25 @@ async def handle(
 
     title = (f"fix: {ev.title} (#{ev.number})" if fixed
              else f"[复现已就位，未修复] {ev.title} (#{ev.number})")
-    url = gh.create_pr(head=branch, title=title, body=body)
+    try:
+        url = gh.create_pr(head=branch, title=title, body=body)
+    except Exception as e:                      # noqa: BLE001
+        # 分支**已经推上去了**，成果还在 —— 裸抛的话人连它叫什么都不知道。
+        #
+        # 实测（2026-07-30，issue #2）撞的是仓库设置默认关闭：
+        # `permissions: pull-requests: write` 是必要但**不充分**的，还要
+        # Settings → Actions → General → Workflow permissions 里那个复选框。
+        # 消息必须指到那一格，不是一句「开 PR 失败了」。
+        gh.comment(ev.number,
+                   f"**修复跑完了，分支也推上去了，但 PR 没开成。**\n\n"
+                   f"`{type(e).__name__}：{e}`\n\n"
+                   f"分支：`{branch}` —— 东西都在里面，可以直接 checkout 或手工开 PR。\n\n"
+                   f"如果报的是 *not permitted to create and approve pull requests*，"
+                   f"那是仓库设置：**Settings → Actions → General → Workflow "
+                   f"permissions → 勾上「Allow GitHub Actions to create and approve "
+                   f"pull requests」**。job 的 `permissions:` 给够了也不行，这一格是"
+                   f"另一道闸。\n\n{state.get('report_md') or ''}")
+        return HandleResult(1, "pr_failed")
 
     # trace 落到孤儿分支上 —— runner 是临时的，不推就全没了（见 aifix.traces）。
     #
