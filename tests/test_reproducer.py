@@ -168,3 +168,13 @@ def test_system_prompt_forbids_verifying_the_test_itself():
     """「再跑一遍确认它红」是模型翻不完文件的一个主要动机 —— 而它既没有
     run_tests，也不需要：红检由确定性代码做。不写死这一条，它会一直找下去。"""
     assert "不需要" in SYSTEM_PROMPT and "确定性代码" in SYSTEM_PROMPT
+
+
+def test_system_prompt_gives_a_concrete_give_up_trigger():
+    """「拿不准就放弃」太软，模型不照做。
+
+    实测（2026-07-30，issue #1）：面对一个只有「有时候不对」的模糊报告，模型
+    翻满了步数上限也不肯说「信息不足」—— 它一直在 grep 文档。软措辞换成一条
+    可判定的判据（前三次调用还定位不到函数就放弃）。
+    """
+    assert "前三次工具调用" in SYSTEM_PROMPT

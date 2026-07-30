@@ -118,6 +118,14 @@ class AifixConfig(BaseSettings):
     # fixer 的 25 步，模型翻了 25 步没吐出 JSON，整轮以「达到 max_steps 上限」
     # 收场 —— 一次既没结论也没产出的空跑。
     reproducer_max_steps: int = 12
+    # 复现这一步的 token 上限。**必须有**：它在 run_once 之外发起调用，如果不
+    # 给独立上限，一次不收敛的复现能把整个 run 的额度吃掉大半。
+    #
+    # 实测（2026-07-30，issue #1 第二次真跑）：一次没产出任何结果的复现烧掉
+    # 128,341 token —— 默认 500k 额度的四分之一，而它一个字的产出都没有。
+    # 60k 的依据：detector 单步 20k，fixer 要反复迭代所以吃整份；reproducer
+    # 读几个文件后作答，介于两者之间。
+    reproducer_max_tokens: int = 60_000
     detector_max_tokens: int = 20_000
     loop_detect_window: int = 3
     tool_result_max_chars: int = 8000

@@ -167,7 +167,9 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
             # 刻意小于 fixer_max_steps：reproducer 只有读工具，读够了就该
             # 作答，多给的步数不会变成更好的测试，只会变成更长的翻阅。
             max_steps=config.reproducer_max_steps,
-            budget=BudgetTracker(max_tokens=config.budget_tokens,
+            # 独立的 token 上限，不吃整个 run 的额度 —— 见
+            # config.reproducer_max_tokens 上面那段实测。
+            budget=BudgetTracker(max_tokens=config.reproducer_max_tokens,
                                  max_wall_seconds=config.budget_wall_seconds),
             loop_detect_window=config.loop_detect_window,
             tool_result_max_chars=config.tool_result_max_chars,
