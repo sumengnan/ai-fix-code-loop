@@ -32,6 +32,24 @@ from .nodes.baseline import file_level_ids, run_scoped
 from .tools.search import GrepTool
 
 
+# 这一步的四种收场。**分开是因为下一步动作完全不同**，归并成一句「没能写出
+# 复现测试」会把人指向错的方向：
+#
+#   ok             —— 有了一条可用的复现测试
+#   missing_info   —— issue 信息不足。下一步是**人**去补充 issue
+#   no_convergence —— 模型翻了一堆文件就是不作答。下一步是**运维**调
+#                     reproducer_max_steps 或换模型；让人去改 issue 改多少遍都没用
+#   unparseable    —— 输出不合约定格式。同样是运维侧的事（看 trace / 换模型）
+#
+# 这四类是实测逼出来的：2026-07-30 第一次真跑（issue #1）沿用 fixer 的 25 步，
+# 模型翻了 25 步没吐 JSON，而回帖说的是「没能写出复现测试」—— 一句会让人去
+# 改 issue 的话，而改 issue 根本不解决问题。
+KIND_OK = "ok"
+KIND_MISSING_INFO = "missing_info"
+KIND_NO_CONVERGENCE = "no_convergence"
+KIND_UNPARSEABLE = "unparseable"
+
+
 @dataclass
 class ReproduceOutcome:
     """`reproduction is None` 表示这一步没能产出任何可用结论。
@@ -40,9 +58,12 @@ class ReproduceOutcome:
     为 False 且 `missing_info` 非空，是一条**有价值的 triage 结论**，要原样
     回帖。两者共用一个 None 会让「模型答歪了」和「issue 写得不全」在报告里
     长得一模一样，而这两种情况该给人的下一步动作完全不同。
+
+    `kind` 是给**程序**判的（handle 据此选回帖措辞），`reason` 是给人看的。
     """
     reproduction: Reproduction | None
     reason: str = ""
+    kind: str = KIND_OK
     tokens: int = 0
     cost_usd: float = 0.0
     events: list[Any] = field(default_factory=list)
@@ -143,7 +164,9 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
             client=client or OpenAICompatibleClient(config.fixer),
             registry=build_reproduce_registry(sandbox, adapter),
             context=ContextManager(SYSTEM_PROMPT),
-            max_steps=config.fixer_max_steps,
+            # 刻意小于 fixer_max_steps：reproducer 只有读工具，读够了就该
+            # 作答，多给的步数不会变成更好的测试，只会变成更长的翻阅。
+            max_steps=config.reproducer_max_steps,
             budget=BudgetTracker(max_tokens=config.budget_tokens,
                                  max_wall_seconds=config.budget_wall_seconds),
             loop_detect_window=config.loop_detect_window,
@@ -151,7 +174,8 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
             model_name=config.fixer.model,
             price_map=config.price_map,
         )
-        prompt = build_prompt(issue_title, issue_body, adapter.test_dirs())
+        prompt = build_prompt(issue_title, issue_body, adapter.test_dirs(),
+                              max_steps=config.reproducer_max_steps)
         outcome = await consume(loop.run(prompt))
     finally:
         await sandbox.close()
@@ -159,16 +183,32 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
     common = dict(tokens=outcome.tokens, cost_usd=outcome.cost_usd,
                   events=outcome.events)
     if not outcome.ok:
+        # 步数耗尽单独成一类。它与「issue 信息不足」的下一步动作完全相反，
+        # 而消息里必须带上那个可操作的旋钮名 —— 一句「出错了」等于没说。
+        err = outcome.error or ""
+        if "max_steps" in err:
+            return ReproduceOutcome(
+                None,
+                f"模型翻了 {config.reproducer_max_steps} 步仍未给出复现测试"
+                f"（{err}）。\n"
+                "  这**不是 issue 写得不清楚** —— 补充 issue 不解决它。\n"
+                "  下一步：调大 `AIFIX_REPRODUCER_MAX_STEPS`，或换一个更会收敛"
+                "的模型；events.jsonl 里有它这几步在读什么。",
+                kind=KIND_NO_CONVERGENCE, **common)
         return ReproduceOutcome(
-            None, f"生成复现测试时出错：{outcome.error}", **common)
+            None, f"生成复现测试时出错：{err}",
+            kind=KIND_UNPARSEABLE, **common)
 
     r = parse_reproduction(outcome.text, adapter.test_dirs())
     if r is None:
         return ReproduceOutcome(
-            None, "模型没有给出可解析的复现测试（输出不合约定的 JSON 格式）。",
-            **common)
+            None,
+            "模型的输出不合约定的 JSON 格式，解析不出复现测试。\n"
+            "  同样不是 issue 的问题；events.jsonl 里有它实际吐出来的东西。",
+            kind=KIND_UNPARSEABLE, **common)
     if not r.can_reproduce:
         return ReproduceOutcome(
             r, "issue 里的信息不足以写出复现测试，还缺：\n"
-            + "\n".join(f"  - {m}" for m in r.missing_info), **common)
+            + "\n".join(f"  - {m}" for m in r.missing_info),
+            kind=KIND_MISSING_INFO, **common)
     return ReproduceOutcome(r, **common)

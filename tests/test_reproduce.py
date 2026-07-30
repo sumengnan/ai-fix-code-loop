@@ -5,7 +5,7 @@
 """
 import json
 
-from harness.llm.base import StreamChunk
+from harness.llm.base import StreamChunk, ToolCallDelta
 from harness.sandbox.local import LocalSandbox
 from harness.usage import Usage
 
@@ -25,6 +25,12 @@ _OK_JSON = json.dumps({
 
 def _text(t):
     return [StreamChunk(type="text", text=t),
+            StreamChunk(type="done", usage=Usage(10, 5, 15))]
+
+
+def _tool_call(name, args):
+    return [StreamChunk(type="tool_call", tool_call_delta=ToolCallDelta(
+                index=0, id="c1", name=name, arguments=args)),
             StreamChunk(type="done", usage=Usage(10, 5, 15))]
 
 
@@ -148,3 +154,53 @@ async def test_reproduce_degrades_to_none_on_unparseable_output(buggy_repo):
                           "t", "b", client=_Scripted([_text("我觉得吧……")]))
     assert out.reproduction is None
     assert out.reason
+
+
+# ---------------------------------------------------------------- 失败分类
+
+async def test_giving_up_is_labelled_as_missing_info(buggy_repo):
+    """信息不足 —— 下一步是**人**去补充 issue。"""
+    raw = json.dumps({"can_reproduce": False, "missing_info": ["没说触发的输入"]})
+    out = await reproduce(buggy_repo, PytestAdapter(), AifixConfig(),
+                          "t", "b", client=_Scripted([_text(raw)]))
+    assert out.kind == "missing_info"
+
+
+async def test_unparseable_output_is_labelled_as_such(buggy_repo):
+    """输出不合格式 —— 下一步是**运维**去看 trace / 换模型，不是补 issue。"""
+    out = await reproduce(buggy_repo, PytestAdapter(), AifixConfig(),
+                          "t", "b", client=_Scripted([_text("我觉得吧……")]))
+    assert out.kind == "unparseable"
+
+
+async def test_running_out_of_steps_is_not_confused_with_missing_info(buggy_repo):
+    """步数耗尽 ≠ issue 信息不足。**这两条的下一步动作完全相反**：
+
+    前者要人去补 issue，后者要运维去调步数上限或换模型。归并成一句「没能写出
+    复现测试」，用户会去改 issue —— 改多少遍都没用。
+
+    这是 2026-07-30 第一次真跑（issue #1）撞出来的：模型翻了 25 步没作答，
+    回帖说的却是「没能写出复现测试」。
+    """
+    cfg = AifixConfig(reproducer_max_steps=1)
+    # 永远只调工具、从不作答的模型
+    looping = _Scripted([_tool_call("read_file", '{"path": "calc.py"}')])
+    out = await reproduce(buggy_repo, PytestAdapter(), cfg,
+                          "t", "b", client=looping)
+    assert out.kind == "no_convergence", out.reason
+    assert out.reproduction is None
+    # 消息里要出现**可操作**的那个旋钮名 —— 环境变量形式，不是字段名：
+    # 读这条消息的人要去设的是环境变量，给他字段名等于让他自己去翻源码
+    assert "AIFIX_REPRODUCER_MAX_STEPS" in out.reason
+
+
+async def test_the_events_are_carried_out_for_tracing(buggy_repo):
+    """复现这一步的事件必须带出来落盘。
+
+    第一次真跑时它整段没有 trace（RunTrace 建在 run_once 里，而这条通路根本
+    走不到那儿）—— 于是「模型这 25 步在读什么」这个唯一有诊断价值的问题，
+    artifact 里一个字都没有。失败时恰恰最需要它。
+    """
+    out = await reproduce(buggy_repo, PytestAdapter(), AifixConfig(),
+                          "t", "b", client=_Scripted([_text("随便")]))
+    assert out.events, "事件流是空的，出问题时无从复盘"

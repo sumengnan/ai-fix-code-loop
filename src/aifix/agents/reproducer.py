@@ -19,6 +19,16 @@ SYSTEM_PROMPT = """你是一个把缺陷报告翻译成可执行测试的工程�
 先读代码，确认模块路径、函数名和调用签名——凭报告里的措辞猜 import 是最
 常见的失败方式，写出来的测试会以 ImportError 收场，那不叫复现。
 
+**但读够就停下作答。** 你的步数是有限的，用完还没作答的话，这一轮什么都不
+产出——那比给出一个不完美的答案糟得多。判断「够了」的标准只有一条：能不能
+写出正确的 import 和调用。
+
+你**不需要**、也没有办法确认这条测试真的会红——那由确定性代码在你之后跑一遍
+来判定。不要为了「再确认一下」继续翻文件。
+
+拿不准缺陷在哪时，正确的动作是 can_reproduce: false 并写清缺什么，**不是**
+继续找。
+
 只输出一个 JSON 对象，字段如下：
 - can_reproduce: 布尔。信息足够写出复现测试时为 true
 - test_file: 新测试文件的路径（相对 repo 根）。必须落在测试目录之下
@@ -47,8 +57,8 @@ class Reproduction(BaseModel):
     missing_info: list[str] = []
 
 
-def build_prompt(issue_title: str, issue_body: str,
-                 test_dirs: list[str]) -> str:
+def build_prompt(issue_title: str, issue_body: str, test_dirs: list[str],
+                 max_steps: int | None = None) -> str:
     """测试目录由**适配器**给，不让模型猜。
 
     猜错的后果不是「路径不好看」：落在产品目录下的文件，「不许改测试文件」
@@ -57,9 +67,14 @@ def build_prompt(issue_title: str, issue_body: str,
     答案（见 ProjectAdapter.test_dirs），没有理由让模型再猜一次。
     """
     dirs = "、".join(test_dirs) if test_dirs else "（未知）"
+    # 把步数上限写进 prompt。不告诉它预算，它无从判断「该收手了」——
+    # 实测（2026-07-30，issue #1）就是这么翻满 25 步、一个字没作答的。
+    budget = (f"你最多还能调用 {max_steps} 次工具，用完必须作答。\n\n"
+              if max_steps else "")
     return (
         f"本项目的测试目录：{dirs}\n"
         f"新测试文件必须写在其中之一的下面。\n\n"
+        f"{budget}"
         f"缺陷报告标题：{issue_title}\n\n"
         f"<issue>\n{issue_body}\n</issue>\n")
 

@@ -1,6 +1,7 @@
 import json
 
-from aifix.agents.reproducer import Reproduction, build_prompt, parse_reproduction
+from aifix.agents.reproducer import (SYSTEM_PROMPT, Reproduction, build_prompt,
+                                    parse_reproduction)
 
 _TEST_DIRS = ["tests"]
 
@@ -149,3 +150,21 @@ def test_parse_tolerates_a_fenced_json_object():
     """有些端点会在 JSON 外包一层围栏或解释文字。与 parse_diagnosis 同款容错。"""
     r = parse_reproduction(f"好的，结果如下：\n```json\n{_ok()}\n```\n", _TEST_DIRS)
     assert r is not None and r.can_reproduce is True
+
+
+def test_prompt_tells_the_model_its_step_budget():
+    """不告诉它预算，它无从判断「该收手了」。
+
+    实测（2026-07-30，issue #1）：没有这一句时模型翻满 25 步、一个字没作答，
+    整轮以「达到 max_steps 上限」收场 —— 既没结论也没产出的空跑。
+    """
+    p = build_prompt(_TITLE, _BODY, _TEST_DIRS, max_steps=12)
+    assert "12" in p
+    # 反向对照：不传就不该凭空编一个数字出来
+    assert "12" not in build_prompt(_TITLE, _BODY, _TEST_DIRS)
+
+
+def test_system_prompt_forbids_verifying_the_test_itself():
+    """「再跑一遍确认它红」是模型翻不完文件的一个主要动机 —— 而它既没有
+    run_tests，也不需要：红检由确定性代码做。不写死这一条，它会一直找下去。"""
+    assert "不需要" in SYSTEM_PROMPT and "确定性代码" in SYSTEM_PROMPT

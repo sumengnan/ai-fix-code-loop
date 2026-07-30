@@ -110,6 +110,14 @@ class AifixConfig(BaseSettings):
     # 而是环境坏了 / prompt 崩了 / 今天这个模型不行。继续跑只是匀速烧钱。
     consecutive_failure_limit: int = 3
     fixer_max_steps: int = 25
+    # 复现测试那一步的步数上限。**刻意小于 fixer_max_steps**：fixer 要 25 步
+    # 是因为它靠 run_tests 的反馈来回迭代补丁；reproducer 只有读工具，读够了
+    # 就该作答，多给的步数不会变成更好的测试，只会变成更长的翻阅。
+    #
+    # 这个字段是**实测逼出来的**：第一次真跑（2026-07-30，issue #1）沿用了
+    # fixer 的 25 步，模型翻了 25 步没吐出 JSON，整轮以「达到 max_steps 上限」
+    # 收场 —— 一次既没结论也没产出的空跑。
+    reproducer_max_steps: int = 12
     detector_max_tokens: int = 20_000
     loop_detect_window: int = 3
     tool_result_max_chars: int = 8000
