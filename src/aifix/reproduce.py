@@ -43,6 +43,10 @@ from .tools.search import GrepTool
 #   unparseable    —— 输出不合约定格式。同样是运维侧的事（看 trace / 换模型）
 #   empty_answer   —— 正文一个字都没有。推理型模型会把输出预算全烧在
 #                     reasoning_content 里然后被截断，正文永远等不到
+#   truncated      —— 流在某一步中途断了，这次调用没跑完。**静默**：consume 的
+#                     async-for 正常退出、ok 为 True，看起来像模型答歪了
+#   cost_capped    —— 撞上我们自己的美元闸。事件签名与 truncated 一模一样，
+#                     必须先判它，否则会报成「端点在掐流」——一句假话
 #
 # 这四类是实测逼出来的：2026-07-30 第一次真跑（issue #1）沿用 fixer 的 25 步，
 # 模型翻了 25 步没吐 JSON，而回帖说的是「没能写出复现测试」—— 一句会让人去
@@ -54,6 +58,12 @@ KIND_UNPARSEABLE = "unparseable"
 # 一个字都没吐。与 unparseable 分开，因为下一步完全不同：那一类要去看它吐了
 # 什么，这一类根本没有可看的东西。实测（2026-07-30，issue #2）见下方注释。
 KIND_EMPTY_ANSWER = "empty_answer"
+# 流在某一步中途断了。与 unparseable 分开：那一类是模型答歪了，这一类是这次
+# 调用**根本没跑完** —— 下一步是重试或查端点，不是改 prompt。
+KIND_TRUNCATED = "truncated"
+# 撞上**我们自己**的美元闸。与 truncated 的事件签名一模一样（都没有
+# RunFinished），但原因和下一步完全不同 —— 那一类要查端点，这一类要调预算。
+KIND_COST_CAPPED = "cost_capped"
 
 
 @dataclass
@@ -73,6 +83,25 @@ class ReproduceOutcome:
     tokens: int = 0
     cost_usd: float = 0.0
     events: list[Any] = field(default_factory=list)
+
+
+def classify_incomplete(events: list[Any]) -> bool:
+    """这次调用有没有正常收场 —— 判据是**有没有 `RunFinished`**。
+
+    实测（2026-07-30）正常收场的事件序列是
+    `RunStarted → StepStarted → TextDelta → ModelUsage → RunFinished`：
+    **最后一步不发 `StepFinished`**，发的是 `RunFinished`。所以「StepStarted 比
+    StepFinished 多」在**每一次**正常收场里都成立，拿它当判据会把所有成功都
+    判成截断 —— 这条弯路走过一次，留在这里。
+
+    而 issue #2 那两轮失败的事件统计里**一条 `RunFinished` 都没有**：流在中途
+    断了，`consume()` 的 async-for 却正常退出、`outcome.ok` 为 True —— 从返回值
+    上完全看不出来。这是一次**静默截断**：不报错、不崩溃，只有「模型输出格式
+    不对」这个诊断是假的。
+
+    只在 `outcome.ok` 为真的分支里调用：有 `RunError` 时已经归进 no_convergence。
+    """
+    return not any(type(e).__name__ == "RunFinished" for e in events)
 
 
 def _route(config: AifixConfig):
@@ -235,6 +264,33 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
             "`AIFIX_REPRODUCER_MAX_TOKENS`，或换一个更会收敛的模型；"
             "events.jsonl 里有它这几步在读什么。",
             kind=KIND_NO_CONVERGENCE, **common)
+
+    if outcome.cost_capped:
+        # **必须排在截断判定之前**：成本闸触发时 consume 主动关掉生成器，事件流
+        # 里同样没有 RunFinished —— 两者的签名一模一样，而原因相反。实测
+        # （2026-07-30，issue #2）两轮的累计成本是 $0.2179 / $0.2070，闸是
+        # $0.50 × 0.4 = $0.20，被上一版报成了「查端点是不是在掐流」。
+        cap = config.budget_usd * config.reproducer_budget_share
+        return ReproduceOutcome(
+            None,
+            f"复现这一步撞上了**它自己的美元闸**（上限 ${cap:.4f} = "
+            f"AIFIX_BUDGET_USD × {config.reproducer_budget_share}）。\n"
+            "  不是模型的问题，也不是端点的问题 —— 是这次给它的钱不够走完。\n"
+            "  下一步：调大 `AIFIX_BUDGET_USD`、或调大 "
+            "`AIFIX_REPRODUCER_BUDGET_SHARE`、或把这一步换成便宜的模型"
+            "（`AIFIX_FIXER__MODEL`）。",
+            kind=KIND_COST_CAPPED, **common)
+
+    if classify_incomplete(outcome.events or []):
+        # 先判这一条：流断了的话，正文必然是残的，后面两条判据看到的都是
+        # 半截东西，给出的诊断会指向模型而不是这次调用。
+        return ReproduceOutcome(
+            None,
+            "这次模型调用**中途断了**（有一步只开始、没结束），拿到的正文是残的。\n"
+            "  不是模型答歪了，也不是 issue 的问题 —— 下一步是重试，"
+            "或查端点是不是在长响应上掐流。\n"
+            "  events.jsonl 里能看到它断在哪一步。",
+            kind=KIND_TRUNCATED, **common)
 
     if not (outcome.text or "").strip():
         # 一个字都没吐。推理型模型（deepseek 的 reasoning_content、o 系列的

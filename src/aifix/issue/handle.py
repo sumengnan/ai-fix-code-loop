@@ -25,8 +25,9 @@ from ..graph import COLLECTION_ABORT_KIND, MODEL_ABORT_KIND
 from ..delivery import COMMIT_EMAIL, COMMIT_NAME
 from ..traces import TRACES_BRANCH
 from ..nodes.report import count_fixed
-from ..reproduce import (KIND_EMPTY_ANSWER, KIND_MISSING_INFO,
-                         KIND_NO_CONVERGENCE, KIND_UNPARSEABLE)
+from ..reproduce import (KIND_COST_CAPPED, KIND_EMPTY_ANSWER,
+                         KIND_MISSING_INFO, KIND_NO_CONVERGENCE,
+                         KIND_TRUNCATED, KIND_UNPARSEABLE)
 from .event import authorize
 from .github import GitHubClient
 
@@ -61,6 +62,8 @@ _REPRO_HEADLINES = {
     KIND_NO_CONVERGENCE: "**模型没能在预算内收敛，这一轮没有产出。**",
     KIND_UNPARSEABLE: "**模型的输出解析不出复现测试。**",
     KIND_EMPTY_ANSWER: "**模型没有吐出任何正文，这一轮没有产出。**",
+    KIND_TRUNCATED: "**这次模型调用中途断了，不是模型的问题。**",
+    KIND_COST_CAPPED: "**复现这一步的钱不够走完，被自己的预算闸掐断了。**",
 }
 
 
