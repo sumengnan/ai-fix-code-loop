@@ -409,7 +409,7 @@ jobs:
 - **`AIFIX_BUDGET_WALL_SECONDS` (3600) 必须显著小于 `timeout-minutes` (90)。** Actions 的超时是**杀进程**，`run_once` 那个保证报告先落地的 except 分支根本执行不到——跑了一小时，什么都没留下。让软闸先响。
 - **`AIFIX_PRICE_MAP` 用 variable 不用 secret。** 价格表不是机密，放 secret 里会被日志遮蔽成 `***`，你反而看不出它配没配对——**而没配价格表的后果是美元闸永远不触发**。
 
-- [ ] **步骤 1：连通性先验证**（**在写这个文件之前做**）
+- [x] **步骤 1：连通性先验证**（**在写这个文件之前做**）—— 已跑通，见下面的实测
 
 ```yaml
 - run: curl -sS -o /dev/null -w "%{http_code}\n" $BASE_URL/models -H "Authorization: Bearer $KEY"
@@ -423,7 +423,12 @@ runner 的出口 IP 是 Azure 的动态大段。**你的模型 endpoint 若有 I
 >
 > 端点若确实有白名单，只剩两条路：让端点放开，或换自建 runner。
 
-**凭据那一半还没验**（需要 `secrets.AIFIX_API_KEY` / `secrets.AIFIX_BASE_URL`）。已确认的是：workflow 能被触发、守卫在缺配置时按设计报出原因、出口网络本身通（`api.ipify.org` 请求成功）。
+> **凭据那一半也验过了（2026-07-30）**：配上 `secrets.AIFIX_API_KEY` / `secrets.AIFIX_BASE_URL` 之后重跑，
+> `GET /models` 与 `POST /chat/completions` 双双 200，模型 `deepseek-v4-flash` 真的回了内容（5 + 1 = 6 tokens）。
+> **Actions 这条路在网络与凭据这一层是通的。**
+>
+> 那一次的出口 IP 是 `145.132.99.101` —— 连 Azure 段都不是（前三次是 `20.55.x` / `20.163.x` / `4.236.x`）。
+> 四次四个不同的段，白名单不可行这条因此更硬。
 
 - [x] **步骤 2：写 workflow，合进默认分支**
 - [ ] **步骤 3：真实 issue 端到端验收**
