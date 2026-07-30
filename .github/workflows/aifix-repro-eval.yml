@@ -1,0 +1,86 @@
+# 量一个数：**模型读一段人话，能不能写出红得对的复现测试。**
+#
+# 这是 issue 驱动那条路的**天花板**。它决定整条流水线值不值得用，而在这个
+# workflow 之前，它的样本量是 1（issue #2 那一次成功）。
+#
+# 方法：拿仓库历史上真实的 `fix(...)` 提交，checkout 到它的**父提交**（缺陷还
+# 在），只把 commit message 当作缺陷报告喂进去，看 `aifix reproduce` 能不能写出
+# 一条在那个状态下**红着**的测试。ground truth 自带，不需要人标注 —— 与
+# `aifix mine` 同一个思路，只是量的是复现而不是修复。
+#
+# 刻意**不跑修复**：这一步只回答「复现写不写得出来」。把修复混进来的话，
+# 一个数字里就掺了两种能力，分不开哪个是瓶颈。
+#
+# 手动触发：gh workflow run aifix-repro-eval.yml -f model=deepseek-v4-flash
+name: aifix-repro-eval
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 用哪个模型量（不填走 variable 的默认）
+        required: false
+        default: deepseek-v4-flash
+      commits:
+        description: 空格分隔的 fix 提交（不填用下面那批）
+        required: false
+        default: ""
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions: {}          # 只读代码、只调模型，不碰仓库
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # 要历史：任务就是从历史里挖的
+
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+
+      - name: 逐个任务跑 aifix reproduce
+        env:
+          AIFIX_FIXER__MODEL: ${{ inputs.model }}
+          AIFIX_FIXER__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
+          AIFIX_FIXER__API_KEY: ${{ secrets.AIFIX_API_KEY }}
+          AIFIX_PRICE_MAP: ${{ vars.AIFIX_PRICE_MAP }}
+          AIFIX_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
+          COMMITS: ${{ inputs.commits }}
+        run: |
+          set -u
+          # 不填就用这批：都是本轮真跑里撞出来的缺陷，描述具体、有明确的
+          # 期望行为，是这条路**最有利**的条件。读数因此是个上界，不是均值。
+          DEFAULT="91cc413 36e21ce 5cd3395 e62b772 c5fca59"
+          LIST="${COMMITS:-$DEFAULT}"
+
+          ok=0; total=0
+          for c in $LIST; do
+            total=$((total + 1))
+            parent=$(git rev-parse "${c}^" 2>/dev/null) || {
+              echo "::warning::找不到 ${c}^，跳过"; total=$((total - 1)); continue; }
+
+            work="/tmp/task-$c"
+            git worktree add --quiet --detach "$work" "$parent"
+            # 只喂 commit message —— 那正是「一段人话」，而修复本身藏在子提交里
+            git log -1 --format='%s%n%n%b' "$c" > /tmp/issue-$c.md
+
+            echo "───────── $c ($(git log -1 --format=%s "$c")) ─────────"
+            if uv run aifix reproduce "$work" --issue-text "/tmp/issue-$c.md"; then
+              ok=$((ok + 1)); echo "✅ 复现成功且红检通过"
+            else
+              echo "❌ 没写出红得对的复现"
+            fi
+            git worktree remove --force "$work" || true
+          done
+
+          echo
+          echo "════════════════════════════════════════"
+          echo "模型：${AIFIX_FIXER__MODEL}"
+          echo "复现成功：${ok} / ${total}"
+          echo "════════════════════════════════════════"
+          echo
+          echo "怎么读这个数：任务全部来自**描述具体、有明确期望行为**的 commit"
+          echo "message，是这条路最有利的条件 —— 所以它是个**上界**，不是真实"
+          echo "issue 上的均值。样本也小，别当成统计结论。"
