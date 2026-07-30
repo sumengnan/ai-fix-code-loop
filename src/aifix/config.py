@@ -123,9 +123,17 @@ class AifixConfig(BaseSettings):
     #
     # 实测（2026-07-30，issue #1 第二次真跑）：一次没产出任何结果的复现烧掉
     # 128,341 token —— 默认 500k 额度的四分之一，而它一个字的产出都没有。
-    # 60k 的依据：detector 单步 20k，fixer 要反复迭代所以吃整份；reproducer
-    # 读几个文件后作答，介于两者之间。
-    reproducer_max_tokens: int = 60_000
+    # **这个数必须与 reproducer_max_steps 相称**，两个旋钮不是独立的：agent loop
+    # 每一步都要把此前所有工具返回重发一遍，所以累计用量随步数**超线性**增长。
+    #
+    # 实测（2026-07-30，issue #2，deepseek-v4-flash，带 offset 的 read_file）：
+    # 逐步累计 1.7k → 2.3k → 5.0k → 5.2k → 6.5k → 6.6k → 9.7k …，12 步撞在
+    # 66,721。此前配 60k 的后果是**两个上限同时卡住**，失败消息说不清是哪个在限
+    # 制——而它们的下一步动作不同（调步数 vs 换模型）。
+    #
+    # 120k 留出余量，让 steps 成为唯一的约束：那样「12 步没答出来」才是一句
+    # 干净的结论。
+    reproducer_max_tokens: int = 120_000
     detector_max_tokens: int = 20_000
     loop_detect_window: int = 3
     tool_result_max_chars: int = 8000
