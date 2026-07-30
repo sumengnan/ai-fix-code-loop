@@ -264,3 +264,75 @@ async def test_no_dollar_gate_when_no_budget_is_set(buggy_repo, monkeypatch):
     await reproduce(buggy_repo, PytestAdapter(), AifixConfig(budget_usd=0.0),
                     "t", "b", client=_Scripted([_text("x")]))
     assert seen["cap"] is None
+
+
+async def test_an_empty_answer_is_told_apart_from_a_malformed_one(buggy_repo):
+    """一个字都没吐 ≠ 吐了但格式不对。
+
+    实测（2026-07-30，issue #2）：pro 把输出预算全烧在 reasoning_content 里，
+    正文一个字都没有 —— 事件流里 ReasoningDelta 1001 条、TextDelta 0 条，
+    第 9 步没有 StepFinished，最后一条 ModelUsage 的 token 数是 None（被截断）。
+
+    归成「输出不合约定的 JSON 格式」是错的：那句话让人去看它吐了什么，
+    而它什么都没吐。下一步该是压推理长度或换模型。
+    """
+    out = await reproduce(buggy_repo, PytestAdapter(), AifixConfig(),
+                          "t", "b", client=_Scripted([_text("")]))
+    assert out.kind == "empty_answer", out.reason
+    assert "推理" in out.reason
+
+
+async def test_a_malformed_answer_is_still_called_that(buggy_repo):
+    """反向对照：真吐了东西但解析不出时，措辞不能被上一条吃掉。"""
+    out = await reproduce(buggy_repo, PytestAdapter(), AifixConfig(),
+                          "t", "b", client=_Scripted([_text("我觉得吧……")]))
+    assert out.kind == "unparseable"
+    assert "推理" not in out.reason
+
+
+def test_thinking_is_off_by_default():
+    """默认关。
+
+    这是个**取舍决定**，不是测量结论：实测见过一轮推理吃光输出预算导致零产出，
+    也见过一轮带推理写得很好。真要下结论需要开/关各跑一批任务比修复成功率，
+    那个读数还不存在 —— 所以这条断言钉的是「默认值是什么」，不是「哪个更好」。
+    """
+    from aifix.reproduce import _route
+    assert AifixConfig().reproducer_thinking is False
+    assert _route(AifixConfig()).llm_extra_body["enable_thinking"] is False
+
+
+def test_thinking_can_be_restored_to_the_endpoint_default():
+    """None = 不发这个参数。这条出路必须留着：默认关是取舍，不是定论，
+    而各家端点的默认并不相同。"""
+    from aifix.reproduce import _route
+    cfg = AifixConfig(reproducer_thinking=None)
+    assert _route(cfg) is cfg.fixer
+    assert "enable_thinking" not in _route(cfg).llm_extra_body
+
+
+def test_thinking_can_be_turned_off_for_this_step_only():
+    """关掉时只动复现这一步的路由，fixer 自己那份不受影响 —— 两步的活不同，
+    fixer 要看测试反馈迭代，推理对它可能真有用。"""
+    from aifix.reproduce import _route
+    cfg = AifixConfig(reproducer_thinking=False)
+    assert _route(cfg).llm_extra_body["enable_thinking"] is False
+    assert "enable_thinking" not in cfg.fixer.llm_extra_body
+
+
+def test_an_empty_env_value_does_not_break_startup():
+    """Actions 里 `env: X: ${{ vars.Y }}` 在 Y 未设置时给的是**空串**。
+
+    不接这一手，任何没配这个 variable 的仓库都会在启动时因为「'' 不是合法的
+    bool」而拒绝启动 —— 一个纯粹由 YAML 语义造成的、与用户无关的崩溃。
+    """
+    assert AifixConfig(reproducer_thinking="").reproducer_thinking is None
+    # 而没设这个变量时走代码里的默认（关），不是 None
+    assert AifixConfig().reproducer_thinking is False
+
+
+def test_null_restores_the_endpoint_default():
+    """`--body null` 要能表达「不发这个参数」—— 空串已经被 workflow 的
+    `|| 'false'` 占用了，得留另一个出口。"""
+    for v in ("null", "none", "NULL", ""):
+        assert AifixConfig(reproducer_thinking=v).reproducer_thinking is None

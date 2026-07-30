@@ -25,8 +25,8 @@ from ..graph import COLLECTION_ABORT_KIND, MODEL_ABORT_KIND
 from ..delivery import COMMIT_EMAIL, COMMIT_NAME
 from ..traces import TRACES_BRANCH
 from ..nodes.report import count_fixed
-from ..reproduce import (KIND_MISSING_INFO, KIND_NO_CONVERGENCE,
-                         KIND_UNPARSEABLE)
+from ..reproduce import (KIND_EMPTY_ANSWER, KIND_MISSING_INFO,
+                         KIND_NO_CONVERGENCE, KIND_UNPARSEABLE)
 from .event import authorize
 from .github import GitHubClient
 
@@ -60,6 +60,7 @@ _REPRO_HEADLINES = {
     KIND_MISSING_INFO: "**issue 信息不足，写不出复现测试。**",
     KIND_NO_CONVERGENCE: "**模型没能在预算内收敛，这一轮没有产出。**",
     KIND_UNPARSEABLE: "**模型的输出解析不出复现测试。**",
+    KIND_EMPTY_ANSWER: "**模型没有吐出任何正文，这一轮没有产出。**",
 }
 
 

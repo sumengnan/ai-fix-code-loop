@@ -41,6 +41,8 @@ from .tools.search import GrepTool
 #   no_convergence —— 模型翻了一堆文件就是不作答。下一步是**运维**调
 #                     reproducer_max_steps 或换模型；让人去改 issue 改多少遍都没用
 #   unparseable    —— 输出不合约定格式。同样是运维侧的事（看 trace / 换模型）
+#   empty_answer   —— 正文一个字都没有。推理型模型会把输出预算全烧在
+#                     reasoning_content 里然后被截断，正文永远等不到
 #
 # 这四类是实测逼出来的：2026-07-30 第一次真跑（issue #1）沿用 fixer 的 25 步，
 # 模型翻了 25 步没吐 JSON，而回帖说的是「没能写出复现测试」—— 一句会让人去
@@ -49,6 +51,9 @@ KIND_OK = "ok"
 KIND_MISSING_INFO = "missing_info"
 KIND_NO_CONVERGENCE = "no_convergence"
 KIND_UNPARSEABLE = "unparseable"
+# 一个字都没吐。与 unparseable 分开，因为下一步完全不同：那一类要去看它吐了
+# 什么，这一类根本没有可看的东西。实测（2026-07-30，issue #2）见下方注释。
+KIND_EMPTY_ANSWER = "empty_answer"
 
 
 @dataclass
@@ -68,6 +73,23 @@ class ReproduceOutcome:
     tokens: int = 0
     cost_usd: float = 0.0
     events: list[Any] = field(default_factory=list)
+
+
+def _route(config: AifixConfig):
+    """复现这一步实际使用的模型路由。
+
+    复用 `fixer` 的端点与凭据，但**思考模式单独可控且默认关**：这一步的活是
+    机械的（读代码、照抄测试写法、吐 JSON），而实测有一轮的输出预算被推理全部
+    吃掉、正文一个字没吐。
+
+    `reproducer_thinking` 为 None 时不发这个参数（随端点默认）；fixer 自己那条
+    路由**不受影响** —— 它要看测试反馈迭代补丁，推理对它可能真有用。
+    """
+    if config.reproducer_thinking is None:
+        return config.fixer
+    return config.fixer.model_copy(update={
+        "llm_extra_body": {**config.fixer.llm_extra_body,
+                           "enable_thinking": config.reproducer_thinking}})
 
 
 def build_reproduce_registry(sandbox: Sandbox,
@@ -162,7 +184,7 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
     await sandbox.start()
     try:
         loop = AgentLoop(
-            client=client or OpenAICompatibleClient(config.fixer),
+            client=client or OpenAICompatibleClient(_route(config)),
             registry=build_reproduce_registry(sandbox, adapter),
             context=ContextManager(SYSTEM_PROMPT),
             # 刻意小于 fixer_max_steps：reproducer 只有读工具，读够了就该
@@ -213,6 +235,25 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
             "`AIFIX_REPRODUCER_MAX_TOKENS`，或换一个更会收敛的模型；"
             "events.jsonl 里有它这几步在读什么。",
             kind=KIND_NO_CONVERGENCE, **common)
+
+    if not (outcome.text or "").strip():
+        # 一个字都没吐。推理型模型（deepseek 的 reasoning_content、o 系列的
+        # reasoning tokens）会把输出预算整个烧在推理里然后被截断 —— 实测
+        # （2026-07-30，issue #2）事件流里 ReasoningDelta 1001 条、TextDelta 0
+        # 条，第 9 步连 StepFinished 都没有，最后一条 ModelUsage 的 token 数是
+        # None。
+        #
+        # 归进 unparseable 是错的：那句话让人去看它吐了什么，而它什么都没吐。
+        reasoning = sum(1 for e in (outcome.events or [])
+                        if type(e).__name__ == "ReasoningDelta")
+        hint = (f"事件流里有 {reasoning} 条推理增量、0 条正文 —— "
+                "它把输出预算全烧在**推理**里，正文被截断了。\n"
+                "  下一步：换一个推理更短的模型，或在端点侧压低 reasoning 长度。"
+                if reasoning else
+                "事件流里既没有正文也没有推理 —— 多半是上游把响应截断了。")
+        return ReproduceOutcome(
+            None, f"模型没有吐出任何正文。\n  {hint}",
+            kind=KIND_EMPTY_ANSWER, **common)
 
     r = parse_reproduction(outcome.text, adapter.test_dirs())
     if r is None:
