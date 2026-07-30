@@ -12,6 +12,7 @@ from ..adapters.maven_adapter import MavenAdapter
 from ..adapters.pytest_adapter import (PytestAdapter, imports_outside_worktree,
                                        resolve_test_python)
 from ..graph import COLLECTION_ABORT_KIND, AifixState, trace_of
+from ..testenv import sanitized_command
 
 # 全项目唯一的适配器注册表。preflight_node 按插入顺序逐个 detect()，
 # adapter_for 按名字取，两种用法共用这一份数据 —— 曾经
@@ -296,7 +297,10 @@ async def run_full_suite(worktree: Path, adapter: ProjectAdapter,
     sb = LocalSandbox(workspace=str(worktree))
     await sb.start()
     try:
-        await sb.exec(adapter.full_test_command(), timeout)
+        # 剥掉 aifix 自己的 AIFIX_* 变量：它们会被目标项目读走
+        # （见 aifix.testenv 里那段实测）
+        await sb.exec(sanitized_command(adapter.full_test_command()),
+                      timeout)
         paths = adapter.report_paths(worktree)
         # 先解析再检查：「跑了几个用例」只有报告内容知道，文件在不在答不了
         fs = parse_junit(paths, adapter.make_test_id)
@@ -317,7 +321,9 @@ async def run_scoped(worktree: Path, adapter: ProjectAdapter,
     sb = LocalSandbox(workspace=str(worktree))
     await sb.start()
     try:
-        await sb.exec(adapter.scoped_test_command(test_ids), timeout)
+        await sb.exec(
+            sanitized_command(adapter.scoped_test_command(test_ids)),
+            timeout)
         paths = adapter.report_paths(worktree, scoped=True)
         fs = parse_junit(paths, adapter.make_test_id)
         _check_report(worktree, paths, fs.ran, require_report)

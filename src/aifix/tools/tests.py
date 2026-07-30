@@ -8,6 +8,8 @@ from harness.sandbox.base import Sandbox
 from harness.tools.base import Tool, ToolError
 from harness.tools.builtins._sandbox_util import format_exec
 
+from ..testenv import sanitized_command
+
 from ..adapters.base import ProjectAdapter
 
 
@@ -37,7 +39,10 @@ class RunTestsTool(Tool):
             raise ToolError(
                 f"未知的测试标识：{unknown}。"
                 f"只能跑当前失败列表中的用例：{sorted(self._known)}")
-        cmd = self._adapter.scoped_test_command(params.test_ids)
+        # 与 baseline 同一套环境：不剥的话，agent 看到的证据和
+        # verify 的判定依据不是同一套环境，而两边都不报错
+        cmd = sanitized_command(
+            self._adapter.scoped_test_command(params.test_ids))
         try:
             res = await self._sandbox.exec(cmd, self._timeout)
         finally:
