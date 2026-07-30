@@ -113,3 +113,62 @@ async def test_run_full_suite_hands_the_target_a_clean_environment(
     fs = await run_full_suite(tmp_path, PytestAdapter())
     assert fs.ids == set(), f"aifix 把自己的环境泄漏进了目标测试：{fs.failures}"
     assert fs.ran, "反向对照：测试确实跑了，不是一个都没收集到"
+
+
+# ---------------------------------------------------------------- 测试超时
+
+async def test_a_timeout_says_it_was_a_timeout_and_names_the_knob(tmp_path):
+    """超时必须**明说是超时**，报出秒数和可调的旋钮。
+
+    实测（2026-07-30，轮 9）：拿 aifix 自己当目标跑 `--dry-run`，套件在 worktree
+    里跑了整整 900 秒被杀，而消息是「测试进程没能正常跑完（超时被杀 / 崩溃 /
+    沙箱执行失败）」—— 三种原因揉成一句，不报数字、不指旋钮，而当时**唯一**
+    的成因是那个写死的 900。
+
+    `ExecResult.timed_out` 这个字段一直都在，只是没人读。
+    """
+    from aifix.adapters.pytest_adapter import PytestAdapter
+    from aifix.nodes.baseline import run_full_suite
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_slow.py").write_text(
+        "import time\n\n\ndef test_slow():\n    time.sleep(30)\n",
+        encoding="utf-8")
+
+    with pytest.raises(RuntimeError) as e:
+        # require_report=True 是核心循环每个调用点都传的（见 _check_report）
+        await run_full_suite(tmp_path, PytestAdapter(), timeout=1.0,
+                             require_report=True)
+    msg = str(e.value)
+    assert "超时" in msg
+    assert "1" in msg, "没报出超时的秒数"
+    assert "AIFIX_TEST_TIMEOUT_SECONDS" in msg, "没指出可调的旋钮"
+    # 反向对照：不能再把三种原因揉成一句
+    assert "崩溃 / 沙箱执行失败" not in msg
+
+
+def test_the_timeout_is_configurable():
+    """写死 900 秒等于「套件超过 15 分钟的项目一律不支持」，而这件事
+    没有任何地方写着，也没有任何办法改。"""
+    from aifix.config import AifixConfig
+    cfg = AifixConfig(test_timeout_seconds=3600.0)
+    assert cfg.test_timeout_seconds == 3600.0
+    assert AifixConfig().test_timeout_seconds >= 900.0
+
+
+def test_every_test_run_takes_its_timeout_from_config():
+    """三条跑测试的路径都要读配置里的超时，不能各自留着写死的默认值。
+
+    漏掉一处的表现是：那条路径在长套件上照样被 900/300 秒掐死，而用户明明
+    调大了旋钮 —— 一个「设了但不生效」的配置，比没有这个配置更糟。
+    """
+    import inspect
+
+    from aifix.issue import handle
+    from aifix.nodes import baseline, verify
+
+    assert "test_timeout_seconds" in inspect.getsource(baseline.baseline_node)
+    vsrc = inspect.getsource(verify)
+    assert "test_timeout_seconds" in vsrc and "scoped_test_timeout_seconds" in vsrc
+    assert "scoped_test_timeout_seconds" in inspect.getsource(handle)

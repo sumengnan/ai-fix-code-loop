@@ -195,7 +195,8 @@ async def handle(
         return HandleResult(0, "no_repro")
 
     written = write_reproduction(repo, r)
-    ok, why = await red_check_fn(repo, adapter, r.target_test_id)
+    ok, why = await red_check_fn(repo, adapter, r.target_test_id,
+                                 timeout=config.scoped_test_timeout_seconds)
     if not ok:
         # 收走它。留着的后果不是「多个文件」：这是一条**红着的**测试，下一次
         # run 的 baseline 会把它算进失败集，于是模型被派去修一个上一次已经判

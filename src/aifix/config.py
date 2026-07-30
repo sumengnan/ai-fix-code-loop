@@ -95,6 +95,19 @@ class AifixConfig(BaseSettings):
     # 直接打不开，用户唯一的出路是去改 aifix 的源码。
     allow_collection_errors: bool = False
 
+    # 跑目标项目测试的超时。**实测逼出来的**（2026-07-30，轮 9）：拿 aifix 自己
+    # 当目标跑 `--dry-run`，套件在 worktree 里跑满 900 秒被杀，而这个数此前是
+    # 写死在 `run_full_suite` 签名里的默认值，config 里没有任何旋钮 ——
+    # **任何测试套件超过 15 分钟的项目都直接不可用，且看不出为什么**。
+    #
+    # 默认从 900 提到 1800：aifix 自己的套件本机约 10 分钟、CI 约 11 分钟，
+    # 900 就压在边缘上，worktree 里缓存冷的时候必然越线。一个「刚好够用」的
+    # 默认值等于把偶发失败写进产品。
+    test_timeout_seconds: float = 1800.0
+    # 只跑几个用例时的超时。分开一个旋钮而不是共用：全量与局部差一到两个数量级，
+    # 共用的话要么局部等太久（挂死时白等半小时），要么全量被局部的尺度掐掉。
+    scoped_test_timeout_seconds: float = 600.0
+
     budget_usd: float = 2.0
     budget_tokens: int = 500_000
     budget_wall_seconds: float = 1800.0

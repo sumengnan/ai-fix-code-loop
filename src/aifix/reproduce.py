@@ -155,7 +155,7 @@ def write_reproduction(worktree: Path, r: Reproduction) -> Path:
 
 
 async def red_check(worktree: Path, adapter: ProjectAdapter,
-                    target_id: str) -> tuple[bool, str]:
+                    target_id: str, timeout: float = 600.0) -> tuple[bool, str]:
     """复现测试必须**红**，而且要红得有信息量。零 LLM。
 
     三种「不算复现」分开报，因为它们指向完全不同的下一步：
@@ -169,7 +169,8 @@ async def red_check(worktree: Path, adapter: ProjectAdapter,
     判定顺序不能换：收集失败时 target 必然也「没跑出结果」，先判后者会给出
     一句指错方向的话（本项目最贵的失败一向不是崩溃，是指错方向的诊断）。
     """
-    fs = await run_scoped(worktree, adapter, [target_id])
+    fs = await run_scoped(worktree, adapter, [target_id],
+                          timeout=timeout)
 
     stuck = file_level_ids(sorted(fs.ids), adapter)
     if stuck:

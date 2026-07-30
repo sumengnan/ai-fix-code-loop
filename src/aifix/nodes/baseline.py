@@ -222,7 +222,8 @@ def collection_error_abort(ids: list[str],
 
 
 def _check_report(worktree: Path, paths: list[Path],
-                  ran: frozenset[str], required: bool) -> None:
+                  ran: frozenset[str], required: bool,
+                  res: Any = None, timeout: float | None = None) -> None:
     """required 时报告要存在**且真的跑了用例**，否则抛。
 
     「没跑成」不能冒充「跑完了、全绿」，而它有两种形状，光查文件在不在只挡得住
@@ -256,10 +257,24 @@ def _check_report(worktree: Path, paths: list[Path],
     点名某一个在那种适配器上就是一句假话。
     """
     if required and not paths:
+        # **超时要单独说**。`ExecResult.timed_out` 这个字段一直都在，只是没人读
+        # —— 实测（2026-07-30，轮 9）拿 aifix 自己当目标跑，套件在 worktree 里
+        # 跑满 900 秒被杀，而消息把「超时 / 崩溃 / 沙箱失败」三种揉成一句，
+        # 不报数字、不指旋钮，唯一的成因却恰恰是那个写死的 900。
+        #
+        # 三种原因的下一步完全不同：超时要调旋钮或看套件为什么慢，崩溃要看
+        # 目标项目，沙箱失败要看 aifix 自己。给错方向的提示比不给更费时间。
+        if getattr(res, "timed_out", False):
+            raise RuntimeError(
+                f"跑目标项目的测试**超时**了（>{timeout}s，worktree={worktree}）。\n"
+                f"  这不是模型的问题，也不是目标项目有 bug —— 是这次给它的时间"
+                f"不够跑完。\n"
+                f"  下一步：调大 `AIFIX_TEST_TIMEOUT_SECONDS`"
+                f"（局部重跑是 `AIFIX_SCOPED_TEST_TIMEOUT_SECONDS`），"
+                f"或者先弄清目标项目的套件为什么这么慢。")
         raise RuntimeError(
             f"测试未产出任何 JUnit 报告（worktree={worktree}）："
-            "测试进程没能正常跑完（超时被杀 / 崩溃 / 沙箱执行失败），"
-            "本次结果不可信")
+            "测试进程没能正常跑完（崩溃 / 沙箱执行失败），本次结果不可信")
     if required and not ran:
         raise RuntimeError(
             f"测试报告里一个用例都没跑（worktree={worktree}）："
@@ -286,7 +301,7 @@ async def _rm_reports(sb: LocalSandbox, adapter: ProjectAdapter,
 
 
 async def run_full_suite(worktree: Path, adapter: ProjectAdapter,
-                         timeout: float = 900.0,
+                         timeout: float = 1800.0,
                          require_report: bool = False):
     """在 worktree 里跑全量测试并解析报告。零 LLM。
 
@@ -299,12 +314,12 @@ async def run_full_suite(worktree: Path, adapter: ProjectAdapter,
     try:
         # 剥掉 aifix 自己的 AIFIX_* 变量：它们会被目标项目读走
         # （见 aifix.testenv 里那段实测）
-        await sb.exec(sanitized_command(adapter.full_test_command()),
-                      timeout)
+        res = await sb.exec(sanitized_command(adapter.full_test_command()),
+                            timeout)
         paths = adapter.report_paths(worktree)
         # 先解析再检查：「跑了几个用例」只有报告内容知道，文件在不在答不了
         fs = parse_junit(paths, adapter.make_test_id)
-        _check_report(worktree, paths, fs.ran, require_report)
+        _check_report(worktree, paths, fs.ran, require_report, res, timeout)
         return fs
     finally:
         await _rm_reports(sb, adapter, worktree, scoped=False)
@@ -312,7 +327,7 @@ async def run_full_suite(worktree: Path, adapter: ProjectAdapter,
 
 
 async def run_scoped(worktree: Path, adapter: ProjectAdapter,
-                     test_ids: list[str], timeout: float = 300.0,
+                     test_ids: list[str], timeout: float = 600.0,
                      require_report: bool = False):
     """只跑指定用例并解析报告。供 flaky 确认使用 —— 成本远低于全量。
 
@@ -321,12 +336,12 @@ async def run_scoped(worktree: Path, adapter: ProjectAdapter,
     sb = LocalSandbox(workspace=str(worktree))
     await sb.start()
     try:
-        await sb.exec(
+        res = await sb.exec(
             sanitized_command(adapter.scoped_test_command(test_ids)),
             timeout)
         paths = adapter.report_paths(worktree, scoped=True)
         fs = parse_junit(paths, adapter.make_test_id)
-        _check_report(worktree, paths, fs.ran, require_report)
+        _check_report(worktree, paths, fs.ran, require_report, res, timeout)
         return fs
     finally:
         await _rm_reports(sb, adapter, worktree, scoped=True)
@@ -351,6 +366,7 @@ async def baseline_node(state: AifixState) -> dict[str, Any]:
     adapter = adapter_from_state(state)
     warn_if_patch_may_be_invisible(state, adapter)
     fs = await run_full_suite(Path(state["worktree_path"]), adapter,
+                              timeout=state["config"].test_timeout_seconds,
                               require_report=True)
     ids = sorted(fs.ids)
     # _ran 是**跑出结果的用例总数**（通过 + 失败，不含 skipped），只供进度

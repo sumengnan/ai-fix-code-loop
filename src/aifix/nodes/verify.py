@@ -65,11 +65,13 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
     #
     # 代价是这一轮直接抛出去、run 记成 crash（退出码 1）。这正是想要的：
     # 环境坏了的话后面每一轮都会坏，快速失败比匀速烧钱好。
-    current = await run_full_suite(worktree_path, adapter, require_report=True)
+    current = await run_full_suite(worktree_path, adapter, require_report=True,
+                                   timeout=cfg.test_timeout_seconds)
 
     async def _rerun(ids: list[str]) -> FailureSet:
         return await run_scoped(worktree_path, adapter, ids,
-                                require_report=True)
+                                require_report=True,
+                                timeout=cfg.scoped_test_timeout_seconds)
 
     confirmed, flaky = await filter_flaky(baseline, current, _rerun)
     # 抖动的用例从当前结果里剔除，避免它们把判定拖成 WORSE
