@@ -58,7 +58,7 @@ def _git(repo: Path, *args: str) -> str:
 # 够清楚」，于是运维侧的问题被交给了报 issue 的人 —— 他改多少遍都没用。
 _REPRO_HEADLINES = {
     KIND_MISSING_INFO: "**issue 信息不足，写不出复现测试。**",
-    KIND_NO_CONVERGENCE: "**模型没在步数内收敛，这一轮没有产出。**",
+    KIND_NO_CONVERGENCE: "**模型没能在预算内收敛，这一轮没有产出。**",
     KIND_UNPARSEABLE: "**模型的输出解析不出复现测试。**",
 }
 

@@ -204,3 +204,21 @@ async def test_the_events_are_carried_out_for_tracing(buggy_repo):
     out = await reproduce(buggy_repo, PytestAdapter(), AifixConfig(),
                           "t", "b", client=_Scripted([_text("随便")]))
     assert out.events, "事件流是空的，出问题时无从复盘"
+
+
+async def test_a_token_overrun_is_also_no_convergence(buggy_repo):
+    """token 超限与步数耗尽是**同一类**：循环没跑完、没有最终文本可解析。
+
+    第三次真跑（2026-07-30）里它被报成「模型的输出解析不出复现测试」——
+    一句指向输出格式的话，而真相是额度不够。当时的判据是 `"max_steps" in err`
+    这种字符串挑选，挑不中就落进解析类；改成按**结构**分：ok 为 False 就是
+    没收敛，与错误文本长什么样无关（那是框架的措辞，随时会变）。
+    """
+    # 必须让它进入**第二步**：预算检查发生在下一步开始之前，单轮就结束的桩
+    # 触发不到（这一点是写这条测试时才发现的）。
+    cfg = AifixConfig(reproducer_max_tokens=1)
+    out = await reproduce(
+        buggy_repo, PytestAdapter(), cfg, "t", "b",
+        client=_Scripted([_tool_call("read_file", '{"path": "calc.py"}')]))
+    assert out.kind == "no_convergence", out.reason
+    assert "解析" not in out.reason

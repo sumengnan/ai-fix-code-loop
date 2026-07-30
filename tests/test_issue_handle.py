@@ -474,7 +474,7 @@ async def test_no_convergence_is_not_worded_as_a_vague_issue(tmp_path):
     # 它读起来像「你的 issue 不够清楚」，而真相是系统这边该调参数。
     head = body.splitlines()[0]
     assert "没能写出复现测试" not in head, f"标题没有区分度：{head}"
-    assert "步" in head or "收敛" in head
+    assert "收敛" in head
 
 
 async def test_missing_info_is_worded_as_a_request_to_the_human(tmp_path):

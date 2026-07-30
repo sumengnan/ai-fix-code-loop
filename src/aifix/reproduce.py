@@ -185,21 +185,27 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
     common = dict(tokens=outcome.tokens, cost_usd=outcome.cost_usd,
                   events=outcome.events)
     if not outcome.ok:
-        # 步数耗尽单独成一类。它与「issue 信息不足」的下一步动作完全相反，
-        # 而消息里必须带上那个可操作的旋钮名 —— 一句「出错了」等于没说。
+        # `outcome.ok is False` 意味着**循环自己没跑完**（步数耗尽、token 超限、
+        # 崩了），它压根没产出最终文本 —— 所以这一支**不可能**是解析问题。
+        #
+        # 这里曾经拿 `"max_steps" in err` 去挑，挑不中的落进 UNPARSEABLE：于是
+        # 第三次真跑（2026-07-30）token 超限被报成「模型的输出解析不出复现测试」
+        # ——一句指向模型输出格式的话，而真相是额度不够。与上一版把「没收敛」
+        # 报成「issue 信息不足」是同一个错，只是换了一条兄弟分支。
+        #
+        # 按**结构**分而不是按字符串挑：错误文本是框架的，随时会变；
+        # 「循环有没有跑完」是我们自己的判据。
         err = outcome.error or ""
-        if "max_steps" in err:
-            return ReproduceOutcome(
-                None,
-                f"模型翻了 {config.reproducer_max_steps} 步仍未给出复现测试"
-                f"（{err}）。\n"
-                "  这**不是 issue 写得不清楚** —— 补充 issue 不解决它。\n"
-                "  下一步：调大 `AIFIX_REPRODUCER_MAX_STEPS`，或换一个更会收敛"
-                "的模型；events.jsonl 里有它这几步在读什么。",
-                kind=KIND_NO_CONVERGENCE, **common)
         return ReproduceOutcome(
-            None, f"生成复现测试时出错：{err}",
-            kind=KIND_UNPARSEABLE, **common)
+            None,
+            f"模型没能在预算内给出复现测试（{err}）。\n"
+            f"  当前上限：{config.reproducer_max_steps} 步 / "
+            f"{config.reproducer_max_tokens:,} token。\n"
+            "  这**不是 issue 写得不清楚** —— 补充 issue 不解决它。\n"
+            "  下一步：调大 `AIFIX_REPRODUCER_MAX_STEPS` / "
+            "`AIFIX_REPRODUCER_MAX_TOKENS`，或换一个更会收敛的模型；"
+            "events.jsonl 里有它这几步在读什么。",
+            kind=KIND_NO_CONVERGENCE, **common)
 
     r = parse_reproduction(outcome.text, adapter.test_dirs())
     if r is None:
