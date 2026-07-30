@@ -137,7 +137,7 @@ def parse_reproduction(raw: str, test_dirs: list[str]) -> Reproduction | None:
 
     与 parse_diagnosis 同款的围栏容错：有些端点会在 JSON 外包一层解释文字。
     """
-    for text in (raw, _first_object(raw)):
+    for text in (raw, _last_object(raw)):
         if text is None:
             continue
         try:
@@ -148,13 +148,29 @@ def parse_reproduction(raw: str, test_dirs: list[str]) -> Reproduction | None:
     return None
 
 
-def _first_object(raw: str) -> str | None:
-    start, end = raw.find("{"), raw.rfind("}")
-    if start == -1 or end <= start:
-        return None
-    candidate = raw[start:end + 1]
-    try:
-        json.loads(candidate)
-    except json.JSONDecodeError:
-        return None
-    return candidate
+def _last_object(raw: str) -> str | None:
+    """从**后往前**找最后一个能独立解析出来的 JSON 对象。
+
+    不能沿用 parse_diagnosis 那套「第一个 `{` 到最后一个 `}`」：那是给
+    `max_steps=1` 的 detect 写的，它的正文里只有答案。而这一步是**多步循环**，
+    `outcome.text` 是每一步文本的拼接 —— 旁白、模型引用的代码片段、示例，
+    最后才是答案。
+
+    实测（2026-07-30，issue #2）：模型给出了一份**完全正确**的 JSON，而正文共
+    9085 字符、12 对花括号，首尾配对横跨了整段旁白，解析必然失败 —— 一个成功的
+    答案被扔掉了，还报成「模型输出格式不对」。
+
+    从后往前是刻意的：答案在最后，前面出现的对象都是素材。取到素材等于用旁白
+    覆盖了结论 —— 而它可能恰好也是合法 JSON（模型举的例子）。
+    """
+    dec = json.JSONDecoder()
+    for i in range(len(raw) - 1, -1, -1):
+        if raw[i] != "{":
+            continue
+        try:
+            obj, _ = dec.raw_decode(raw[i:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return json.dumps(obj, ensure_ascii=False)
+    return None

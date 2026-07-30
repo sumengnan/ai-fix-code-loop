@@ -178,3 +178,33 @@ def test_system_prompt_gives_a_concrete_give_up_trigger():
     可判定的判据（前三次调用还定位不到函数就放弃）。
     """
     assert "前三次工具调用" in SYSTEM_PROMPT
+
+
+def test_the_answer_is_found_at_the_end_of_a_long_narration():
+    """多步循环里 `outcome.text` 是**每一步文本的拼接** —— 旁白、代码片段、
+    最后才是答案。
+
+    实测（2026-07-30，issue #2）：模型给出了一份**完全正确**的 JSON，而正文共
+    9085 字符、12 对花括号，`_first_object` 取「第一个 { 到最后一个 }」横跨了
+    整段旁白，解析必然失败 —— **一个成功的答案被我们自己扔掉了**，还报成
+    「模型输出格式不对」。
+
+    detect 那边照抄同一套没出事，是因为它 max_steps=1，正文里只有答案。
+    """
+    noise = ("Let me look at the code. Now I see it — line 543 prints "
+             "{adapter} and {title} but not the model.\n"
+             "```python\ndef f(x):\n    return {'a': 1}\n```\n"
+             "Now let me write the test:\n")
+    raw = noise + "```json\n" + _ok() + "\n```\n"
+    r = parse_reproduction(raw, _TEST_DIRS)
+    assert r is not None and r.can_reproduce is True
+    assert r.target_test_id == "tests/test_issue_42.py::test_export_csv_columns"
+
+
+def test_a_later_object_wins_over_an_earlier_one():
+    """答案在最后。前面出现的对象是素材（模型引用的既有代码、示例），
+    取到它们等于用旁白覆盖了结论。"""
+    raw = ('先看一个例子：{"can_reproduce": false, "missing_info": ["举例用"]}\n'
+           "但实际上我能复现：\n" + _ok())
+    r = parse_reproduction(raw, _TEST_DIRS)
+    assert r is not None and r.can_reproduce is True
