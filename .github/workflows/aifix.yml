@@ -99,6 +99,16 @@ jobs:
           # `fix(eval): 评测照着克隆探解释器，探不到`。
           AIFIX_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
 
+          # 复现那一步的思考模式，**默认关**（与 config.py 里的默认一致）。
+          #   gh variable set AIFIX_REPRODUCER_THINKING --body true   # 开回去
+          #   gh variable set AIFIX_REPRODUCER_THINKING --body null   # 随端点默认
+          #
+          # `|| 'false'` 不能省：variable 未设置时 Actions 给的是**空串**，而空串
+          # 被 config 的 before-validator 当作「不发这个参数」= 随端点默认 = 开。
+          # 那与「默认关」正好相反 —— 一个纯粹由 YAML 语义造成的、和用户意图反着
+          # 来的默认值。
+          AIFIX_REPRODUCER_THINKING: ${{ vars.AIFIX_REPRODUCER_THINKING || 'false' }}
+
           AIFIX_BUDGET_USD: "0.50"
           AIFIX_BUDGET_WALL_SECONDS: "3600"
 

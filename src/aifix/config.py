@@ -38,6 +38,16 @@ class AifixConfig(BaseSettings):
 
     # mode="before"：抢在 pydantic 的类型强制之前跑，否则用户看到的是
     # "Input should be a valid number" 这类晦涩报错，而不是下面这句人话。
+    # 空字符串当没设。GitHub Actions 里 `env: X: ${{ vars.Y }}` 在 Y 未设置时
+    # 会把 X 设成**空串**而不是不设 —— 不接这一手，任何没配这个 variable 的仓库
+    # 都会在启动时因为「'' 不是合法的 bool」而拒绝启动。
+    @field_validator("reproducer_thinking", mode="before")
+    @classmethod
+    def _empty_means_unset(cls, v):
+        if isinstance(v, str) and v.strip().lower() in ("", "null", "none"):
+            return None
+        return v
+
     @field_validator("price_map", mode="before")
     @classmethod
     def _price_map_must_be_flat(cls, v: dict) -> dict:
@@ -151,6 +161,26 @@ class AifixConfig(BaseSettings):
     # 0.4 不是精算出来的：复现只跑一轮，修复要试 max_attempts 次，所以后者该
     # 拿大头。真正的依据要等一批任务的数据，那时这个数应该按实测重定。
     reproducer_budget_share: float = 0.4
+    # 复现这一步要不要开思考模式。**默认关**。
+    # None = 不发这个参数（由端点自己的默认决定），True / False 则显式指定。
+    #
+    # 为什么单给这一步一个开关：它的活是**机械**的 —— 读代码、照抄这个仓库的
+    # 测试写法、吐一段 JSON，不是需要长链推理的题。而实测（2026-07-30，issue #2，
+    # deepseek-v4-pro）有一轮的事件流是 **ReasoningDelta 1001 条、TextDelta 0 条**：
+    # 模型把输出预算全烧在推理里，正文被截断，整轮零产出。同一天的连通性探针也
+    # 佐证了这个端点的默认是开着的 —— `max_tokens:1` 下那唯一一个 token 进的是
+    # `reasoning_content`，`content` 是空串。
+    #
+    # **证据是不对称的，这一点必须写明**：另一轮带着推理写出了一条质量很好的
+    # 复现测试。所以「关掉更好」目前**没有对照实验支撑**，默认关是一个取舍
+    # 决定（作者定的），不是一个测量结论。真要下结论，需要开/关各跑一批任务
+    # 比修复成功率 —— 那个读数还不存在。
+    #
+    # 想恢复成「不发参数、随端点默认」：`AIFIX_REPRODUCER_THINKING=`（空串）。
+    #
+    # 落到线上是 harness 的 `_adapt_thinking`：模型名含 deepseek 时翻成
+    # `thinking={"type": "disabled"}`；Qwen/百炼那边原样发 enable_thinking。
+    reproducer_thinking: bool | None = False
     detector_max_tokens: int = 20_000
     loop_detect_window: int = 3
     tool_result_max_chars: int = 8000

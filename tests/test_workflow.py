@@ -117,3 +117,16 @@ def test_model_names_are_variables_not_secrets():
     根本看不出来。而模型名不是机密。"""
     assert "secrets.AIFIX_FIXER__MODEL" not in _RAW
     assert "secrets.AIFIX_DETECTOR__MODEL" not in _RAW
+
+
+def test_the_thinking_switch_falls_back_to_the_code_default():
+    """variable 未设置时 Actions 给的是**空串**，而空串在 config 里被当作
+    「不发这个参数」= 随端点默认 = **开**。
+
+    那与「默认关」正好相反 —— 一个纯粹由 YAML 语义造成的、和意图反着来的默认。
+    所以这里必须有 `|| 'false'`。
+    """
+    step = next(s for s in _job()["steps"] if "aifix issue handle" in s.get("run", ""))
+    expr = step["env"]["AIFIX_REPRODUCER_THINKING"]
+    assert "vars.AIFIX_REPRODUCER_THINKING" in expr
+    assert "'false'" in expr, f"缺少兜底，未设置时会变成开：{expr}"
