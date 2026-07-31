@@ -115,3 +115,63 @@ jobs:
           name: core-acceptance-trace
           path: /tmp/target/.aifix/runs/
           retention-days: 30
+
+  # 评测那半边：mine → eval → eval-report 走一遍真实模型。
+  # 与上面那个 job 分开：核心循环挂了的话，评测的读数没有意义，分开才看得出
+  # 是哪一层坏了。
+  eval-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions: {}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+
+      - name: 造一个带真实「红转绿」提交的小仓库
+        run: |
+          set -eu
+          mkdir -p /tmp/hist/tests
+          printf '[pytest]\npythonpath = .\n' > /tmp/hist/pytest.ini
+          cd /tmp/hist
+          printf 'def add(a, b):\n    return a - b\n' > calc.py
+          printf 'from calc import add\n\n\ndef test_identity():\n    assert add(0, 0) == 0\n' > tests/test_calc.py
+          git init -q -b main && git config user.email t@e.com && git config user.name t
+          git add -A && git commit -q -m init
+          printf 'def add(a, b):\n    return a + b\n' > calc.py
+          printf '\n\ndef test_add():\n    assert add(2, 3) == 5\n' >> tests/test_calc.py
+          git add -A && git commit -q -m "fix(calc): add 写成了减法"
+
+      - name: mine → eval → eval-report
+        env:
+          AIFIX_FIXER__MODEL: ${{ inputs.model }}
+          AIFIX_FIXER__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
+          AIFIX_FIXER__API_KEY: ${{ secrets.AIFIX_API_KEY }}
+          AIFIX_DETECTOR__MODEL: ${{ inputs.model }}
+          AIFIX_DETECTOR__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
+          AIFIX_DETECTOR__API_KEY: ${{ secrets.AIFIX_API_KEY }}
+          AIFIX_PRICE_MAP: ${{ vars.AIFIX_PRICE_MAP }}
+          AIFIX_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: |
+          set -eu
+          uv run aifix mine /tmp/hist --limit 10 --max-tasks 3 --out /tmp/tasks.jsonl
+          test -s /tmp/tasks.jsonl || { echo "::error::mine 产出 0 个任务"; exit 1; }
+
+          uv run aifix eval /tmp/tasks.jsonl --label ci \
+            --budget-per-task 0.50 --budget-total 1.00
+          out=$(ls evals/results-ci*.jsonl 2>/dev/null | head -1 || true)
+          test -n "$out" || { echo "::error::eval 没产出结果文件"; exit 1; }
+
+          echo "── 对比表 ──"
+          uv run aifix eval-report "$out"
+
+          # ground truth 自带：这个任务的正解就是改 calc.py，而 verdict 该是 better。
+          # 断言这两条，而不是「跑完了没报错」——后者一个恒真的实现也能通过。
+          uv run python -c "
+          import json, sys
+          r = json.loads(open('$out').read().strip())
+          print('verdict =', r['verdict'], '· locate_hit =', r['locate_hit'],
+                '· error =', r.get('error'))
+          sys.exit(0 if r['verdict'] == 'better' else 1)
+          "
