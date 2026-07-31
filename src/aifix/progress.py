@@ -64,13 +64,19 @@ def _mmss(seconds: float) -> str:
 
 # ---------- 一行放得下：宽度与截断 ----------
 
-# 硬上限 100 列，终端更窄就跟着窄。折行会把「就地重写」打回原形（`\r` 只回到
-# 最后一个视觉行的行首），屏幕上留下一串对不齐的残句 —— 所以宁可截断。
-_MAX_COLUMNS = 100
+# 用终端的真实宽度，只夹在一个合理区间里。折行会把「就地重写」打回原形
+# （`\r` 只回到最后一个视觉行的行首），屏幕上留下一串对不齐的残句 —— 所以
+# 每一行都要放得下，但没有理由在 200 列的终端上只用 100 列。
+_MIN_COLUMNS, _MAX_COLUMNS = 60, 200
+# 非终端（重定向到文件）时没有宽度可问，取一个够宽又不至于难读的默认值
+_FALLBACK_COLUMNS = 140
 # 参数摘要的子预算：给失败原因留出位置。模型偶尔会发一条几百字符的正则，
 # 不先给它封顶的话，整行预算被参数吃光，「为什么失败」被挤出屏幕 ——
 # 而那恰恰是这一行存在的理由。
-_ARGS_COLUMNS = 40
+_ARGS_COLUMNS = 60
+# 失败原因最多占几行。某些 git / pytest 报错能吐几百行，全印出来会把前面几步
+# 顶出屏幕；到了这个数才截，而完整正文一直在 events.jsonl 里。
+_REASON_LINES = 5
 
 
 def _width(text: str) -> int:
@@ -104,8 +110,38 @@ def _cut(text: str, limit: int) -> str:
 
 def _line_budget() -> int:
     import shutil
-    return min(_MAX_COLUMNS,
-               shutil.get_terminal_size((_MAX_COLUMNS, 24)).columns)
+    cols = shutil.get_terminal_size((_FALLBACK_COLUMNS, 24)).columns
+    return max(_MIN_COLUMNS, min(_MAX_COLUMNS, cols))
+
+
+def _wrap(text: str, width: int, limit: int) -> list[str]:
+    """按显示宽度折行，最多 limit 行，超了才截。
+
+    失败原因**不截断**（放不下就换行接着写），成功那行才截。省几个字对
+    `87 行` 没影响，对 `error: corrupt patch at line 10` 就等于没印 ——
+    实跑里被省略号吃掉的恰好就是那半句。
+    """
+    if width <= 0 or not text:
+        return []
+    lines: list[str] = []
+    cur, used = [], 0
+    for ch in text:
+        if ch == "\n":
+            lines.append("".join(cur))
+            cur, used = [], 0
+            continue
+        w = _width(ch)
+        if used + w > width:
+            lines.append("".join(cur))
+            cur, used = [], 0
+        cur.append(ch)
+        used += w
+    if cur:
+        lines.append("".join(cur))
+    if len(lines) > limit:
+        lines = lines[:limit]
+        lines[-1] = _cut(lines[-1] + "…", width)
+    return lines
 
 
 # ---------- 工具调用摘要：干了什么、结果如何、为什么失败 ----------
@@ -132,8 +168,12 @@ def _shorten_paths(text: str) -> str:
 
 
 def _reason(text: str) -> str:
-    """失败原因：首行，去掉框架加的前缀，路径压短。"""
-    body = re.sub(r"^工具执行出错[:：]\s*", "", _first_line(text))
+    """失败原因：**整段**，去掉框架加的前缀，路径压短。
+
+    只取首行是不够的 —— apply_patch 的报错里，git 说的是第一行，怎么改在
+    第二行；`_wrap` 会把换行照原样断开，所以这里保留结构，长度由那边管。
+    """
+    body = re.sub(r"^工具执行出错[:：]\s*", "", text.strip())
     return _shorten_paths(body)
 
 
@@ -327,15 +367,23 @@ class TerminalProgress(NullProgress):
         mark = "" if anchored else "，无源码锚点"
         self._w(f"      诊断：{where}{mark}  {tokens:,} tokens")
 
-    def _step_line(self, mark: str, step: int, tool: str,
-                   brief: str, tail: str) -> str:
-        body = f"第 {step} 步 {tool}"
+    # 前缀是 6 个空格 + 标记 + 空格 = 8 列，标记本身永远是一格宽的符号
+    _INDENT = 8
+
+    def _step_lines(self, mark: str, step: int, tool: str,
+                    brief: str, tail: str, wrap: bool) -> list[str]:
+        """一次工具调用渲染成的那几行（成功一行，失败可能几行）。"""
+        budget = _line_budget() - self._INDENT
+        head = f"第 {step} 步 {tool}"
         if brief:
-            body += f"  {_cut(brief, _ARGS_COLUMNS)}"
-        if tail:
-            body += f" → {tail}"
-        # 前缀是 6 个空格 + 标记 + 空格 = 8 列，标记本身永远是一格宽的符号
-        return f"      {mark} " + _cut(body, _line_budget() - 8)
+            head += f"  {_cut(brief, _ARGS_COLUMNS)}"
+        if not wrap:
+            return [f"      {mark} " + _cut(head + (f" → {tail}" if tail else ""),
+                                            budget)]
+        # 失败：原因不许被挤掉，放不下就往下接着写
+        rest = _wrap(f"{head} → {tail}" if tail else head, budget, _REASON_LINES)
+        pad = " " * self._INDENT
+        return [f"      {mark} " + rest[0]] + [pad + ln for ln in rest[1:]]
 
     def agent_step(self, step: int, tool: str, arguments: dict) -> None:
         """工具**开始**跑：只在终端上印，待会儿被结果那一行就地重写掉。
@@ -352,8 +400,11 @@ class TerminalProgress(NullProgress):
         out = self._out()
         if self._pending:      # 上一条没收尾（不该发生），先断开
             out.write("\n")
-        out.write(self._step_line("·", step, tool,
-                                  _args_brief(tool, arguments), "运行中…"))
+        # 这半行待会儿要被 `\r` 就地重写，必须只占一个视觉行 —— 所以它走
+        # 截断那条路（wrap=False），而不是像结果行那样往下接着写
+        out.write(self._step_lines("·", step, tool,
+                                   _args_brief(tool, arguments),
+                                   "运行中…", wrap=False)[0])
         out.flush()
         self._pending = True
 
@@ -369,22 +420,28 @@ class TerminalProgress(NullProgress):
         正在正常工作，真正的失败（守卫拒绝、补丁打不上）淹没在里面。
         """
         mark = "✓" if ok else "✗"
-        line = self._step_line(mark, step, tool,
-                               _args_brief(tool, arguments),
-                               _result_brief(tool, ok, result))
+        # 失败才折行。成功那行截掉无所谓（`87 行` 少几个字不影响判断），失败
+        # 截掉就等于没印 —— 实跑里被省略号吃掉的恰好是 `corrupt patch at
+        # line 10`，也就是那次失败的全部信息量。一次 run 二十几个工具调用，
+        # 成功的也占三行的话就没法看了。
+        lines = self._step_lines(mark, step, tool,
+                                 _args_brief(tool, arguments),
+                                 _result_brief(tool, ok, result), wrap=not ok)
         if self._tty():
             # 颜色只给终端：进度走 stderr，而 `2> run.log` 是真实用法，
             # ANSI 码写进文件就是一串 ESC[32m 垃圾，grep 出来的行也对不上。
             color = "\033[32m" if ok else "\033[31m"
-            line = line.replace(mark, f"{color}{mark}\033[0m", 1)
+            lines[0] = lines[0].replace(mark, f"{color}{mark}\033[0m", 1)
             out = self._out()
             # 回到行首并清掉整行：不清的话，短的结果行盖不住长的「进行中」，
             # 会留下前一行的尾巴
-            out.write(("\r\033[2K" if self._pending else "") + line + "\n")
+            out.write(("\r\033[2K" if self._pending else "")
+                      + "\n".join(lines) + "\n")
             out.flush()
             self._pending = False
             return
-        self._w(line)
+        for line in lines:
+            self._w(line)
 
     def patched(self, touched: list[str], diff_lines: int) -> None:
         if not touched:

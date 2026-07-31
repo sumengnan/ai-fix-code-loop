@@ -256,20 +256,70 @@ def test_off_a_tty_a_tool_call_is_exactly_one_line():
     assert "✓" in out
 
 
-def test_a_long_summary_is_cut_so_the_line_never_wraps():
-    """一行必须放得下。
+def test_no_output_line_is_ever_wide_enough_to_wrap():
+    """每一行都必须放得下。
 
     折行会把就地重写打回原形（`\\r` 只回到最后一个视觉行的行首），屏幕上
     留下一串对不齐的残句。中文按两格宽算 —— 按字符数截会漏掉一倍宽度。
     """
+    from aifix.progress import _line_budget, _width
     p, buf = _term()
     p.agent_step_done(step=1, tool="grep", ok=False,
                       arguments={"pattern": "x" * 200},
                       result="搜索失败：" + "很长的中文原因" * 40)
-    line = buf.getvalue().rstrip("\n")
-    from aifix.progress import _width
-    assert _width(line) <= 100, f"宽度 {_width(line)}：{line!r}"
-    assert "…" in line, "截断要看得出来是截断"
+    for line in buf.getvalue().splitlines():
+        assert _width(line) <= _line_budget(), f"宽度超了：{line!r}"
+
+
+def test_a_failure_reason_is_not_thrown_away_to_fit_one_line():
+    """失败原因**不截断**，放不下就换行接着写。
+
+    这条是被真事逼出来的：`✗ apply_patch → 补丁无法应用（git apply --check
+    失败）：error:…` —— 省略号后面正是 `corrupt patch at line 10`，也就是这次
+    失败的全部信息量。前缀那句样板话把预算吃光，真正要看的那半句被挤掉了，
+    只能回头去翻 events.jsonl。
+
+    成功那行截掉无所谓（`87 行` 少几个字不影响判断），失败这行截掉就等于
+    没印。
+    """
+    p, buf = _term()
+    p.agent_step_done(
+        step=12, tool="apply_patch", ok=False,
+        arguments={"diff": "--- a/src/shopcart/cart.py\n"
+                           "+++ b/src/shopcart/cart.py\n"},
+        result=("补丁无法应用（git apply --check 失败）："
+                "error: corrupt patch at line 10\n"
+                "这是 diff 的格式问题，不是文件内容问题。"))
+    out = buf.getvalue()
+    assert "corrupt patch at line 10" in out, "真因不能被省略号吃掉"
+    assert "格式问题" in out, "后续几行也是原因的一部分"
+    assert out.count("\n") > 1, "放不下就换行，不是截断"
+    # 续行要缩进对齐，否则读起来像另一个步骤
+    assert all(ln.startswith("      ") for ln in out.splitlines())
+
+
+def test_a_successful_step_stays_on_one_line():
+    """成功仍是一行 —— 一次 run 二十几个工具调用，每个占三行就没法看了。"""
+    p, buf = _term()
+    p.agent_step_done(step=1, tool="read_file", ok=True,
+                      arguments={"path": "a/" * 60 + "x.py"},
+                      result="x\n" * 500)
+    assert buf.getvalue().count("\n") == 1
+
+
+def test_an_enormous_failure_reason_still_has_a_ceiling():
+    """再长也不能刷屏。
+
+    某些 git / pytest 的报错能吐几百行，全印出来会把前面几步顶出屏幕 ——
+    那时省略号是诚实的：完整正文一直在 events.jsonl 里。
+    """
+    p, buf = _term()
+    p.agent_step_done(step=1, tool="run_tests", ok=False,
+                      arguments={"test_ids": ["a::b"]},
+                      result="炸了。" + "很长的中文原因，" * 300)
+    out = buf.getvalue()
+    assert out.count("\n") <= 6, f"太长了：{out.count(chr(10))} 行"
+    assert "…" in out, "截断要看得出来是截断"
 
 
 def test_verdict_line_uses_the_same_words_as_the_report():
