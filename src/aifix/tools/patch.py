@@ -16,6 +16,39 @@ _TARGET = re.compile(r"^(?:---|\+\+\+)\s+(?P<path>\S+)", re.M)
 
 _PATCH_FILE = ".aifix_patch.diff"
 
+# `--recount`：不信 `@@ -49,5 +49,5 @@` 里那两个数，从正文推。
+#
+# 实跑打出来的：一次 run 里 15 次 apply_patch **12 次**栽在 `corrupt patch at
+# line N`，326k tokens 修两个单行 bug（同样的活上一次只花 89k）。每一份 diff
+# 的内容都是对的，错的只是那两个计数 —— 模型数不准自己写了几行，而 git 默认
+# 严格按头里的数去读正文，读不满就判整个补丁损坏。这是模型手写 diff 的常见
+# 失败形态，也正是 git 造这个开关的原因（「编辑过补丁但没调整 hunk 头」）。
+#
+# 不是放松校验：上下文仍然要逐行对得上，打错位置照样拒。放松的只是「模型得
+# 会数数」这一条与修复正确性无关的要求。
+#
+# check 与真正应用必须用同一组参数，否则 check 是在验另一件事 —— 一个
+# 「dry run 通过、真跑失败」的工具比没有 dry run 更坏。
+_GIT_APPLY = ["git", "apply", "--recount"]
+
+# 打不上有两种，建议必须分开。实跑里模型照着「你对文件当前内容的理解有误，
+# 请先 read_file 确认」去做，重读了 16 次同一个文件、grep 了 14 次，然后交出
+# 一份同样有结构问题的 diff —— 那句建议把它带进了死循环。
+_ADVICE_CONTEXT = ("通常说明你对文件当前内容的理解有误，"
+                   "请先 read_file 确认后重新生成 diff。")
+_ADVICE_MALFORMED = ("这是 diff 的**格式**问题，不是文件内容问题 —— 重读文件没有用。"
+                     "请检查：每一行正文必须以空格、`-` 或 `+` 开头（空行也要有那个"
+                     "前导空格），`@@` 头与 `--- / +++` 头齐全。")
+
+
+def _apply_error(stderr: str) -> str:
+    """把 git 的报错转成模型能照着改的一句话。"""
+    malformed = ("corrupt patch" in stderr
+                 or "unrecognized input" in stderr
+                 or "patch fragment without header" in stderr)
+    advice = _ADVICE_MALFORMED if malformed else _ADVICE_CONTEXT
+    return f"补丁无法应用（git apply --check 失败）：{stderr}\n{advice}"
+
 
 def _strip_p1(path: str) -> str:
     """按 `git apply` 默认的 `-p1` 剥前缀：有 `/` 就剥掉第一段，没有就原样。
@@ -107,15 +140,12 @@ class ApplyPatchTool(Tool):
         await self._sandbox.write_file(_PATCH_FILE, body)
         try:
             check = await self._sandbox.exec(
-                ["git", "apply", "--check", _PATCH_FILE], self._timeout)
+                [*_GIT_APPLY, "--check", _PATCH_FILE], self._timeout)
             if check.exit_code != 0:
-                raise ToolError(
-                    "补丁无法应用（git apply --check 失败）："
-                    f"{check.stderr.strip() or check.stdout.strip()}\n"
-                    "通常说明你对文件当前内容的理解有误，"
-                    "请先 read_file 确认后重新生成 diff。")
+                raise ToolError(_apply_error(
+                    check.stderr.strip() or check.stdout.strip()))
             applied = await self._sandbox.exec(
-                ["git", "apply", _PATCH_FILE], self._timeout)
+                [*_GIT_APPLY, _PATCH_FILE], self._timeout)
             if applied.exit_code != 0:
                 raise ToolError(
                     f"补丁应用失败：{applied.stderr.strip() or applied.stdout.strip()}")
