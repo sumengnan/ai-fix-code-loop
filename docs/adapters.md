@@ -213,6 +213,23 @@ Tests run: 1, Failures: 0, Errors: 1
 
 ---
 
+## 离线跑 Maven：预热必须覆盖 `clean`
+
+适配器的命令是 `mvn -B -q -o clean test`，`-o` 是离线。所以本机 `~/.m2` 里必须先有全部构件 —— 这一点在 CI 上尤其容易栽：GitHub 的 ubuntu 镜像**自带 Maven 但 `~/.m2` 是空的**。
+
+而预热时只跑 `mvn test` **不够**：它不会下载 `maven-clean-plugin`，于是 `mvn -o clean test` 在 `clean` 阶段就失败，surefire 一份报告都写不出来，aifix 报的是「测试进程没能正常跑完」——一句指向目标项目的话，真因在预热那一步漏了一个插件。
+
+实测（2026-07-31）第一次 CI 验收就栽在这里。正确的预热是把实际会跑的那条命令跑一遍：
+
+```bash
+mvn -B -q test || true      # 测试预期失败，只要构建跑起来
+mvn -B -q clean             # ← 这一句才是关键：它把 maven-clean-plugin 拉下来
+```
+
+**通则：预热要覆盖实际会跑的那条命令，不是「差不多的那条」。**
+
+同一条判据也写进了测试的跳过条件（见 `tests/conftest.py` 的 `maven_offline_reason`）——它真起一个最小工程跑一次 `mvn -o test`，而不是查 `mvn` 这个二进制在不在。查错对象的后果是：CI 上不跳过、真跑、真失败，19 个假红进 baseline。
+
 ## 相关文档
 
 - [架构](architecture.md) —— 适配器在哪些节点被调用

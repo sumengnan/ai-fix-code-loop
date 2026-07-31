@@ -313,6 +313,13 @@ jobs:
           test -d target/surefire-reports \
             || { echo "::error::预热失败：surefire 没写出报告，~/.m2 可能没拉全"; exit 1; }
           echo "预热成功，报告：$(ls target/surefire-reports | head -3)"
+          # **这一句不是收尾，是预热的一部分。**
+          # aifix 的适配器命令是 `mvn -o clean test`，而 `mvn test` **不会**下载
+          # maven-clean-plugin —— 离线仓库里缺它，`clean` 这一阶段当场失败，
+          # 表现是 surefire 一份报告都没有，被 aifix 报成「测试进程没能正常跑完」。
+          # 实测（2026-07-31）第一次跑就栽在这里，查了一轮才定位到。
+          #
+          # 通则：预热要覆盖**实际会跑的那条命令**，不是「差不多的那条」。
           mvn -B -q clean
 
       - name: aifix run
