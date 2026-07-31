@@ -21,7 +21,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..config import AifixConfig
-from ..graph import COLLECTION_ABORT_KIND, MODEL_ABORT_KIND
+from ..graph import (COLLECTION_ABORT_KIND, MODEL_ABORT_KIND,
+                     PREFLIGHT_ABORT_KIND)
 from ..delivery import COMMIT_EMAIL, COMMIT_NAME
 from ..traces import TRACES_BRANCH
 from ..nodes.report import count_fixed
@@ -42,10 +43,19 @@ class HandleResult:
     pr_url: str | None = None
 
 
-# 「这次没跑成」的三种中止。口径必须与 `aifix run` 的退出码一致（见
-# cli._cmd_run）：预算耗尽（usd / tokens / wall）相反 —— 那是**正常收场**，
-# 活干到钱花完为止，结论仍然可信，所以退 0。
-_ENV_ABORTS = frozenset({"crash", COLLECTION_ABORT_KIND, MODEL_ABORT_KIND})
+# 「这次没跑成」的四种中止。口径必须与 `aifix run` 的退出码一致（见
+# cli._FAILED_RUN_KINDS）：预算耗尽（usd / tokens / wall）相反 —— 那是**正常
+# 收场**，活干到钱花完为止，结论仍然可信，所以退 0。
+#
+# preflight 是 2026-08-01 的功能巡检补上的：漏掉它时，Actions 上一次「仓库
+# 里没有适配器」的 run 会**绿着结束**，而它一个用例都没跑过。
+#
+# 这里与 cli 各存一份而不是共用同一个常量，是有意的：两条入口的判据**可以**
+# 分叉（比如将来 issue 那边想把某一类算成正常收场），共用一个名字会让分叉
+# 变成一次无人察觉的连带修改。代价是要靠这两段注释互相指认 —— 而
+# tests/test_abort_kind_parity.py 把它们钉在一起。
+_ENV_ABORTS = frozenset({"crash", COLLECTION_ABORT_KIND, MODEL_ABORT_KIND,
+                         PREFLIGHT_ABORT_KIND})
 
 
 def _git(repo: Path, *args: str) -> str:

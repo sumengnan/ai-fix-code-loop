@@ -14,7 +14,7 @@ from typing import Any
 from .budget import RunBudget
 from .config import AifixConfig
 from .delivery import Worktree
-from .graph import (MODEL_ABORT_KIND, AifixState,
+from .graph import (MODEL_ABORT_KIND, PREFLIGHT_ABORT_KIND, AifixState,
                     check_circuit_breaker, new_state)
 from .nodes.baseline import COLLECTION_ABORT_KIND, baseline_node
 from .nodes.detect import detect_node
@@ -31,6 +31,18 @@ from . import pending as pending_store
 from .replay import render as render_replay
 from .trace import RunTrace
 from .trajectory import DB_RELPATH, ingest, query_stats
+
+
+# 「这次 run 没跑成」的四种中止 —— 退出码非 0。**每加一种都要列进来**：
+# 漏掉的后果不是报错，是那一类静默退 0，流水线把它读成成功。preflight 就这么
+# 漏了一整轮（2026-08-01 的功能巡检才撞出来，见 graph.PREFLIGHT_ABORT_KIND）。
+#
+# 预算耗尽（tokens / usd / wall）**不在此列**：那是正常收场 —— 活干到钱花完
+# 为止，结论仍然可信。
+#
+# 只留一份：`run` 与 `answer` 两条命令各写各的话，下次加中止种类必然只改一处。
+_FAILED_RUN_KINDS = ("crash", COLLECTION_ABORT_KIND, MODEL_ABORT_KIND,
+                     PREFLIGHT_ABORT_KIND)
 
 
 def _write_pending(state: AifixState) -> None:
@@ -563,8 +575,7 @@ def _cmd_run(args) -> None:
         # 文件顶上不该粘着几十行进度
         progress=None if args.quiet else TerminalProgress()))
     print(state["report_md"])
-    if state.get("abort_kind") in ("crash", COLLECTION_ABORT_KIND,
-                                  MODEL_ABORT_KIND):
+    if state.get("abort_kind") in _FAILED_RUN_KINDS:
         # 报告先印出来（分支上可能真躺着可合并的修复），退出码再说明这次
         # 是崩的：退 0 的话流水线里「跑完了」和「炸了但报告还在」没有区别。
         #
@@ -615,8 +626,7 @@ def _cmd_answer(args) -> None:
     # 人会看到自己刚答完的问题又被问一遍，还以为答案没送到。
     pending_store.clear(repo, data.get("run_id", ""))
     print(state["report_md"])
-    if state.get("abort_kind") in ("crash", COLLECTION_ABORT_KIND,
-                                  MODEL_ABORT_KIND):
+    if state.get("abort_kind") in _FAILED_RUN_KINDS:
         raise SystemExit(1)
 
 
@@ -654,16 +664,14 @@ def _cmd_reproduce(args, client: Any = None) -> None:
         raise SystemExit(1)
 
     r = out.reproduction
-    target = repo / r.test_file
-    if target.exists():
-        # 覆盖掉一个真实的测试文件，代价不是「文件没了」（git 里还有），
-        # 是那一整个文件的用例在这次测量里凭空消失，而它们本该被计入。
-        print(f"\n**停手：`{r.test_file}` 已存在。**\n\n"
-              "  模型给出的路径撞上了仓库里已有的文件。换个 issue 措辞重试，"
-              "或先把那个文件挪开。")
-        raise SystemExit(1)
-
+    asked_for = r.test_file
+    # 撞名不再是死路：`write_reproduction` 会改名落地，并同步改写
+    # `target_test_id`。它原先在这里拒绝并退出，而 issue 那条路压根没这道
+    # 检查、直接覆盖 —— 守卫因此挪进了唯一的写入点（见那个函数的说明）。
     written = write_reproduction(repo, r)
+    if r.test_file != asked_for:
+        print(f"\n（`{asked_for}` 已存在，改写到 `{r.test_file}` —— "
+              f"绝不覆盖仓库里已有的测试文件。）")
     ok = False          # red_check 抛出时下面那句 SystemExit 到不了，但别让
     try:                # 「未定义」成为可能——这一行是给读代码的人看的
 
@@ -949,3 +957,11 @@ def _render_stats(stats: dict[str, Any], db: Path) -> str:
     for run_id, n in signal_runs:
         lines.append(f"  {run_id}：{n} 条")
     return "\n".join(lines)
+
+
+# `python -m aifix.cli` 也要能跑。没有这一段时它**静默什么都不做、退 0** ——
+# 与这次巡检抓到的 preflight 那个 bug 是同一类失败：不报错、不崩溃，只是
+# 什么都没发生，而调用方读到的是「成功」。控制台脚本 `aifix` 走的是
+# pyproject 里的 entry point，两条入口都指向同一个 main()。
+if __name__ == "__main__":
+    main()
