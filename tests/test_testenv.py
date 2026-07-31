@@ -172,3 +172,26 @@ def test_every_test_run_takes_its_timeout_from_config():
     vsrc = inspect.getsource(verify)
     assert "test_timeout_seconds" in vsrc and "scoped_test_timeout_seconds" in vsrc
     assert "scoped_test_timeout_seconds" in inspect.getsource(handle)
+
+
+async def test_a_failed_test_command_shows_what_it_actually_said(tmp_path):
+    """测试命令跑挂时，**它自己的输出是最有用的那条线索** —— 不能扔掉。
+
+    实测（2026-07-31）：Maven 侧的验收在 baseline 挂了，消息是「测试进程没能
+    正常跑完（崩溃 / 沙箱执行失败）」，而 mvn 到底说了什么一个字都没有 ——
+    要重跑一次加日志才查得下去。诊断信息在手里却不给，是这个项目一贯反对的
+    那种「不报错，只是查不出来」。
+    """
+    from aifix.adapters.pytest_adapter import PytestAdapter
+    from aifix.nodes.baseline import run_full_suite
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    # conftest 抛异常：pytest 会以非 0 退出并把原因写进 stderr
+    (tmp_path / "conftest.py").write_text(
+        "raise RuntimeError('这句话必须出现在 aifix 的报错里')\n",
+        encoding="utf-8")
+
+    with pytest.raises(RuntimeError) as e:
+        await run_full_suite(tmp_path, PytestAdapter(), require_report=True)
+    assert "这句话必须出现在 aifix 的报错里" in str(e.value)

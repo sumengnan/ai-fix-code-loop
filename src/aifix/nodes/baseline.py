@@ -221,6 +221,24 @@ def collection_error_abort(ids: list[str],
     ])
 
 
+def _tail(res: Any, max_chars: int = 1500) -> str:
+    """测试命令的尾部输出，供报错时贴出来。没有可贴的就返回空串。
+
+    stderr 优先、stdout 兜底：构建工具与测试框架的失败原因主要走 stderr，
+    但 pytest 的收集错误只在 stdout 里 —— 只看一边会在另一半场景里空手而归。
+    """
+    if res is None:
+        return ""
+    parts = [(getattr(res, "stderr", "") or "").strip(),
+             (getattr(res, "stdout", "") or "").strip()]
+    text = next((p for p in parts if p), "")
+    if not text:
+        return ""
+    if len(text) > max_chars:
+        text = "…（前面已截断）\n" + text[-max_chars:]
+    return f"\n  ── 测试命令的输出（尾部）──\n{text}"
+
+
 def _check_report(worktree: Path, paths: list[Path],
                   ran: frozenset[str], required: bool,
                   res: Any = None, timeout: float | None = None) -> None:
@@ -272,14 +290,23 @@ def _check_report(worktree: Path, paths: list[Path],
                 f"  下一步：调大 `AIFIX_TEST_TIMEOUT_SECONDS`"
                 f"（局部重跑是 `AIFIX_SCOPED_TEST_TIMEOUT_SECONDS`），"
                 f"或者先弄清目标项目的套件为什么这么慢。")
+        # **把命令自己的输出带上**。实测（2026-07-31）：Maven 侧的验收在 baseline
+        # 挂了，消息只说「崩溃 / 沙箱执行失败」，而 mvn 到底说了什么一个字都没有
+        # —— 只能重跑一次加日志才查得下去。诊断信息在手里却不给，是这个项目一贯
+        # 反对的那种「不报错，只是查不出来」。
+        #
+        # 取尾部而不是头部：构建工具的失败原因几乎总在最后（编译错误、
+        # 依赖解析失败、测试框架的异常），而开头是几十行版本号和插件横幅。
+        tail = _tail(res)
         raise RuntimeError(
             f"测试未产出任何 JUnit 报告（worktree={worktree}）："
-            "测试进程没能正常跑完（崩溃 / 沙箱执行失败），本次结果不可信")
+            f"测试进程没能正常跑完（崩溃 / 沙箱执行失败），本次结果不可信。"
+            f"{tail}")
     if required and not ran:
         raise RuntimeError(
             f"测试报告里一个用例都没跑（worktree={worktree}）："
-            "进程正常退出了，是**收集**没成功（node id 无效 / conftest 抛异常 / "
-            "测试依赖缺失），本次结果不可信")
+            f"进程正常退出了，是**收集**没成功（node id 无效 / conftest 抛异常 / "
+            f"测试依赖缺失），本次结果不可信。{_tail(res)}")
 
 
 async def _rm_reports(sb: LocalSandbox, adapter: ProjectAdapter,
