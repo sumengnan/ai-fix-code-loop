@@ -1,0 +1,117 @@
+# 核心主张的验收：**失败的测试进去，一条经过验证的补丁分支出来。**
+#
+# 用一个**极小**的目标仓库（两个用例、一个真 bug），而不是 aifix 自己：
+# 这里要验的是核心循环本身（baseline → detect → fix → verify → 交付），
+# 而 aifix 自己的套件要跑 11 分钟，每轮 verify 都得再跑一遍 —— 那验的是耐心，
+# 不是循环。
+#
+# 与 issue 驱动那条链路刻意分开：那条多了 reproducer 一环，它失败时会盖住
+# 核心循环的表现。这个 workflow 直接喂一条已经红着的测试。
+#
+# 手动触发：gh workflow run aifix-core-acceptance.yml
+name: aifix-core-acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 用哪个模型
+        required: false
+        default: deepseek-v4-flash
+
+jobs:
+  accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions: {}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+
+      - name: 造一个带真 bug 的极小目标仓库
+        run: |
+          set -eu
+          mkdir -p /tmp/target/tests
+          cat > /tmp/target/calc.py <<'EOF'
+          def add(a, b):
+              return a - b        # bug: 应为 a + b
+
+
+          def mul(a, b):
+              return a * b
+          EOF
+          cat > /tmp/target/tests/test_calc.py <<'EOF'
+          from calc import add, mul
+
+
+          def test_add():
+              assert add(2, 3) == 5
+
+
+          def test_mul():
+              assert mul(2, 3) == 6
+          EOF
+          printf '[pytest]\npythonpath = .\n' > /tmp/target/pytest.ini
+          cd /tmp/target
+          git init -q -b main
+          git config user.email t@example.com
+          git config user.name t
+          git add -A
+          git commit -q -m init
+          echo "目标仓库就绪：test_add 红、test_mul 绿"
+
+      - name: aifix run
+        env:
+          AIFIX_FIXER__MODEL: ${{ inputs.model }}
+          AIFIX_FIXER__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
+          AIFIX_FIXER__API_KEY: ${{ secrets.AIFIX_API_KEY }}
+          AIFIX_DETECTOR__MODEL: ${{ inputs.model }}
+          AIFIX_DETECTOR__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
+          AIFIX_DETECTOR__API_KEY: ${{ secrets.AIFIX_API_KEY }}
+          AIFIX_PRICE_MAP: ${{ vars.AIFIX_PRICE_MAP }}
+          # 目标仓库没有自己的 venv，用 aifix 的 —— 它的测试只 import 标准库
+          AIFIX_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
+          AIFIX_BUDGET_USD: "1.0"
+        run: uv run aifix run /tmp/target --budget 1.0
+
+      - name: 断言交付分支上真的有东西
+        if: always()
+        run: |
+          set -eu
+          cd /tmp/target
+          branch=$(git branch --format='%(refname:short)' | grep '^aifix/' | head -1)
+          echo "交付分支：${branch:-（没有）}"
+          test -n "$branch" || { echo "::error::没有交付分支"; exit 1; }
+
+          # 「报告说修好了时，分支上必须真的有东西」——这条主张要用 git 验，
+          # 不是读报告里的数字。
+          n=$(git rev-list --count "main..$branch")
+          echo "分支比 main 多 $n 个提交"
+          test "$n" -ge 1 || { echo "::error::分支上一个提交都没有"; exit 1; }
+
+          echo "── 分支上的 calc.py ──"
+          git show "$branch:calc.py"
+          git show "$branch:calc.py" | grep -q 'a + b' \
+            || { echo "::error::calc.py 没被改对"; exit 1; }
+
+          # **测试文件一个字都不许动** —— 测试是 oracle，改它等于改判卷标准
+          if ! git diff --quiet main "$branch" -- tests/; then
+            echo "::error::测试文件被改动了，这是最严重的越界"
+            git diff main "$branch" -- tests/
+            exit 1
+          fi
+          echo "✅ 测试文件未被触碰"
+
+          # mul 没有被顺手删掉（M3 真实验收里出现过这个形状）
+          git show "$branch:calc.py" | grep -q 'def mul' \
+            || { echo "::error::无测试覆盖的 mul 被删了"; exit 1; }
+          echo "✅ 无测试覆盖的符号仍在"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: core-acceptance-trace
+          path: /tmp/target/.aifix/runs/
+          retention-days: 30
