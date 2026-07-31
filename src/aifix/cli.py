@@ -24,12 +24,25 @@ from .nodes.report import (cost_is_unknown, count_fixed, render_report,
                            report_node)
 from .nodes.verify import verify_node
 from .progress import NullProgress, TerminalProgress
+from . import pending as pending_store
 # replay 与 trajectory 可以放在模块顶部：它们只读 jsonl / sqlite，一个
 # aifix 内部模块都不 import，不存在 eval 子包那条 `eval.runner → cli` 的环
 # （trajectory 宁可复制一份 SIGNAL_KEYS 也不 import eval.runner，正是为此）。
 from .replay import render as render_replay
 from .trace import RunTrace
 from .trajectory import DB_RELPATH, ingest, query_stats
+
+
+def _write_pending(state: AifixState) -> None:
+    """把待答的问题落盘，让 `aifix answer` 在**另一次进程**里找得到它。
+
+    worktree 退出时连同它里面的一切都会被删掉，所以必须写在 artifact_dir，
+    那是这次 run 唯一活得比 worktree 长的地方。
+    """
+    ask = state.get("ask") or {}
+    pending_store.save(
+        state["artifact_dir"],
+        pending_store.payload(state["run_id"], state["repo"], ask))
 
 
 def _backfill_in_flight_result(state: AifixState) -> None:
@@ -74,7 +87,8 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                    fixer_client: Any = None,
                    only_test: str | None = None,
                    dry_run: bool = False,
-                   progress: Any = None) -> AifixState:
+                   progress: Any = None,
+                   answer: str | None = None) -> AifixState:
     """按状态图的语义顺序执行一次完整 run。
 
     M1 直接手工驱动节点，节点顺序与路由和 build_graph() 的图一致——把
@@ -92,6 +106,8 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
     """
     prog = progress or NullProgress()
     state = new_state(repo, config, run_id=run_id)
+    # 人对上一轮 ask_user 的答复。带着它跑时 `ask_user` 不再注册（见 fix_node）
+    state["answer"] = answer
     # 侧信道，与 _trace 同一套约定：fix_node 要在**循环内部**逐步出声，
     # 从这里一路传参数下去等于每加一处出声点就改一遍调用链
     state["_progress"] = prog
@@ -207,6 +223,21 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                     state["failure_usd_budget"] = budget.usd_for_failure(
                         remaining_failures)
                     state.update(await fix_node(state, client=fixer_client))
+                    if state.get("ask"):
+                        # 停在「等人回答」上：**不跑 verify** —— fix_node 已经
+                        # 把改动回滚了，没有东西可验，跑一遍只是白花几分钟。
+                        # 已经修好的 failure 留在 results 里，报告两样都印。
+                        budget.charge(state["spent_tokens"] - mid[0],
+                                      state["spent_usd"] - mid[1])
+                        state["abort_kind"] = "needs_input"
+                        state["abort"] = "等待人工回答后才能继续"
+                        trace.fact("abort_kind", "needs_input")
+                        # **刻意不 _backfill_in_flight_result**：那个函数是给
+                        # 「跑过、没修好」补一笔记录用的，而这个 failure 既没
+                        # 修好也没失败，它在等人。记成 same 会让报告和评测都
+                        # 把「悬而未决」读成「试过了不行」。
+                        _write_pending(state)
+                        break
                     prog.patched(touched=list(state.get("touched") or []),
                                  diff_lines=state.get("diff_lines", 0))
                     # 守卫触发要当场说：它是「这一轮花了钱却没进展」的解释，
@@ -358,6 +389,26 @@ def build_parser() -> argparse.ArgumentParser:
                      help="不印进度（进度本来就走 stderr，只在你连 stderr "
                           "一起收进日志时才需要它）")
 
+    ans = sub.add_parser(
+        "answer", help="回答上次 run 提出的问题，带着答案重新跑",
+        description="agent 遇到「什么才算正确行为」这类问题时会停下来问人，"
+                    "并把问题连同选项印在报告里。这个命令把答案带回去。"
+                    "注意它是**重新跑一遍**而不是从断点继续 —— issue 那条路上"
+                    "根本没有断点可恢复（Actions 的 job 一次性），两条入口用"
+                    "同一套语义才不会各错各的。",
+        epilog=_TEST_PYTHON_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ans.add_argument("choice", type=int,
+                     help="选项编号，从 1 数起（报告里印的那个数字）")
+    ans.add_argument("repo", nargs="?", default=".")
+    ans.add_argument("--run-id", default=None,
+                     help="回答哪一次 run 的问题。不填用最近的那个 —— "
+                          "问题是刚才印在屏幕上的，不该再要人去翻一个哈希串")
+    ans.add_argument("--budget", type=float, default=None,
+                     help="重跑那一次的美元上限。需要配置 AIFIX_PRICE_MAP")
+    ans.add_argument("--quiet", "-q", action="store_true",
+                     help="不印进度")
+
     rpr = sub.add_parser(
         "reproduce", help="把一段缺陷报告译成一条复现测试（只到复现为止）",
         epilog=_TEST_PYTHON_HELP,
@@ -488,7 +539,8 @@ def _dispatch() -> dict[str, Any]:
     argparse 照样解析成功、一个分支都不匹配、退出码 0 —— 命令静默什么都不做，
     这种失败在手工试用时最容易被当成「跑了但没输出」。
     """
-    return {"run": _cmd_run, "reproduce": _cmd_reproduce, "mine": _cmd_mine,
+    return {"run": _cmd_run, "answer": _cmd_answer,
+            "reproduce": _cmd_reproduce, "mine": _cmd_mine,
             "mutate": _cmd_mutate, "issue": _cmd_issue,
             "eval": _cmd_eval, "eval-report": _cmd_eval_report,
             "replay": _cmd_replay, "ingest": _cmd_ingest, "stats": _cmd_stats}
@@ -519,6 +571,52 @@ def _cmd_run(args) -> None:
         # 收集错误中止同样退非 0，理由是同一条：这次**没测成**。预算耗尽
         # （tokens / usd / wall）相反，那是正常收场 —— 活干到钱花完为止，
         # 结论仍然可信，所以仍退 0。
+        raise SystemExit(1)
+
+
+def _cmd_answer(args) -> None:
+    """回答上一次 run 提出的问题，带着答案**重新跑一遍**。
+
+    为什么是重跑而不是断点恢复：issue 那条路上根本没有断点可恢复 —— Actions
+    的 job 是一次性的，容器连同一切中间状态一起消失。两条入口用同一套语义，
+    才不会各错各的。代价是多跑一次 baseline，换来的是没有需要保鲜的状态。
+    """
+    from .agents.fixer import format_answer
+
+    repo = Path(args.repo).resolve()
+    data = (pending_store.load(repo, args.run_id) if args.run_id
+            else pending_store.latest(repo))
+    if data is None:
+        where = f"run {args.run_id}" if args.run_id else str(repo)
+        raise SystemExit(
+            f"{where} 里没有待回答的问题。\n"
+            "只有 agent 主动调用 ask_user 停下来时才会留下问题 —— "
+            "先跑一次 `aifix run`。")
+    try:
+        choice = pending_store.choose(data, args.choice)
+    except ValueError as e:
+        # 编号越界必须**当场拒**：放过去的话，它会静静地按另一个选项去改代码，
+        # 而人以为自己选的是刚才屏幕上那一条。
+        raise SystemExit(str(e)) from None
+
+    print(f"已选择：{choice}\n带着这个答复重新跑一次……\n")
+    config = AifixConfig()
+    if args.budget is not None:
+        config = config.model_copy(update={"budget_usd": args.budget})
+    require_price_map_for_usd_budget(config)
+    state = asyncio.run(run_once(
+        repo, config, run_id=uuid.uuid4().hex[:8],
+        # 只跑当初卡住的那个用例：其余的要么上一轮已经修好并进了交付分支，
+        # 要么与这个问题无关，重跑它们是白花钱。
+        only_test=data.get("test_id") or None,
+        answer=format_answer(data.get("question", ""), choice),
+        progress=None if args.quiet else TerminalProgress()))
+    # 答过就清掉：留着的话 `latest()` 会一直翻出这个已经被回答过的问题，
+    # 人会看到自己刚答完的问题又被问一遍，还以为答案没送到。
+    pending_store.clear(repo, data.get("run_id", ""))
+    print(state["report_md"])
+    if state.get("abort_kind") in ("crash", COLLECTION_ABORT_KIND,
+                                  MODEL_ABORT_KIND):
         raise SystemExit(1)
 
 

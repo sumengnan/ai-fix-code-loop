@@ -175,6 +175,24 @@ uv run aifix stats                      # 跨 run 汇总：适配器、守卫触
 
 复现测试先 commit 进 HEAD，随后 worktree 从 HEAD 建出来，baseline 自然把它认成一个失败用例 —— 所以核心循环完全不知道自己在被 issue 驱动。
 
+### 它卡住时会问你，而不是猜
+
+有一类问题读多少代码都推不出来：**「购物车为空时该返回 None 还是抛异常」是产品决策，不是实现细节。** 遇到这种，agent 会停下来问，并给出编号选项：
+
+```
+## 需要你回答一个问题
+
+空购物车时 most_expensive() 应该：
+  1. 返回 None（当前行为，但调用方没判空 → 就是这个崩溃）
+  2. 抛 ValueError
+
+回复 /aifix 1 继续。（命令行是 aifix answer 1）
+```
+
+**几种改法都能让测试变绿时它不该问** —— 那种情况自己试，由 verify 判对错。判定权在测试那里，不在人那里。这条线由代码判死：一次 run 只能问一个，问之前必须先读过代码，而且必须给 2-4 个选项（自由回复要再过一次模型解析意图，那一步出错的方式是「按你没说过的意图改了代码」）。
+
+答复之后是**重新跑一遍**，不是从断点继续 —— Actions 的 job 一次性，那条路上没有断点可恢复。两条入口用同一套语义，才不会各错各的。
+
 **三条交付通路**，取舍写在 [`docs/superpowers/plans/2026-07-29-m6-issue-driven.md`](docs/superpowers/plans/2026-07-29-m6-issue-driven.md) 里：
 
 | 情形 | 产出 |
@@ -224,6 +242,7 @@ uv run aifix reproduce . --issue-text bug.md     # 首行当标题，其余当�
 
 ```
 aifix run <repo>            修复失败的测试            --test / --budget / --dry-run
+aifix answer <编号> [repo]   回答上次 run 提的问题      --run-id / --budget
 aifix reproduce <repo>      把缺陷报告译成复现测试     --issue-text / --title / --keep
 aifix issue handle          处理一次 issue_comment 事件 --repo / --event
 aifix mine <repo>           从 git history 挖任务集    --limit / --max-tasks / --out
@@ -248,6 +267,7 @@ aifix stats                 跨 run 汇总
 | `AIFIX_BUDGET_WALL_SECONDS` | `1800.0` | |
 | `AIFIX_MAX_ATTEMPTS` | `3` | 每个 failure 最多试几轮 |
 | `AIFIX_MAX_DIFF_LINES` | `300` | 超过即判为整文件重写 |
+| `AIFIX_ASK_USER` | `true` | 信息不全时允不允许停下来问人。**没人能回答的场合要关掉** —— `aifix eval` 已经强制关了 |
 | `AIFIX_CONSECUTIVE_FAILURE_LIMIT` | `3` | 连着几个没修好就中止整个 run |
 | `AIFIX_PRICE_MAP` | `{}` | `{"模型名": [输入价/1k, 输出价/1k]}` |
 | `AIFIX_TEST_PYTHON` | 自动探测 | 跑**目标项目**测试用的解释器。不配就找源仓库的 `.venv/bin/python` / `venv/bin/python`，再没有才退回 aifix 自己的解释器 |

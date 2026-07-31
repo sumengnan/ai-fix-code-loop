@@ -27,8 +27,11 @@ from ..traces import TRACES_BRANCH
 from ..nodes.report import count_fixed
 from ..reproduce import (KIND_COST_CAPPED, KIND_EMPTY_ANSWER,
                          KIND_MISSING_INFO, KIND_NO_CONVERGENCE,
-                         KIND_TRUNCATED, KIND_UNPARSEABLE)
-from .event import authorize
+                         KIND_TRUNCATED, KIND_UNPARSEABLE, ReproduceOutcome)
+from .. import pending as pending_store
+from ..agents.fixer import format_answer
+from ..agents.reproducer import Reproduction
+from .event import COMMAND, authorize
 from .github import GitHubClient
 
 
@@ -172,12 +175,55 @@ async def handle(
         gh.comment(ev.number, "没有适配器认领这个项目（支持 pytest 与 Maven）。")
         return HandleResult(0, "no_repro")
 
-    # ---------------------------------------------------------- 复现
-    # 从这里开始计时，一直算到 run_once 之前 —— 红检跑的是真测试，耗时不是
-    # 可以忽略的量，只掐模型调用那一段等于漏掉一大半。
     t0 = time.monotonic()
     run_id = uuid.uuid4().hex[:8]
-    out = await reproduce_fn(repo, adapter, config, ev.title, ev.body)
+
+    # ------------------------------------------------- `/aifix <编号>`：答复
+    #
+    # 走的是**重新跑一遍**，不是从断点恢复 —— Actions 的 job 一次性，上一次的
+    # 容器连同磁盘一起没了。所以复现测试也得跟着答复一起活下来：它被原样存在
+    # 状态评论的隐藏标记里（`pending.encode_marker`），这里取回来重新写下去。
+    #
+    # 不重跑 reproducer：那要再花一次模型调用，而且**它未必写出同一条测试** ——
+    # 人回答的是针对上一条测试的问题，换一条就答非所问了。
+    answer_text: str | None = None
+    if ev.answer_choice is not None:
+        data = pending_store.decode_marker(gh.status_body(ev.number))
+        if data is None:
+            gh.comment(ev.number,
+                       "这个 issue 上没有待回答的问题。\n"
+                       f"  `{COMMAND} <编号>` 只用来回答 aifix 主动提出的问题；"
+                       f"  要发起一次修复，直接评论 `{COMMAND}`。")
+            return HandleResult(0, "no_pending")
+        try:
+            choice = pending_store.choose(data, ev.answer_choice)
+        except ValueError as e:
+            # 越界当场拒。放过去的话它会静静地按另一个选项去改代码，
+            # 而人以为自己选的是评论里的那一条。
+            gh.comment(ev.number, str(e))
+            return HandleResult(0, "bad_choice")
+        answer_text = format_answer(data.get("question", ""), choice)
+        repro = data.get("repro") or {}
+        if not repro.get("test_code") or not repro.get("target_test_id"):
+            # 标记里没带复现测试（旧版本留下的、或者正文被截断了）。这里裸
+            # 构造 Reproduction 的话，test_file 是 None，会一路走到
+            # write_reproduction 才以 TypeError 炸掉 —— 那时 issue 上没有任何
+            # 说明，人只能去 Actions 页面读调用栈。
+            gh.comment(ev.number,
+                       "这条待答记录里没有复现测试，没法接着上一轮跑。\n"
+                       f"  请重新评论 `{COMMAND}` 从头来一次。")
+            return HandleResult(0, "no_pending")
+        r = Reproduction(can_reproduce=True, **repro)
+        out = ReproduceOutcome(r)               # 这一步零花销：没调模型
+        gh.upsert_status(
+            ev.number,
+            f"收到答复：**{choice}**\n\n带着它重新跑一次（会再花一次 "
+            f"baseline 的时间 —— 这是重跑，不是断点恢复）。")
+    else:
+        # ------------------------------------------------------ 复现
+        # 从这里开始计时，一直算到 run_once 之前 —— 红检跑的是真测试，耗时
+        # 不是可以忽略的量，只掐模型调用那一段等于漏掉一大半。
+        out = await reproduce_fn(repo, adapter, config, ev.title, ev.body)
 
     # **复现这一步也要落 trace**，哪怕后面根本走不到 run_once。
     #
@@ -245,7 +291,33 @@ async def handle(
             0.0, config.budget_wall_seconds - (time.monotonic() - t0))})
 
     state = await run_fn(repo, run_config, run_id=run_id,
-                         only_test=r.target_test_id)
+                         only_test=r.target_test_id, answer=answer_text)
+
+    # ------------------------------------------------- 停在「等人回答」上
+    #
+    # 必须排在建 PR **之前**：那一轮的改动已经被 fix_node 回滚了，交付分支上
+    # 除了复现测试什么都没有。给它开一个 PR 等于请人去 review 一个空改动，
+    # 而真正需要人做的事（回答那个问题）会被埋在 PR 描述里。
+    ask = state.get("ask")
+    if ask:
+        # 复现测试**原样存进标记**：Actions 的下一个 job 是一个干净的
+        # checkout，上一次写下去的文件已经不存在了。不带它的话，答复回来时
+        # 只能重跑一次 reproducer —— 那不但要再花一次模型调用，而且它未必写出
+        # 同一条测试，人回答的却是针对上一条测试的问题。
+        marker = pending_store.encode_marker({
+            **pending_store.payload(run_id, str(repo), ask),
+            "repro": {"test_file": r.test_file, "test_code": r.test_code,
+                      "target_test_id": r.target_test_id},
+        })
+        gh.upsert_status(ev.number, "\n".join([
+            "## 需要你回答一个问题", "",
+            "复现测试已经写好并跑红了，但要继续改下去，得先确认一件事：", "",
+            pending_store.render(ask), "",
+            f"回复 `{COMMAND} <编号>`（比如 `{COMMAND} 1`）即可继续。",
+            "答复之后会**重新跑一遍**，不是从断点继续。", "",
+            marker,
+        ]))
+        return HandleResult(0, "needs_input")
 
     # run_once 内部已经保证「报告先落地再返回」（见 cli.run_once 的 except），
     # 所以这里不再包一层 try —— 包了只会把它已经处理好的结果再吞一次。

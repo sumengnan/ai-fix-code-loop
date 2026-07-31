@@ -10,11 +10,12 @@ from harness.sandbox.local import LocalSandbox
 from harness.types import Message, Role
 
 from ..agents.detector import Diagnosis
-from ..agents.fixer import (SYSTEM_PROMPT, build_initial_messages,
-                            build_registry, locate_hint)
+from ..agents.fixer import (build_initial_messages, build_registry,
+                            locate_hint, system_prompt)
 from ..agents.runner import consume
 from ..graph import AifixState, progress_of, trace_of
 from ..progress import StepReporter
+from ..tools.ask import Pending
 from ..violations import count_violations
 from .baseline import adapter_from_state
 
@@ -148,13 +149,28 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
     prog = progress_of(state)
     sandbox = LocalSandbox(workspace=state["worktree_path"])
     await sandbox.start()
+    # `ask_user` 只在**有人能回答**的场合注册。`aifix eval` 并行跑几十个任务、
+    # 没有任何人在看，给它这个工具等于给一条烧钱的岔路：模型会把一整轮花在
+    # 一个永远等不到回复的问题上，然后被判成没修好。
+    #
+    # 已经带着答复重跑的这一轮也不给：答案就在开场白里，再问一次同样的问题
+    # 是这条路上最贵的失败方式。
+    answer = state.get("answer")
+    can_ask = bool(cfg.ask_user) and not answer
+    pending = Pending() if can_ask else None
+    # 与 AskUserTool 共享**同一个**集合：它靠这个判断「模型到底读没读过代码」。
+    # 传副本的话它永远看到空集，每一次提问都会被拦死。
+    seen_tools: set[str] = set()
+
     try:
         loop = AgentLoop(
             client=client or OpenAICompatibleClient(cfg.fixer),
             registry=build_registry(sandbox, adapter,
                                     known_ids=set(state["baseline_ids"]),
-                                    touched=touched),
-            context=ContextManager(SYSTEM_PROMPT),
+                                    touched=touched, pending=pending,
+                                    seen_tools=seen_tools,
+                                    test_id=failure.test_id),
+            context=ContextManager(system_prompt(can_ask)),
             max_steps=cfg.fixer_max_steps,
             budget=BudgetTracker(max_tokens=remaining,
                                  max_wall_seconds=cfg.budget_wall_seconds),
@@ -167,7 +183,8 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
         # 仓库里到底有哪些文件，而这是唯一有资格回答的人。
         messages = build_initial_messages(
             failure, diagnosis,
-            locate=await locate_hint(sandbox, adapter, diagnosis))
+            locate=await locate_hint(sandbox, adapter, diagnosis),
+            answer=answer)
 
         last_guard: str | None = None
         guard_repeats = 0
@@ -187,9 +204,15 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
             if round_cap is not None and round_cap <= 0:
                 cost_capped = True
                 break
+            def _started(call, _seen=seen_tools):
+                # 记下调用过哪些工具。`ask_user` 拿它判断「模型到底读没读过
+                # 代码」—— 一次工具都没调就说信息不全，多半是它自己没查。
+                _seen.add(call.name)
+                reporter.started(call)
+
             outcome = await consume(loop.run(messages=list(messages)),
                                     cost_cap=round_cap,
-                                    on_tool=reporter.started,
+                                    on_tool=_started,
                                     on_tool_done=reporter.finished)
             tokens += outcome.tokens
             cost += outcome.cost_usd
@@ -202,6 +225,25 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
                 for _ in range(n):
                     trace.fact("violation", kind)
             lines = await _diff_lines(sandbox, touched)
+
+            if pending is not None and pending.asked:
+                # **提问即中止，并回滚改动。**
+                #
+                # 回滚是有意的：模型是在声明「我不知道什么才算对」的同一轮里
+                # 做的这些改动，没有任何人看过它们。让它们进 verify 有可能被判
+                # BETTER 而直接交付 —— 那等于用「测试通过」回答了一个「期望行为
+                # 是什么」的问题，而后者恰恰是测试答不了的。
+                #
+                # 也必须排在 empty_diff 之前：一字未改正是提问之后的**正常**
+                # 结果，而那道守卫会带着「你没有做出任何修改」的反馈把它一路
+                # 重试到 giveup —— 模型每一轮都做对了，额度却烧光。
+                await _rollback(sandbox)
+                touched.clear()
+                lines = 0
+                abort_reason = "needs_input"
+                trace.fact("ask_user", pending.to_dict())
+                prog.note(f"需要你回答一个问题：{pending.question}")
+                break
 
             if lines == 0:
                 # 守卫种类仍是 empty_diff（可交付的改动确实是零，报告与 stats
@@ -263,4 +305,8 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
         "abort_reason": abort_reason,
         "abort": None,      # AgentLoop 的错误不中止整个 run，交给 verify 判定
         "cost_capped": cost_capped,
+        # 有值就表示这一轮停在了「等人回答」上。run_once 据此收尾整个 run：
+        # 不跑 verify（没有改动可验），把问题落盘并写进报告。
+        "ask": pending.to_dict() if pending is not None and pending.asked
+               else None,
     }

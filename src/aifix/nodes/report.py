@@ -76,6 +76,30 @@ def cost_is_unknown(tokens: int, usd: float) -> bool:
     return tokens > 0 and usd == 0.0
 
 
+def _ask_section(ask: dict[str, Any] | None, run_id: str) -> list[str]:
+    """待人回答的那个问题。没有就一行都不加。
+
+    必须把**怎么回答**写全（连命令一起给出来）：这是报告里唯一要求读者动手的
+    地方，而一个「我需要更多信息」却不说怎么给的提示，等于把这次 run 变成一
+    条死路。
+    """
+    if not ask:
+        return []
+    out = ["## 需要你回答一个问题", "",
+           f"卡在 `{ask.get('test_id', '')}` 上：", "",
+           f"**{ask.get('question', '')}**", ""]
+    for i, opt in enumerate(ask.get("options") or [], 1):
+        out.append(f"{i}. {opt}")
+    out += ["",
+            f"回答：`aifix answer <编号>`（如 `aifix answer 1`），"
+            f"或在 issue 下回复 `/aifix <编号>`。",
+            "",
+            "答复之后会**重新跑一遍**（不是从断点继续），所以那次会再花一次"
+            "baseline 的时间。",
+            ""]
+    return out
+
+
 def render_report(state: dict[str, Any]) -> str:
     abort = state.get("abort")
     results = state["results"]
@@ -100,6 +124,10 @@ def render_report(state: dict[str, Any]) -> str:
     ]
     if abort:
         lines += [f"> **中止**：{abort}", ""]
+    # 待答的问题排在**最前面**、在成绩单之前：这次 run 的产出就是这个问题，
+    # 把它塞在表格底下等于让人自己去找。这也是报告里唯一一处要求读者动手的
+    # 地方 —— 别的部分都是「已经发生了什么」。
+    lines += _ask_section(state.get("ask"), state.get("run_id", ""))
     # 「修复 x / y」在收集错误中止下长得和一个成绩一模一样，而这次根本没开修：
     # 分母是一批本就不该存在的工单数（每一条都是「某个测试文件没能导入」），
     # 分子是「一个都没轮到」。用户实测里看到的正是这一行 ——「修复 0 / 11」——

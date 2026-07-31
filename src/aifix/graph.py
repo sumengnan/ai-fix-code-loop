@@ -44,6 +44,16 @@ class AifixState(TypedDict, total=False):
     suspect_anchored: bool
     verdict: str | None
 
+    # agent 停下来问的那个问题（`{test_id, question, options}`），没问过就是
+    # None。有值时这次 run 以「等人回答」收尾：不跑 verify、不继续队列，问题
+    # 落成 pending.json 并写进报告。答复由 `aifix answer` 或 issue 上的
+    # `/aifix <编号>` 带回来，走的是**重新跑一遍**而不是断点恢复。
+    ask: dict[str, Any] | None
+    # 人对上一轮提问的答复，已拼成给模型看的一段话（fixer.format_answer）。
+    # 有值时 `ask_user` 不再注册 —— 答案就在开场白里，再问一次同样的问题是
+    # 这条路上最贵的失败方式。
+    answer: str | None
+
     touched: list[str]
     guard_hits: list[str]
     diff_lines: int
@@ -94,7 +104,7 @@ def new_state(repo: Path, config: AifixConfig, run_id: str) -> AifixState:
         run_id=run_id, repo=str(repo), config=config,
         adapter_name="", worktree_path="", branch="", artifact_dir="",
         baseline_ids=[], queue=[], current=None, attempt=0,
-        diagnosis=None, verdict=None,
+        diagnosis=None, verdict=None, ask=None, answer=None,
         touched=[], guard_hits=[], diff_lines=0, abort_reason=None,
         flaky_filtered=[], confirmed_regressions=[], signals=[],
         consecutive_failures=0,

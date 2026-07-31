@@ -130,6 +130,7 @@ flowchart TD
 - 客户端：`OpenAICompatibleClient(cfg.fixer)`
 - 沙箱：`LocalSandbox(workspace=worktree_path)`
 - 工具面：白名单七个 —— `read_file` / `read_symbol` / `list_files` / `grep` / `edit_file` / `apply_patch` / `run_tests`，**没有 shell**。改代码首选 `edit_file`（给原文与新文，不用数 diff 行号）；两条写入路径共用 `tools/guard.py` 的守卫
+- 第八个是**条件注册**的 `ask_user`：只在有人能回答时才给（`config.ask_user`，`aifix eval` 强制关掉）。它一触发就中止本轮、回滚改动，run 以 `needs_input` 收尾，问题落成 `pending.json` 并写进报告。答复由 `aifix answer <编号>` 或 issue 上的 `/aifix <编号>` 带回来 —— 走的是**重新跑一遍**而不是断点恢复，因为 Actions 的 job 一次性，那条路上根本没有断点可恢复。三道硬约束见[安全边界](safety.md)
 - `max_steps=cfg.fixer_max_steps`，默认 25
 
 跑完 `AgentLoop` 之后检查改动是否合理，两条守卫（空 diff、巨型 diff）以**带反馈重试**的方式处理，而不是直接失败。守卫重试**不计入 `attempt`** —— `attempt` 衡量的是「修复尝试」，而守卫触发时连一次有效尝试都还没产生。

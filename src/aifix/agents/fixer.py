@@ -7,6 +7,7 @@ from harness.types import Message, Role
 
 from ..adapters.base import Failure, ProjectAdapter
 from ..signals import under_dirs
+from ..tools.ask import AskUserTool, Pending
 from ..tools.edit import EditFileTool
 from ..tools.patch import ApplyPatchTool
 from ..tools.read import ReadFileTool
@@ -44,11 +45,31 @@ SYSTEM_PROMPT = """你是一个修复代码缺陷的工程师。工作区是一�
 - 没有 shell、没有网络、不能装依赖。
 - 你必须真的做出修改。只说"已修复"而没有真正改到文件是无效的。"""
 
+# 只在 `ask_user` 真的注册了的时候才追加（见 system_prompt）。
+# 提示词里写一个不存在的工具，模型会去调它、拿到「没这个工具」，然后把这一
+# 轮浪费在困惑上。
+_ASK_GUIDANCE = """
+
+关于 ask_user：只有在**无法判断什么才算正确行为**时才用它，比如「购物车为空
+时该返回 None 还是抛异常」——那是产品决策，读多少代码都推不出来。
+
+**几种改法都能让测试变绿时不要问**：自己挑一个动手，用 run_tests 判对错。
+判定权在测试那里，不在人那里。一次运行只能问一个问题，而且问之前必须先读过
+相关代码。"""
+
+
+def system_prompt(can_ask: bool = False) -> str:
+    """能力面变了，提示词就得跟着变 —— 两者必须是同一份事实。"""
+    return SYSTEM_PROMPT + (_ASK_GUIDANCE if can_ask else "")
+
 
 def build_registry(sandbox: Sandbox, adapter: ProjectAdapter,
                    known_ids: set[str],
-                   touched: set[str] | None = None) -> ToolRegistry:
-    """Fixer 的能力面：白名单，七个工具，没有 shell。
+                   touched: set[str] | None = None,
+                   pending: Pending | None = None,
+                   seen_tools: set[str] | None = None,
+                   test_id: str = "") -> ToolRegistry:
+    """Fixer 的能力面：白名单，七个工具（可选第八个），没有 shell。
 
     touched：传入一个集合，**每一条写入路径**（apply_patch 与 edit_file）都
     会把成功改动的路径记进去，供交付阶段精确提交（见 Worktree.commit）。
@@ -56,6 +77,11 @@ def build_registry(sandbox: Sandbox, adapter: ProjectAdapter,
 
     两条写入路径共用 tools.guard.guard_write，围栏上不会因为多一条路而多一
     个洞；越界计数也在 violations._WRITE_TOOLS 里同步列了两条。
+
+    pending：给了才注册 `ask_user`。**没有人能回答的场合一律不给** ——
+    `aifix eval` 并行跑几十个任务、没有任何人在看，注册它只会让模型把一整轮
+    花在一个永远等不到回复的问题上，然后被判成没修好。这不是配置洁癖：能力
+    面上多一个在当前场合无效的工具，就是多一条烧钱的岔路。
     """
     reg = ToolRegistry()
     reg.register(ReadFileTool(sandbox))
@@ -67,6 +93,9 @@ def build_registry(sandbox: Sandbox, adapter: ProjectAdapter,
     reg.register(ApplyPatchTool(sandbox, test_dirs=adapter.test_dirs(),
                                 touched=touched))
     reg.register(RunTestsTool(sandbox, adapter, known_ids=known_ids))
+    if pending is not None:
+        reg.register(AskUserTool(pending, seen_tools if seen_tools is not None
+                                 else set(), test_id))
     return reg
 
 
@@ -120,15 +149,32 @@ async def locate_hint(sandbox: Sandbox, adapter: ProjectAdapter,
         f"- {p}" for p in sources)
 
 
+def format_answer(question: str, choice: str) -> str:
+    """把人给的答复拼成一段**不容再问**的上下文。
+
+    措辞是有意强硬的：上一轮已经为这个问题花掉了一整轮往返，答案到手之后
+    再问一次同样的问题，是这条路上最贵也最让人恼火的失败方式。
+    """
+    return (f"关于上一轮你提出的问题：\n  {question}\n\n"
+            f"**人已经回答：{choice}**\n\n"
+            "按这个答复动手修复，不要再就同一件事提问。")
+
+
 def build_initial_messages(failure: Failure,
                            diagnosis: Diagnosis | None,
-                           locate: str | None = None) -> list[Message]:
+                           locate: str | None = None,
+                           answer: str | None = None) -> list[Message]:
     """把失败信息与诊断组装成 Fixer 的初始上下文。
 
     diagnosis 为 None 时降级：直接把原始 traceback 交给 Fixer 自行判断。
 
     locate：`locate_hint` 的产物，诊断指错文件时补上真路径。两条分支都要带 ——
     降级那条手里只有 traceback，比有诊断时更需要它。
+
+    answer：人对上一轮 `ask_user` 的答复（`format_answer` 的产物）。续跑是
+    **重新跑一遍**，不是从断点恢复：Actions 的 job 是一次性的，等人回复只能
+    靠下一次触发，而两条入口（命令行与 issue）用同一套语义才不会各错各的。
+    代价是多跑一次 baseline，换来的是没有需要保鲜的中间状态。
     """
     if diagnosis is None:
         body = (
@@ -150,4 +196,8 @@ def build_initial_messages(failure: Failure,
             "这份分析仅供参考，请自己读代码确认后再动手。")
     if locate:
         body += "\n\n" + locate
+    # 答复放在**最后**：它是这一轮里最新、最确定的一条信息，而上面那份诊断
+    # 是模型自己上一轮猜的。顺序反了的话，人给的答案会被一段猜测压在下面。
+    if answer:
+        body += "\n\n" + answer
     return [Message(role=Role.USER, content=body)]

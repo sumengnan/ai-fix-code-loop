@@ -113,6 +113,14 @@ class AifixConfig(BaseSettings):
     budget_wall_seconds: float = 1800.0
 
     max_attempts: int = 3
+    # 信息不全时允不允许 agent 停下来问人（`ask_user` 工具）。
+    #
+    # **没有人能回答的场合必须关掉**，`aifix eval` 就把它设成 False：那边并行
+    # 跑几十个任务、没有任何人在看，留着它等于给模型一条烧钱的岔路 —— 把一
+    # 整轮花在一个永远等不到回复的问题上，然后被判成没修好。
+    #
+    # 带着答复重跑的那一轮也不给（在 fix_node 里判），理由见那里。
+    ask_user: bool = True
     # 单次修复允许的改动行数上限（+/- 行合计）。超过即判为整文件重写：
     # 模型放弃理解、直接重写，那种补丁即使测试转绿也不该合。
     max_diff_lines: int = 300

@@ -6,11 +6,19 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 COMMAND = "/aifix"
+
+# `/aifix 2` —— 回答上一轮 `ask_user` 提的那个问题。
+#
+# 为什么是编号而不是自由文本：自由回复要再过一次模型去解析意图，而那一步
+# 出错的方式是**按用户没说过的意图改了代码** —— 比不问更糟。编号让「人说了
+# 什么」到「机器做什么」这一段是纯确定性的。
+_ANSWER = re.compile(rf"^{re.escape(COMMAND)}\s+(\d+)$")
 
 
 @dataclass(frozen=True)
@@ -22,6 +30,10 @@ class IssueEvent:
     owner: str
     commenter: str
     comment_id: int
+    # `/aifix 2` 里那个 2（从 1 数起），普通的 `/aifix` 是 None。
+    # 权限判定对两者**完全一样** —— 回答一个问题会直接决定代码怎么改，
+    # 它和发起一次修复是同一级别的动作，不该有一条更宽的门。
+    answer_choice: int | None = None
 
 
 @dataclass(frozen=True)
@@ -96,8 +108,13 @@ def authorize(payload: dict[str, Any]) -> Decision:
         # 那条路永远会触发，不受那层保护 —— 这一道是给那条路留的。
         return Decision(False, "评论来自 bot")
 
-    if _first_line(comment.get("body") or "") != COMMAND:
-        return Decision(False, f"第一行不是 {COMMAND}")
+    first = _first_line(comment.get("body") or "")
+    choice: int | None = None
+    if first != COMMAND:
+        m = _ANSWER.match(first)
+        if m is None:
+            return Decision(False, f"第一行不是 {COMMAND}")
+        choice = int(m.group(1))
 
     # 走到这里，有人确实在等一个回应了 —— 下面的拒绝全部 notify=True。
     owner = ((repo.get("owner") or {}).get("login") or "")
@@ -131,4 +148,5 @@ def authorize(payload: dict[str, Any]) -> Decision:
         owner=owner,
         commenter=commenter,
         comment_id=int(comment.get("id", 0)),
+        answer_choice=choice,
     ))

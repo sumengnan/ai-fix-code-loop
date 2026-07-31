@@ -150,7 +150,11 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
     # 才用探测值」：那等于把优先级抄成两份，两处迟早漂移。
     task_config = config.model_copy(update={
         "test_python": resolve_test_python(Path(task.repo),
-                                           config.test_python)})
+                                           config.test_python),
+        # **评测里没有人能回答。** 留着 `ask_user` 等于给模型一条烧钱的岔路：
+        # 它会把一整轮花在一个永远等不到回复的问题上，然后被判成没修好 ——
+        # 而那个失分记的是模型的账，实际是评测环境的账。
+        "ask_user": False})
     state = await run_once(dest, task_config, run_id=run_id,
                            only_test=task.target_test,
                            detector_client=detector_client,

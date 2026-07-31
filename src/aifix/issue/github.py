@@ -70,8 +70,18 @@ class GitHubClient:
                   "--input", "-"],
                  stdin=json.dumps({"body": marked}, ensure_ascii=False))
 
-    def _find_status_comment(self, issue: int) -> int | None:
-        """跨全部分页找自己那条。
+    def status_body(self, issue: int) -> str:
+        """自己那条状态评论的正文；没有就空串。
+
+        待答的问题藏在它里面（`pending.encode_marker`）。**issue 就是这条
+        流水线的持久层** —— Actions 的容器连同磁盘一起消失，`.aifix/` 下的
+        任何东西都活不过一次 job，只有评论活得下来。
+        """
+        return self._find_status_comment(issue, want_body=True) or ""
+
+    def _find_status_comment(self, issue: int,
+                             want_body: bool = False) -> Any:
+        """跨全部分页找自己那条。`want_body` 时返回正文，否则返回评论 id。
 
         **`--slurp` 不能省。** `gh api --paginate` 的每一页是独立的 JSON 数组，
         多页时输出是几个数组串在一起 —— 直接 json.loads 必然失败。而失败的形态
@@ -95,7 +105,7 @@ class GitHubClient:
             for c in (page if isinstance(page, list) else [page])]
         for c in reversed(comments):
             if isinstance(c, dict) and STATUS_MARKER in (c.get("body") or ""):
-                return int(c["id"])
+                return (c.get("body") or "") if want_body else int(c["id"])
         return None
 
     # ------------------------------------------------------------ 普通回帖
