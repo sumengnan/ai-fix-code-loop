@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 
 class Task(BaseModel):
@@ -66,8 +66,45 @@ def write_jsonl(path: Path, items: Iterable[BaseModel]) -> None:
 
 
 def read_jsonl(path: Path, model: type[M]) -> list[M]:
+    """读一份 jsonl。**读不动时给一句指得到方向的话，不是裸 traceback。**
+
+    2026-08-01 的功能巡检读数：`aifix eval /打错的/路径` 和
+    `aifix eval-report /打错的/路径` 吐的都是 `FileNotFoundError` 的调用栈，
+    而同一次巡检里 `aifix stats` 给的是「还没有灌过库：…先跑 aifix ingest」。
+    同一个仓库里两套标准，而这个项目自己的说法是「最贵的失败一向不是崩溃，
+    是指错方向的诊断」——一段 io.open 的栈帧连方向都没指。
+
+    行号必须报出来：一份几十行的结果文件里坏了一行，不说是哪一行，人只能
+    从头看起。
+    """
+    p = Path(path)
+    try:
+        text = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise SystemExit(
+            f"文件不存在：{p}\n"
+            f"  这里要的是一份 jsonl（每行一个 JSON 对象）。\n"
+            f"  任务集由 `aifix mine` / `aifix mutate` 产出，"
+            f"结果文件由 `aifix eval --out` 产出。") from None
+    except IsADirectoryError:
+        raise SystemExit(f"这是个目录，不是文件：{p}") from None
+    except UnicodeDecodeError:
+        raise SystemExit(f"{p} 不是 UTF-8 文本，读不了。") from None
+
     out: list[M] = []
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
-        if line.strip():
+    for n, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
             out.append(model.model_validate_json(line))
+        except ValidationError as e:
+            raise SystemExit(
+                f"{p} 第 {n} 行不是合法的 {model.__name__}：\n"
+                f"  {str(e).splitlines()[0]}\n"
+                f"  这份文件应当由 aifix 自己产出；手工编辑过的话，"
+                f"检查那一行是不是缺了字段或者被截断了。") from None
+    if not out:
+        # 空文件不是错误，但一定要说 —— 后面那句「0 个任务」看起来像正常收场，
+        # 而真相多半是路径指错了另一个文件
+        raise SystemExit(f"{p} 里没有任何记录（空文件）。")
     return out
