@@ -12,16 +12,26 @@
 
 ### 一、能力：白名单工具面，没有 `run_shell`
 
-Fixer 的 `ToolRegistry` 里只注册五个工具（`src/aifix/agents/fixer.py`）：
+Fixer 的 `ToolRegistry` 里只注册七个工具（`src/aifix/agents/fixer.py`）：
 
 | 工具 | 能干什么 |
 |---|---|
-| `read_file` / `list_files` | 只读，框架自带 |
+| `read_file` / `list_files` | 只读。`read_file` 带 `offset`/`limit`，截断消息给出下一段的起点 |
+| `read_symbol` | 只读，按名字取一个函数/类的完整定义（Python 走 `ast`，花括号语言数括号） |
 | `grep` | 底层是 `git grep`，自动跳过 `.gitignore` 里的路径 |
-| `apply_patch` | **唯一的修改手段**，只接 unified diff，不接整文件覆写 |
+| `edit_file` | **首选的修改手段**：给出原文与新文，定位由确定性代码完成 |
+| `apply_patch` | 另一条修改手段，只接 unified diff，不接整文件覆写 |
 | `run_tests` | 只能跑当前失败列表里的用例，一次最多 5 个，不能跑全量 |
 
-`ai-harness-framework` 自带 `RunShellTool`（`name = "run_shell"`），**没有被注册**。这不是靠注释保证的 —— `tests/test_fixer.py` 里有两条测试钉住它：一条断言注册表里的工具名集合恰好是上面那五个，另一条断言 `reg.get("run_shell") is None` 且 `reg.get("run_python") is None`。
+**两条写入路径，一份守卫。** `edit_file` 是 2026-07-31 加的（起因见下面「为什么不只留 diff」）。两者都走 `src/aifix/tools/guard.py` 的 `guard_write`，三道检查一次都不少；越界统计那边也在 `violations._WRITE_TOOLS` 里同步列了两条 —— 共用守卫**不会**自动让新路径被数到，那是另一套代码。`tests/test_violations.py::test_every_write_path_is_counted` 对两条路径各断言一次。
+
+`ai-harness-framework` 自带 `RunShellTool`（`name = "run_shell"`），**没有被注册**。这不是靠注释保证的 —— `tests/test_fixer.py` 里有两条测试钉住它：一条断言注册表里的工具名集合恰好是上面那七个（等号，不是包含：加工具就是扩大攻击面，得先在那条断言里说明白），另一条断言 `reg.get("run_shell") is None` 且 `reg.get("run_python") is None`。
+
+#### 为什么不只留 diff
+
+2026-07-31 的一次 39 任务评测（qwen3-coder-flash）：`apply_patch` 被调用 332 次，**失败 309 次（93%）**。能解析的坏补丁里，**247/247 是 `@@ -a,b +c,d @@` 的行数与正文对不上 —— 100%**。unified diff 要求模型逐字复述上下文行、数对两侧行数、给对起始行号，把「把这段改成那段」编码成了一道算术题，而算术是 LLM 结构性最弱的能力。模型的正文往往是对的，它栽在记账上。
+
+两处应对：`apply_patch` 里的 `repair_diff` 按正文重算表头（离线replay 269 份真实坏补丁，仍被判 corrupt 的从 269 降到 7）；`edit_file` 则把记账整个拿掉 —— 没有行号、没有计数、没有上下文行前缀。
 
 `run_tests` 的白名单（`known_ids`）也是能力面的一部分：模型给一个不在失败列表里的 id 会拿到 `ToolError` 和完整的可用列表，而不是让它自己去发明测试选择器。
 
@@ -29,9 +39,9 @@ Detector 那一路更彻底：`ToolRegistry()` 是**空的**，`max_steps=1`，�
 
 ### 二、路径：`resolve_in_workspace`
 
-`apply_patch` 与 `grep` 在动手之前都过一次 `harness.sandbox.base.resolve_in_workspace`，逃逸工作区抛 `SandboxError`（在 `apply_patch` 里被转成 `ToolError` 回给模型）。
+`edit_file`、`apply_patch`、`read_symbol` 与 `grep` 在动手之前都过一次 `harness.sandbox.base.resolve_in_workspace`，逃逸工作区抛 `SandboxError`（在写入路径上被 `guard_write` 转成 `ToolError` 回给模型）。
 
-`apply_patch` 另外拒绝 `.git` 目录下的任何路径。
+两条写入路径另外拒绝 `.git` 目录下的任何路径，也拒绝落在 `test_dirs` 之下的任何路径 —— **包括新建**。`edit_file` 的 `old_text` 留空是新建文件，那条路同样过守卫：否则「不能改测试」会退化成「不能改**已有的**测试」，模型新写一个全绿的测试文件就绕过去了。
 
 ### 三、进程：cwd
 
@@ -45,7 +55,9 @@ pytest 那条命令的 argv[0] 是**目标项目自己的解释器**（`AIFIX_TE
 
 `preflight` 会拒绝在不干净的工作区上启动（只看已跟踪文件，见[架构](architecture.md)）。
 
-交付时**绝不用 `git add -A`**：worktree 里跑过测试会产生一堆未跟踪产物，全扫进去会污染交付分支。`Worktree.commit` 只 `git add -- <ApplyPatchTool 记账过的路径>` —— 因为 `apply_patch` 是 agent 唯一的修改手段，「改过哪些」是**已知的**，不需要靠「把工作区里变了的东西全扫进来」去猜。
+交付时**绝不用 `git add -A`**：worktree 里跑过测试会产生一堆未跟踪产物，全扫进去会污染交付分支。`Worktree.commit` 只 `git add -- <写入工具记账过的路径>` —— agent 只能经由 `edit_file` 与 `apply_patch` 改文件，「改过哪些」是**已知的**，不需要靠「把工作区里变了的东西全扫进来」去猜。
+
+这也意味着**每条写入路径都必须记账**：`touched` 集合同时传给两个工具。漏一条的后果不是报错，是那次改动不进交付分支，而报告照写「已修复」。
 
 ---
 
@@ -247,9 +259,9 @@ macOS 与 Windows 的文件系统默认不区分大小写。`a/TESTS/test_add.py
 
 **二、闸的判定零 LLM。** 授权、命令解析、红检、交付通路的选择全部由确定性代码做。让模型去读一句评论回答「这算不算授权」，等于把闸门交给一个可以被说服的东西。这与「只有 verify 有资格说修好了」同源。
 
-**三、reproducer 只读。** 它的工具面是 `read_file` / `list_files` / `grep`，**没有 `apply_patch`，也没有 `run_tests`**。
+**三、reproducer 只读。** 它的工具面是 `read_file` / `read_symbol` / `list_files` / `grep`，**没有任何写入工具，也没有 `run_tests`**。
 
-- 没有 `apply_patch`：复现测试由确定性代码写下去，不经过工具面 —— 这正是「不许改测试文件」那道守卫为 M6 一行都不用改的原因。给了它，它就能直接改产品代码，而那条路径上一道守卫都没有。
+- 没有 `apply_patch`、也没有 `edit_file`：复现测试由确定性代码写下去，不经过工具面 —— 这正是「不许改测试文件」那道守卫为 M6 一行都不用改的原因。给了它任何一条写入路径，它就能直接改产品代码去迎合自己写的测试。
 - 没有 `run_tests`：让它自己跑测试，「这条测试红不红」的判定权就落到模型手里，而红检是这一步唯一的确定性证据。
 
 写下去之前还有一层确定性校验（`agents/reproducer.parse_reproduction`）：路径必须相对、不含 `..`、落在 `test_dirs` 之下，且 `target_test_id` 要能按词边界追溯到 `test_file`。写进产品目录等于绕开「不许改测试文件」的整套前提。

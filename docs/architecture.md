@@ -113,7 +113,11 @@ flowchart TD
 - `max_steps=1`，`json_output()` 强制 JSON
 - token 闸：`BudgetTracker(max_tokens=cfg.detector_max_tokens)`，默认 20,000
 
-输入是 `Failure` 加上 `adapter.locate_source()` 从栈帧还原的嫌疑位置。输出解析成 `Diagnosis`（`suspect_file` / `suspect_lines` / `root_cause` / `fix_strategy` / `confidence`）。
+输入是 `Failure`、`adapter.locate_source()` 从栈帧还原的嫌疑位置，以及**前三个候选位置周围的真实源码**（`src/aifix/snippet.py` 的 `around()`，上下各 12 行，带文件里的真实行号，栈帧指向的那行用 `>` 标出）。输出解析成 `Diagnosis`（`suspect_file` / `suspect_lines` / `root_cause` / `fix_strategy` / `confidence`）。
+
+源码是 2026-07-31 加的，零 LLM、不多花一个回合。在那之前 Detector 判断「根本原因是什么」时看到的只有路径、行号和 traceback —— 那段代码它从未见过，`suspect_lines` 只能编。而编出来的行号会原样进入 Fixer 的开场白（「嫌疑行号：120-135」），把它的第一步引向一个具体而错误的位置。**读不到源码时 prompt 明确要求填 `null`**：不给是「不知道」，编一个是「指错地方」，后者更糟。
+
+工具面仍然是空的、仍然单步 —— 那个设计是对的（一次调用、成本可预测）。缺的从来不是工具，是事实。
 
 **解析失败降级为 `diagnosis=None`，不是错误** —— `fix` 会改为把原始 traceback 直接交给 Fixer 自行判断。
 
@@ -125,7 +129,7 @@ flowchart TD
 
 - 客户端：`OpenAICompatibleClient(cfg.fixer)`
 - 沙箱：`LocalSandbox(workspace=worktree_path)`
-- 工具面：白名单五个 —— `read_file` / `list_files` / `grep` / `apply_patch` / `run_tests`，**没有 shell**
+- 工具面：白名单七个 —— `read_file` / `read_symbol` / `list_files` / `grep` / `edit_file` / `apply_patch` / `run_tests`，**没有 shell**。改代码首选 `edit_file`（给原文与新文，不用数 diff 行号）；两条写入路径共用 `tools/guard.py` 的守卫
 - `max_steps=cfg.fixer_max_steps`，默认 25
 
 跑完 `AgentLoop` 之后检查改动是否合理，两条守卫（空 diff、巨型 diff）以**带反馈重试**的方式处理，而不是直接失败。守卫重试**不计入 `attempt`** —— `attempt` 衡量的是「修复尝试」，而守卫触发时连一次有效尝试都还没产生。
