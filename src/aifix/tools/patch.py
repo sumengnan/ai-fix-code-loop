@@ -1,20 +1,90 @@
 from __future__ import annotations
 
 import re
-from pathlib import PurePosixPath
 
 from pydantic import BaseModel, Field
 
-from harness.sandbox.base import Sandbox, SandboxError, resolve_in_workspace
+from harness.sandbox.base import Sandbox
 from harness.tools.base import Tool, ToolError
 
-from ..signals import under_dirs
+from .guard import guard_write
 
 # 取 diff 头上的**原样**路径：`--- a/x.py` / `+++ b/x.py`。前缀在
 # `_strip_p1` 里按 git 的规则剥，不在这里 —— 见那个函数的说明。
 _TARGET = re.compile(r"^(?:---|\+\+\+)\s+(?P<path>\S+)", re.M)
 
 _PATCH_FILE = ".aifix_patch.diff"
+
+
+_HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
+
+
+def repair_diff(diff: str) -> str:
+    """修掉模型生成 unified diff 时的两种**机械**错误。起止行号与正文内容不动。
+
+    一、`@@ -a,b +c,d @@` 的行数按正文重算。
+    二、hunk 内部的**裸空行**补上前导空格 —— 空的上下文行必须是 `" "`，
+        而模型（以及沿途任何 strip 尾空格的环节）经常发成真空行。
+
+    **实测逼出来的**（2026-07-31，qwen3-coder-flash 的 39 任务评测）：
+    `apply_patch` 被调 332 次、**失败 309 次**，几乎全是 `corrupt patch at
+    line N` —— 而 corrupt 不是「上下文对不上」，是**这个 diff 语法就坏的**：
+    表头的行数与正文对不上。样本二是 `@@ -39,12 +39,14 @@` 而正文有 3 个新增，
+    新侧应为 15。
+
+    数行数正是 LLM 最不擅长的事，而**正文往往是对的**。模型于是陷在
+    「read_file 431 次 / apply_patch 332 次」的循环里烧完 50 万 token，
+    一个字节都没改。
+
+    **为什么重算是安全的、而不是在掩盖错误**：表头修好之后，`git apply
+    --check` 该拒还是拒 —— 只是理由换成了真实的那一个（上下文不匹配），
+    而那个理由对应的建议（重新 read_file）才是有用的。这个函数消灭的是
+    一种**机械故障**，不是一种判定。
+
+    只改表头，**一个正文字节都不动**：顺手改正文等于替模型改代码，那是
+    apply_patch 的越权。认不出来的原样返回 —— 看不懂时闭嘴让 git 去报错，
+    它的报错至少是准的。
+    """
+    lines = diff.splitlines(keepends=True)
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        m = _HUNK.match(lines[i].rstrip("\n"))
+        if m is None:
+            out.append(lines[i]); i += 1
+            continue
+        # 数正文：上下文行两侧都算，`\ No newline` 之类一律跳过
+        old_n = new_n = 0
+        j = i + 1
+        while j < len(lines):
+            ch = lines[j][:1]
+            if ch == "@" and lines[j].startswith("@@"):
+                break
+            if lines[j].startswith(("--- ", "+++ ", "diff --git ")):
+                break
+            if ch == "\\":
+                j += 1; continue
+            # `"\n"` 是**裸空行**（该有的前导空格丢了），`""` 是文件末尾没有
+            # 换行的那一行。两者都是空的上下文行 —— 漏掉任一个，计数会在这里
+            # 提前 break，表头被算成 `@@ -1,1 +1,1 @@`。这个坑就是要修的那个
+            # 字符自己造成的。
+            if ch in (" ", "", "\n"):
+                old_n += 1; new_n += 1
+            elif ch == "-":
+                old_n += 1
+            elif ch == "+":
+                new_n += 1
+            else:
+                break
+            j += 1
+        a, c, tail = m.group(1), m.group(3), m.group(5)
+        out.append(f"@@ -{a},{old_n} +{c},{new_n} @@{tail}\n")
+        # 裸空行补回前导空格。**只补空行**，别的一律原样 —— 这一步是把
+        # 「格式上不合法」变成「格式合法」，不是替模型改内容。
+        for ln in lines[i + 1:j]:
+            out.append(" \n" if ln == "\n" else ln)
+        i = j
+    return "".join(out)
 
 
 def _strip_p1(path: str) -> str:
@@ -37,9 +107,11 @@ def _strip_p1(path: str) -> str:
 class ApplyPatchTool(Tool):
     name = "apply_patch"
     description = (
-        "对工作区文件应用 unified diff。只接 diff，不接整文件覆写；"
-        "新建文件用 /dev/null 作为源。打不上时会返回 git 的具体报错，"
-        "据此修正后重试。不允许修改测试文件。")
+        "对工作区文件应用 unified diff。**改代码请优先用 edit_file** —— "
+        "这个工具要求你数对 `@@` 里的行数，出错的补丁一个字节也改不动；"
+        "只在需要一次改多个文件时用它。"
+        "只接 diff，不接整文件覆写；新建文件用 /dev/null 作为源。"
+        "打不上时会返回 git 的具体报错，据此修正后重试。不允许修改测试文件。")
 
     class Params(BaseModel):
         diff: str = Field(description="标准 unified diff，须含 --- / +++ 文件头")
@@ -77,43 +149,48 @@ class ApplyPatchTool(Tool):
         return seen
 
     def _guard(self, targets: list[tuple[str, str]]) -> None:
+        """三道检查在 tools.guard 里，与 `edit_file` 共用同一份。
+
+        分段前缀、不是首段：Maven 标准布局的 test_dirs 是 `["src/test"]`，
+        只看首段会把 `src/test/java/...` 当成源文件放行。原样路径与写入路径
+        两条都查 —— 守卫宁可多拦不可漏放。理由与实现都在 guard.guard_write。
+        """
         if not targets:
             raise ToolError("diff 里没有找到 --- / +++ 文件头，无法确定要改哪个文件。")
         for raw, real in targets:
-            if ".git" in PurePosixPath(real).parts:
-                raise ToolError(f"拒绝修改 .git 目录下的文件：{real}")
-            # 分段前缀，不是首段：Maven 标准布局的 test_dirs 是
-            # `["src/test"]`，只看首段会把 `src/test/java/...` 当成源文件放
-            # 行。判定与 eval/mine.split_paths 共用 signals.under_dirs。
-            # 原样路径与写入路径两条都查：守卫宁可多拦不可漏放，而这两条里
-            # 任何一条像测试文件，这个 diff 就不值得放行。
-            if under_dirs(real, self._test_dirs) or under_dirs(
-                    raw, self._test_dirs):
-                raise ToolError(
-                    f"拒绝修改测试文件：{real}。"
-                    "请修改源码使测试通过，而不是修改测试本身。")
-            # 路径围栏：逃逸工作区抛 SandboxError。按写入路径判 —— 围栏问的是
-            # 「git 会往哪写」，原样路径带着前缀，判出来的是另一个位置。
-            resolve_in_workspace(self._sandbox.workspace, real)
+            guard_write(self._sandbox, self._test_dirs, real, raw)
 
     async def run(self, params: "ApplyPatchTool.Params") -> str:
         targets = self._targets(params.diff)
-        try:
-            self._guard(targets)
-        except SandboxError as e:
-            raise ToolError(str(e))
+        self._guard(targets)
 
-        body = params.diff if params.diff.endswith("\n") else params.diff + "\n"
+        # 先修机械错误再交给 git：模型算不对 hunk 行数是 100% 的坏补丁成因
+        # （见 repair_diff 里那段实测）。修完之后 git 该拒还是拒，只是理由
+        # 换成了真实的那一个。
+        raw = params.diff if params.diff.endswith("\n") else params.diff + "\n"
+        body = repair_diff(raw)
         await self._sandbox.write_file(_PATCH_FILE, body)
         try:
             check = await self._sandbox.exec(
                 ["git", "apply", "--check", _PATCH_FILE], self._timeout)
             if check.exit_code != 0:
+                err = check.stderr.strip() or check.stdout.strip()
+                # **两种失败要给不同的建议**，混成一句会把模型指向走不通的路。
+                # 实测（2026-07-31）：309 次失败几乎全是 corrupt patch（语法坏），
+                # 而当时统一给的建议是「请先 read_file」—— 那是给「上下文对不上」
+                # 的话。于是模型 read_file 431 次、apply_patch 332 次，卡死在
+                # 一个再读一百遍也解决不了的循环里，烧完 50 万 token 一字未改。
+                if "corrupt patch" in err:
+                    raise ToolError(
+                        f"补丁的**格式**不合法（git 拒绝解析）：{err}\n"
+                        "这不是「文件内容对不上」——**再 read_file 也没用**。\n"
+                        "检查 diff 本身：每个上下文行要以一个空格开头、"
+                        "删除行以 `-`、新增行以 `+`；空行也必须是一个空格。\n"
+                        "hunk 头的行数由工具自动重算，你不必去数。")
                 raise ToolError(
-                    "补丁无法应用（git apply --check 失败）："
-                    f"{check.stderr.strip() or check.stdout.strip()}\n"
-                    "通常说明你对文件当前内容的理解有误，"
-                    "请先 read_file 确认后重新生成 diff。")
+                    f"补丁无法应用（git apply --check 失败）：{err}\n"
+                    "格式是合法的，是**上下文对不上** —— 你对文件当前内容的"
+                    "理解有误。先 read_file 确认那几行的原样，再重新生成 diff。")
             applied = await self._sandbox.exec(
                 ["git", "apply", _PATCH_FILE], self._timeout)
             if applied.exit_code != 0:
