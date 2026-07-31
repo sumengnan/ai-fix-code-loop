@@ -144,17 +144,30 @@ def test_keep_leaves_the_file_behind(buggy_repo, issue_file):
     assert (buggy_repo / "tests" / "test_issue_1.py").exists()
 
 
-def test_refuses_to_overwrite_an_existing_file(buggy_repo, issue_file, capsys):
-    """模型给出的路径撞上已有文件时必须停手。
+def test_an_existing_file_is_never_overwritten(buggy_repo, issue_file, capsys):
+    """模型给出的路径撞上已有文件时**改名落地**，绝不覆盖。
 
-    覆盖掉一个真实的测试文件，代价不是「文件没了」——git 里还有；是那一整个
-    文件的用例在这次 baseline 里消失了，而它们的失败本该被计入。
+    不变量没变：覆盖掉一个真实的测试文件，代价不是「文件没了」——git 里还有；
+    是那一整个文件的用例在这次 baseline 里消失了，而它们的失败本该被计入。
+
+    变的是应对方式。这条测试原先断言「停手 + 退 1」，而 2026-08-01 的功能
+    巡检发现两件事：一、**模型挑中已有测试文件是常态**（给 `calc.py` 的缺陷
+    写测试，谁都会挑 `tests/test_calc.py`），停手等于让这条路经常性失败；
+    二、**issue 那条路压根没这道检查，直接覆盖**。守卫因此挪进了唯一的写入点
+    `write_reproduction`，并从「拒绝」改成「改名 + 同步改写 target_test_id」。
     """
     victim = buggy_repo / "tests" / "test_issue_1.py"
     victim.write_text("# 别人的文件\n", encoding="utf-8")
     with pytest.raises(SystemExit) as e:
-        _cmd_reproduce(_args(buggy_repo, issue_file),
+        # --keep：默认跑完会把复现文件收走，而这条测试要看的正是它落在哪
+        _cmd_reproduce(_args(buggy_repo, issue_file, keep=True),
                        client=_Scripted([_text(_GOOD)]))
-    assert e.value.code == 1
-    assert "已存在" in capsys.readouterr().out
+    # 退 0：撞名不再是失败，红检也过了
+    assert e.value.code == 0
+    out = capsys.readouterr().out
+    # 一、原文件一个字节都不许动
     assert victim.read_text(encoding="utf-8") == "# 别人的文件\n"
+    # 二、改名这件事要说出来，否则人在 PR 里看到一个没见过的文件名会困惑
+    assert "已存在" in out and "test_issue_1_aifix" in out
+    # 三、复现测试真的落地了，而且红检跑的是新那条
+    assert (buggy_repo / "tests" / "test_issue_1_aifix.py").exists()

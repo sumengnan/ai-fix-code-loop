@@ -144,14 +144,50 @@ def build_reproduce_registry(sandbox: Sandbox,
 
 
 def write_reproduction(worktree: Path, r: Reproduction) -> Path:
-    """把测试写进工作区，返回落盘路径。
+    """把测试写进工作区，返回落盘路径。**绝不覆盖已有文件。**
 
     建父目录：模型完全可能给出 `tests/regression/test_x.py`，而那个子目录
     未必存在。路径安全（相对、无 `..`、落在 test_dirs 之下）已在
     parse_reproduction 里校验过，这里不重复判——重复判两份会各自漂移。
+
+    **撞名改名，不是拒绝**（2026-08-01 的功能巡检逼出来的）：拿一个真实小
+    仓库跑 `aifix reproduce`，模型给出的路径是 `tests/test_calc.py` —— 仓库
+    里已经有的那个。这不是意外：给 `calc.py` 的缺陷写测试，任何人都会挑那个
+    文件。命令行那侧当时拒绝并退出，**而 issue 那条路直接写了下去**：
+
+        整个 test_calc.py 被一条生成的测试替换
+          → commit 进交付分支 → baseline 跑起来，原来那些用例已经不存在
+          → 「这个补丁没弄坏别的」在一个少了一堆用例的对照组上成立
+          → PR 里躺着一次删测试的改动，而报告说一切正常
+
+    守卫放在这里而不是两个调用方各一份 —— 各写各的正是它当初只存在于命令行
+    那一侧的原因。
+
+    改名同时**改写 `target_test_id`**：不改的话写下去的是 A、跑起来的是 B，
+    红检会报「这个用例没跑出结果」，而真相是它在另一个文件里。改的是 `r`
+    自身（调用方随后要拿 `r.test_file` 去 `git add`、拿 id 去红检），返回值
+    也是真正写下去的那个路径。
     """
-    p = Path(worktree) / r.test_file
-    p.parent.mkdir(parents=True, exist_ok=True)
+    base = Path(worktree) / r.test_file
+    base.parent.mkdir(parents=True, exist_ok=True)
+
+    p = base
+    n = 0
+    while p.exists():
+        n += 1
+        # 后缀带 `aifix`：人在 PR 里看到这个文件名，要能一眼认出它是机器加的。
+        # 仍以 `test_` 开头、仍在同一个测试目录下 —— 挪出去的话「不许改测试
+        # 文件」那道守卫按 test_dirs 判定时就不认它了。
+        suffix = "_aifix" if n == 1 else f"_aifix_{n}"
+        p = base.with_name(f"{base.stem}{suffix}{base.suffix}")
+
+    if p != base:
+        new_rel = p.relative_to(Path(worktree)).as_posix()
+        # id 的形状是 `<file>::<用例>`，只换前缀那一段
+        _, sep, tail = (r.target_test_id or "").partition("::")
+        r.test_file = new_rel
+        r.target_test_id = f"{new_rel}{sep}{tail}" if sep else new_rel
+
     p.write_text(r.test_code or "", encoding="utf-8")
     return p
 
