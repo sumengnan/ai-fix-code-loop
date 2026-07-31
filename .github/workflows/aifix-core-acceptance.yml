@@ -302,7 +302,18 @@ jobs:
           git add -A && git commit -q -m init
 
       - name: 预热 ~/.m2（适配器命令带 -o，离线仓库必须先有构件）
-        run: cd /tmp/mvn && mvn -B -q test || true
+        run: |
+          set -eu
+          cd /tmp/mvn
+          # `|| true` 会把预热失败吞掉，于是后面 aifix 报的「测试跑不起来」
+          # 指向的是 aifix，而真因在这一步 —— 这个项目最忌讳的形状。
+          # 测试**预期失败**（那是要修的 bug），所以只认「构建跑起来了」：
+          # surefire 写出报告即为成功。
+          mvn -B -q test || true
+          test -d target/surefire-reports \
+            || { echo "::error::预热失败：surefire 没写出报告，~/.m2 可能没拉全"; exit 1; }
+          echo "预热成功，报告：$(ls target/surefire-reports | head -3)"
+          mvn -B -q clean
 
       - name: aifix run
         env:
@@ -331,3 +342,10 @@ jobs:
           git ls-tree -r --name-only "$branch" | grep -q '^target/' \
             && { echo "::error::target/ 进了交付分支"; exit 1; } || true
           echo "✅ Java 侧交付正确，且 target/ 不在分支上"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: maven-trace
+          path: /tmp/mvn/.aifix/runs/
+          retention-days: 30
