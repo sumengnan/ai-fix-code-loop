@@ -6,6 +6,7 @@ from harness.tools.builtins.fs_tools import ListFilesTool
 from harness.types import Message, Role
 
 from ..adapters.base import Failure, ProjectAdapter
+from ..signals import under_dirs
 from ..tools.edit import EditFileTool
 from ..tools.patch import ApplyPatchTool
 from ..tools.read import ReadFileTool
@@ -69,11 +70,65 @@ def build_registry(sandbox: Sandbox, adapter: ProjectAdapter,
     return reg
 
 
+# 超过这个数就不列清单：几千行路径塞进开场白既烧钱又淹掉真正有用的那几句，
+# 而那种规模下正确的动作本来就是 grep 符号名，不是读目录。
+_LISTING_LIMIT = 60
+
+_GREP_ADVICE = ("仓库较大，不列清单。定位请用 grep 搜函数名 / 类名 / "
+                "报错里的字符串，不要靠猜路径去 read_file。")
+
+
+async def locate_hint(sandbox: Sandbox, adapter: ProjectAdapter,
+                      diagnosis: Diagnosis | None) -> str | None:
+    """诊断指的文件在仓库里不存在时，把真路径（或清单）补给 Fixer。
+
+    纯断言失败的 traceback 里只有测试文件那一帧，detector 只能按包名猜源码
+    路径 —— 猜错是常态，`suspect_unanchored` 这条事实记的就是它。实跑里那份
+    猜测被原样写进开场白，模型照着去 read_file、报文件不存在，然后一层层
+    list_files 试探：一次 run 10 次 list_files、16 次 read_file，其中三次对着
+    根本不存在的路径。系统本来就知道这份诊断没有锚点，只是没拿它做任何事。
+
+    只在**猜错时**出声：指得准的时候多一句都是在挤占上下文。
+    """
+    suspect = (diagnosis.suspect_file or "").strip() if diagnosis else ""
+    res = await sandbox.exec(["git", "ls-files"], 30.0)
+    tracked = [p.strip() for p in res.stdout.splitlines() if p.strip()]
+    if not tracked:
+        return None
+    if suspect and suspect in tracked:
+        return None
+
+    # 测试文件排除在外：改测试是被守卫拦死的动作，列出来只会把模型往那边引
+    sources = [p for p in tracked if not under_dirs(p, adapter.test_dirs())]
+    if not sources:
+        return None
+
+    head = (f"注意：诊断给的嫌疑文件 `{suspect}` 在这个仓库里**不存在**。"
+            if suspect else "定位提示：")
+    # 文件名对得上是最常见的情形（`cart.py` → `src/shopcart/cart.py`），
+    # git 一次 ls-files 就能答，让模型用四五次工具调用去试探是纯粹的浪费
+    base = suspect.rsplit("/", 1)[-1]
+    same_name = [p for p in sources if p.rsplit("/", 1)[-1] == base] if base else []
+    if same_name:
+        return head + "仓库里同名的文件是：\n" + "\n".join(f"- {p}" for p in same_name)
+    if len(sources) > _LISTING_LIMIT:
+        return head + _GREP_ADVICE
+    # 说「被 git 跟踪的文件」而不是「源文件」：这份清单是 ls-files 的原样输出，
+    # 里面混着 README、锁文件这类东西。把它们说成源文件是一句不必要的假话，
+    # 而小仓库里多这几行的代价约等于零。
+    return head + "仓库里被 git 跟踪的文件（不含测试）：\n" + "\n".join(
+        f"- {p}" for p in sources)
+
+
 def build_initial_messages(failure: Failure,
-                           diagnosis: Diagnosis | None) -> list[Message]:
+                           diagnosis: Diagnosis | None,
+                           locate: str | None = None) -> list[Message]:
     """把失败信息与诊断组装成 Fixer 的初始上下文。
 
     diagnosis 为 None 时降级：直接把原始 traceback 交给 Fixer 自行判断。
+
+    locate：`locate_hint` 的产物，诊断指错文件时补上真路径。两条分支都要带 ——
+    降级那条手里只有 traceback，比有诊断时更需要它。
     """
     if diagnosis is None:
         body = (
@@ -93,4 +148,6 @@ def build_initial_messages(failure: Failure,
             f"  根本原因：{diagnosis.root_cause}\n"
             f"  修复思路：{diagnosis.fix_strategy}\n\n"
             "这份分析仅供参考，请自己读代码确认后再动手。")
+    if locate:
+        body += "\n\n" + locate
     return [Message(role=Role.USER, content=body)]

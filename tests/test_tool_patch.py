@@ -71,6 +71,73 @@ async def test_bad_context_returns_git_error(executor):
     assert "patch" in r.content.lower() or "apply" in r.content.lower()
 
 
+_MISCOUNTED = """--- a/calc.py
++++ b/calc.py
+@@ -1,5 +1,5 @@
+ def add(a, b):
+-    return a - b        # bug: 应为 a + b
++    return a + b
+"""
+
+
+async def test_a_miscounted_hunk_header_still_applies(executor):
+    """`@@` 里的行数与正文对不上，仍然要打得上。
+
+    这条是实跑打出来的：一次 run 里 15 次 apply_patch **12 次**栽在
+    `error: corrupt patch at line N`，326k tokens 修两个单行 bug（同样的活
+    上一次只花 89k）。每一次的 diff 内容都是对的，错的只是 `@@ -49,5 +49,5 @@`
+    里那两个数 —— 模型数不准自己那几行，而 git 默认严格按头里的数去读正文，
+    读不满就判整个补丁损坏。
+
+    `--recount` 正是 git 为这件事准备的：不信头里的计数，从正文推。上下文
+    仍然要逐行对得上，所以这不是放松校验 —— 它只是不再要求模型会数数。
+    """
+    ex, repo = executor
+    r = await ex.execute(ToolCall(id="1", name="apply_patch",
+                                  arguments={"diff": _MISCOUNTED}))
+    assert not r.is_error, r.content
+    assert "return a + b" in (repo / "calc.py").read_text(encoding="utf-8")
+
+
+async def test_a_wrong_hunk_header_does_not_relax_context_matching(executor):
+    """行数不算数，上下文仍然算数。
+
+    `--recount` 只管计数。要是它顺带让内容也对不上照打的话，模型凭一份过时
+    的文件内容生成的 diff 会被打到错误的位置上 —— 那比多失败几次糟糕得多。
+    """
+    ex, repo = executor
+    bad = _BAD_CONTEXT.replace("@@ -1,2 +1,2 @@", "@@ -1,9 +1,9 @@")
+    r = await ex.execute(ToolCall(id="1", name="apply_patch",
+                                  arguments={"diff": bad}))
+    assert r.is_error
+    assert "return a - b" in (repo / "calc.py").read_text(encoding="utf-8")
+
+
+async def test_the_advice_matches_the_kind_of_failure(executor):
+    """打不上有两种，给的建议必须分开。
+
+    实跑里模型照着「你对文件当前内容的理解有误，请先 read_file 确认」去做，
+    重读了 16 次同一个文件、grep 了 14 次，然后生成一份**同样数错行数**的
+    diff —— 建议本身把它带进了死循环。内容对不上才该去重读文件。
+    """
+    ex, _ = executor
+    broken = """--- a/calc.py
++++ b/calc.py
+@@ -1,2 +1,2 @@
+ def add(a, b):
+这一行既不是上下文也不是增删
+"""
+    r = await ex.execute(ToolCall(id="1", name="apply_patch",
+                                  arguments={"diff": broken}))
+    assert r.is_error
+    assert "read_file" not in r.content, "结构错了，重读文件没有用"
+
+    r2 = await ex.execute(ToolCall(id="2", name="apply_patch",
+                                   arguments={"diff": _BAD_CONTEXT}))
+    assert r2.is_error
+    assert "read_file" in r2.content, "内容对不上，这时才该去重读"
+
+
 async def test_path_escape_rejected(executor):
     ex, _ = executor
     r = await ex.execute(ToolCall(id="1", name="apply_patch",

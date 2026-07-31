@@ -15,76 +15,39 @@ _TARGET = re.compile(r"^(?:---|\+\+\+)\s+(?P<path>\S+)", re.M)
 
 _PATCH_FILE = ".aifix_patch.diff"
 
+# `--recount`：不信 `@@ -49,5 +49,5 @@` 里那两个数，从正文推。
+#
+# 实跑打出来的：一次 run 里 15 次 apply_patch **12 次**栽在 `corrupt patch at
+# line N`，326k tokens 修两个单行 bug（同样的活上一次只花 89k）。每一份 diff
+# 的内容都是对的，错的只是那两个计数 —— 模型数不准自己写了几行，而 git 默认
+# 严格按头里的数去读正文，读不满就判整个补丁损坏。这是模型手写 diff 的常见
+# 失败形态，也正是 git 造这个开关的原因（「编辑过补丁但没调整 hunk 头」）。
+#
+# 不是放松校验：上下文仍然要逐行对得上，打错位置照样拒。放松的只是「模型得
+# 会数数」这一条与修复正确性无关的要求。
+#
+# check 与真正应用必须用同一组参数，否则 check 是在验另一件事 —— 一个
+# 「dry run 通过、真跑失败」的工具比没有 dry run 更坏。
+_GIT_APPLY = ["git", "apply", "--recount"]
 
-_HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
+# 打不上有两种，建议必须分开。实跑里模型照着「你对文件当前内容的理解有误，
+# 请先 read_file 确认」去做，重读了 16 次同一个文件、grep 了 14 次，然后交出
+# 一份同样有结构问题的 diff —— 那句建议把它带进了死循环。
+_ADVICE_CONTEXT = ("通常说明你对文件当前内容的理解有误，"
+                   "请先 read_file 确认后重新生成 diff。")
+_ADVICE_MALFORMED = ("这是 diff 的**格式**问题，不是文件内容问题 —— 重读文件没有用。"
+                     "请检查：每一行正文必须以空格、`-` 或 `+` 开头（空行也要有那个"
+                     "前导空格），`@@` 头与 `--- / +++` 头齐全。"
+                     "`@@` 里的**行数不用你数**，工具会从正文重算。")
 
 
-def repair_diff(diff: str) -> str:
-    """修掉模型生成 unified diff 时的两种**机械**错误。起止行号与正文内容不动。
-
-    一、`@@ -a,b +c,d @@` 的行数按正文重算。
-    二、hunk 内部的**裸空行**补上前导空格 —— 空的上下文行必须是 `" "`，
-        而模型（以及沿途任何 strip 尾空格的环节）经常发成真空行。
-
-    **实测逼出来的**（2026-07-31，qwen3-coder-flash 的 39 任务评测）：
-    `apply_patch` 被调 332 次、**失败 309 次**，几乎全是 `corrupt patch at
-    line N` —— 而 corrupt 不是「上下文对不上」，是**这个 diff 语法就坏的**：
-    表头的行数与正文对不上。样本二是 `@@ -39,12 +39,14 @@` 而正文有 3 个新增，
-    新侧应为 15。
-
-    数行数正是 LLM 最不擅长的事，而**正文往往是对的**。模型于是陷在
-    「read_file 431 次 / apply_patch 332 次」的循环里烧完 50 万 token，
-    一个字节都没改。
-
-    **为什么重算是安全的、而不是在掩盖错误**：表头修好之后，`git apply
-    --check` 该拒还是拒 —— 只是理由换成了真实的那一个（上下文不匹配），
-    而那个理由对应的建议（重新 read_file）才是有用的。这个函数消灭的是
-    一种**机械故障**，不是一种判定。
-
-    只改表头，**一个正文字节都不动**：顺手改正文等于替模型改代码，那是
-    apply_patch 的越权。认不出来的原样返回 —— 看不懂时闭嘴让 git 去报错，
-    它的报错至少是准的。
-    """
-    lines = diff.splitlines(keepends=True)
-    out: list[str] = []
-    i = 0
-    while i < len(lines):
-        m = _HUNK.match(lines[i].rstrip("\n"))
-        if m is None:
-            out.append(lines[i]); i += 1
-            continue
-        # 数正文：上下文行两侧都算，`\ No newline` 之类一律跳过
-        old_n = new_n = 0
-        j = i + 1
-        while j < len(lines):
-            ch = lines[j][:1]
-            if ch == "@" and lines[j].startswith("@@"):
-                break
-            if lines[j].startswith(("--- ", "+++ ", "diff --git ")):
-                break
-            if ch == "\\":
-                j += 1; continue
-            # `"\n"` 是**裸空行**（该有的前导空格丢了），`""` 是文件末尾没有
-            # 换行的那一行。两者都是空的上下文行 —— 漏掉任一个，计数会在这里
-            # 提前 break，表头被算成 `@@ -1,1 +1,1 @@`。这个坑就是要修的那个
-            # 字符自己造成的。
-            if ch in (" ", "", "\n"):
-                old_n += 1; new_n += 1
-            elif ch == "-":
-                old_n += 1
-            elif ch == "+":
-                new_n += 1
-            else:
-                break
-            j += 1
-        a, c, tail = m.group(1), m.group(3), m.group(5)
-        out.append(f"@@ -{a},{old_n} +{c},{new_n} @@{tail}\n")
-        # 裸空行补回前导空格。**只补空行**，别的一律原样 —— 这一步是把
-        # 「格式上不合法」变成「格式合法」，不是替模型改内容。
-        for ln in lines[i + 1:j]:
-            out.append(" \n" if ln == "\n" else ln)
-        i = j
-    return "".join(out)
+def _apply_error(stderr: str) -> str:
+    """把 git 的报错转成模型能照着改的一句话。"""
+    malformed = ("corrupt patch" in stderr
+                 or "unrecognized input" in stderr
+                 or "patch fragment without header" in stderr)
+    advice = _ADVICE_MALFORMED if malformed else _ADVICE_CONTEXT
+    return f"补丁无法应用（git apply --check 失败）：{stderr}\n{advice}"
 
 
 def _strip_p1(path: str) -> str:
@@ -108,8 +71,9 @@ class ApplyPatchTool(Tool):
     name = "apply_patch"
     description = (
         "对工作区文件应用 unified diff。**改代码请优先用 edit_file** —— "
-        "这个工具要求你数对 `@@` 里的行数，出错的补丁一个字节也改不动；"
+        "这个工具要求你逐字复述上下文行，抄错一个字符补丁就打不上；"
         "只在需要一次改多个文件时用它。"
+        "`@@` 里的行数不用你数，工具会从正文重算。"
         "只接 diff，不接整文件覆写；新建文件用 /dev/null 作为源。"
         "打不上时会返回 git 的具体报错，据此修正后重试。不允许修改测试文件。")
 
@@ -164,35 +128,19 @@ class ApplyPatchTool(Tool):
         targets = self._targets(params.diff)
         self._guard(targets)
 
-        # 先修机械错误再交给 git：模型算不对 hunk 行数是 100% 的坏补丁成因
-        # （见 repair_diff 里那段实测）。修完之后 git 该拒还是拒，只是理由
-        # 换成了真实的那一个。
-        raw = params.diff if params.diff.endswith("\n") else params.diff + "\n"
-        body = repair_diff(raw)
+        # 末尾补换行：`git apply` 对最后一行没有换行的补丁会直接判 corrupt，
+        # 而模型漏掉结尾那个 `\n` 是常事 —— 这与 `--recount` 治的是同一类
+        # 「与修复正确性无关的形式要求」。
+        body = params.diff if params.diff.endswith("\n") else params.diff + "\n"
         await self._sandbox.write_file(_PATCH_FILE, body)
         try:
             check = await self._sandbox.exec(
-                ["git", "apply", "--check", _PATCH_FILE], self._timeout)
+                [*_GIT_APPLY, "--check", _PATCH_FILE], self._timeout)
             if check.exit_code != 0:
-                err = check.stderr.strip() or check.stdout.strip()
-                # **两种失败要给不同的建议**，混成一句会把模型指向走不通的路。
-                # 实测（2026-07-31）：309 次失败几乎全是 corrupt patch（语法坏），
-                # 而当时统一给的建议是「请先 read_file」—— 那是给「上下文对不上」
-                # 的话。于是模型 read_file 431 次、apply_patch 332 次，卡死在
-                # 一个再读一百遍也解决不了的循环里，烧完 50 万 token 一字未改。
-                if "corrupt patch" in err:
-                    raise ToolError(
-                        f"补丁的**格式**不合法（git 拒绝解析）：{err}\n"
-                        "这不是「文件内容对不上」——**再 read_file 也没用**。\n"
-                        "检查 diff 本身：每个上下文行要以一个空格开头、"
-                        "删除行以 `-`、新增行以 `+`；空行也必须是一个空格。\n"
-                        "hunk 头的行数由工具自动重算，你不必去数。")
-                raise ToolError(
-                    f"补丁无法应用（git apply --check 失败）：{err}\n"
-                    "格式是合法的，是**上下文对不上** —— 你对文件当前内容的"
-                    "理解有误。先 read_file 确认那几行的原样，再重新生成 diff。")
+                raise ToolError(_apply_error(
+                    check.stderr.strip() or check.stdout.strip()))
             applied = await self._sandbox.exec(
-                ["git", "apply", _PATCH_FILE], self._timeout)
+                [*_GIT_APPLY, _PATCH_FILE], self._timeout)
             if applied.exit_code != 0:
                 raise ToolError(
                     f"补丁应用失败：{applied.stderr.strip() or applied.stdout.strip()}")

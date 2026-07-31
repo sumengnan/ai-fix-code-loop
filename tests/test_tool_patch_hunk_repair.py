@@ -1,27 +1,36 @@
-"""hunk 头的行数由**正文重算**，不信模型报的那个数。
+"""`@@` 里的行数由**正文**决定，不信模型报的那个数。
 
-实测（2026-07-31，qwen3-coder-flash 的 39 任务评测）：`apply_patch` 被调用
-332 次，**309 次失败**，几乎全是 `corrupt patch at line N` —— 而 `corrupt patch`
-不是「上下文对不上」，是**这个 diff 本身语法就坏的**：`@@ -a,b +c,d @@` 里的
-行数与正文对不上。
+两次独立的实测撞上了同一个病灶：
 
-数行数正是 LLM 最不擅长的事，而**正文往往是对的**。于是模型陷在
-「read_file 431 次 / apply_patch 332 次」的循环里烧完 50 万 token，一个字节
-都没改（13 个 token 耗尽的任务，`diff_lines` 全是 0）。
+  一次 run 里 15 次 apply_patch **12 次**栽在 `corrupt patch at line N`，
+  326k tokens 修两个单行 bug（同样的活上一次只花 89k）。
 
-雪上加霜的是 aifix 给的提示：「通常说明你对文件当前内容的理解有误，请先
-read_file」—— 那是给「does not apply」的建议，对语法坏掉的补丁毫无用处，
-把模型指向了一条走不通的路。
+  qwen3-coder-flash 的 39 任务评测：`apply_patch` 被调 332 次、**失败 309
+  次**（93%），能解析的坏补丁里 **247/247 是表头行数与正文对不上 —— 100%**。
+
+`corrupt patch` 不是「上下文对不上」，是**这个 diff 语法就坏的**。数行数正是
+LLM 最不擅长的事，而**正文往往是对的**：模型陷在「read_file 431 次 /
+apply_patch 332 次」的循环里烧完 50 万 token，一个字节都没改（13 个 token
+耗尽的任务 `diff_lines` 全是 0）。
+
+答案是 git 自己的 `--recount`（`_GIT_APPLY`），它造出来就是为了这件事
+（「编辑过补丁但没调整 hunk 头」）。**曾经这里有一个手写的 `repair_diff`
+在 Python 里重算表头**，两者在下面这两份真实样本上产出完全相同的判定 ——
+四十行自己维护的代码换 git 的一个开关，不划算，所以删了。
 
 下面两份 diff 是那次评测里**模型真实产出**的（不是手写的），保留原样。
 """
-import pytest
+import subprocess
 
-from aifix.tools.patch import repair_diff
+import pytest
+from harness.sandbox.local import LocalSandbox
+from harness.tools.base import ToolError
+
+from aifix.tools.patch import ApplyPatchTool, _apply_error
 
 # 真实样本一：表头写 @@ -1,13 +1,13 @@，而正文实际是 15 个旧侧行 / 16 个新侧行
-# —— **旧侧那个 13 也是错的**。这一点写测试时我自己先按「旧侧对、只调新侧」
-# 推错了一次：正确答案只能由正文给，而那正是重算存在的理由。
+# —— **旧侧那个 13 也是错的**。注意 hunk 内部还夹着**裸空行**（前导空格丢了），
+# 那是这批坏补丁里 28% 同时具备的第二种病。
 _REAL_1 = """--- a/src/harness/state.py
 +++ b/src/harness/state.py
 @@ -1,13 +1,13 @@
@@ -64,82 +73,106 @@ _REAL_2 = """--- a/src/harness/persistence/serialize.py
 """
 
 
-def _headers(diff: str) -> list[str]:
-    return [ln for ln in diff.splitlines() if ln.startswith("@@")]
+@pytest.mark.parametrize("sample", [_REAL_1, _REAL_2], ids=["样本一", "样本二"])
+def test_git_stops_calling_these_corrupt(sample, tmp_path):
+    """**核心断言，直接对 git 跑。**
 
+    这两份补丁修表头之后**仍然会**因为上下文对不上被拒（正文本来就是模型
+    瞎写的）—— 那正是我们要的：消灭机械故障之后，剩下的报错必须是真实的
+    那一个。所以判据是「不再是 corrupt」，不是「能打上」。
 
-def test_wrong_counts_are_recomputed_from_the_body():
-    """答案由**正文**给：14 个上下文 + 1 删 + 2 增 → 旧 15 / 新 16。
-
-    模型报的是 `-1,13 +1,13`，**两侧都错**。
+    反向对照跑裸 `git apply`：不带 `--recount` 时它必须判 corrupt，否则这条
+    测试什么都没证明（样本不够坏，或者 git 的行为变了）。
     """
-    out = repair_diff(_REAL_1)
-    assert _headers(out) == ["@@ -1,15 +1,16 @@"], _headers(out)
-
-
-def test_the_hunk_context_suffix_is_preserved():
-    """`@@ ... @@ def foo():` 尾巴上那段函数名要留着 —— 它对 git 不是必需的，
-    但人读 diff 时靠它定位，扔掉等于让复盘变难。"""
-    out = repair_diff(_REAL_2)
-    assert _headers(out)[0].endswith("@@ def runstate_to_dict(s: RunState) -> dict:")
-
-
-def test_a_correct_header_is_left_alone():
-    """反向对照：本来就对的不许被改动 —— 否则这个函数在「修坏补丁」的同时
-    也在「改好补丁」，而后者是纯粹的风险。"""
-    good = ("--- a/x.py\n+++ b/x.py\n@@ -1,3 +1,4 @@\n a\n b\n+c\n d\n")
-    assert repair_diff(good) == good
-
-
-def test_no_content_is_ever_changed():
-    """**安全边界**：允许给裸空行补一个前导空格，但不许改任何内容。
-
-    顺手「修」正文等于替模型改代码，那是 apply_patch 的越权 —— 它只该判
-    「这个补丁能不能打上」，不该参与「补丁写什么」。
-
-    判据是逐行 rstrip 之后必须完全相同：补空格只影响空白，改内容一定会被抓到。
-    """
-    out = repair_diff(_REAL_1)
-    a = [ln for ln in _REAL_1.splitlines() if not ln.startswith("@@")]
-    b = [ln for ln in out.splitlines() if not ln.startswith("@@")]
-    assert len(a) == len(b)
-    for x, y in zip(a, b):
-        assert x.rstrip() == y.rstrip(), (repr(x), repr(y))
-    # 而且**只有空行**被动过
-    changed = [(x, y) for x, y in zip(a, b) if x != y]
-    assert all(x.strip() == "" for x, _ in changed), changed
-
-
-def test_single_line_hunk_shorthand_is_understood():
-    """`@@ -5 +5 @@`（省略计数）是合法写法，不能把它当坏的。"""
-    d = "--- a/x\n+++ b/x\n@@ -5 +5 @@\n-old\n+new\n"
-    assert _headers(repair_diff(d)) == ["@@ -5,1 +5,1 @@"]
-
-
-def test_garbage_is_returned_unchanged_not_crashed():
-    """认不出来的东西原样返回。
-
-    这个函数只做一件确定的事；看不懂时**闭嘴让 git 去报错**，比自作主张
-    改一版出来强 —— git 的报错至少是准的。
-    """
-    for junk in ("", "不是 diff", "--- a/x\n+++ b/x\n@@ 乱七八糟 @@\n a\n"):
-        assert repair_diff(junk) == junk
-
-
-@pytest.mark.parametrize("sample", [_REAL_1, _REAL_2])
-def test_repaired_headers_match_what_git_expects(sample, tmp_path):
-    """**真跑一次 git apply --check**，不只断言数字。
-
-    手算的行数只能证明我们理解得自洽，证明不了 git 认。这两份补丁修表头之后
-    仍然会因为「上下文对不上」被拒（正文本来就是模型瞎写的）——**这正是我们
-    要的**：修掉机械故障之后，剩下的报错必须是真实的那一个。
-    """
-    import subprocess
-
-    out = repair_diff(sample)
-    (tmp_path / "p.diff").write_text(out, encoding="utf-8")
+    (tmp_path / "p.diff").write_text(sample, encoding="utf-8")
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    res = subprocess.run(["git", "apply", "--check", "p.diff"], cwd=tmp_path,
-                         capture_output=True, text=True)
-    # 关键：不再是 corrupt patch。是别的错（文件不存在 / 上下文不匹配）都行。
-    assert "corrupt patch" not in res.stderr, res.stderr
+
+    def stderr_of(*flags):
+        return subprocess.run(["git", "apply", "--check", *flags, "p.diff"],
+                              cwd=tmp_path, capture_output=True,
+                              text=True).stderr
+
+    assert "corrupt patch" in stderr_of(), "样本不够坏，这条测试证明不了任何事"
+    assert "corrupt patch" not in stderr_of("--recount")
+
+
+def test_the_tool_actually_passes_recount(tmp_path):
+    """**接线检查**：常量定义对了但没接上，是这个项目反复吃过的亏。
+
+    check 与真正应用必须用同一组参数 —— 一个「dry run 通过、真跑失败」的
+    工具比没有 dry run 更坏。
+    """
+    from aifix.tools.patch import _GIT_APPLY
+    import inspect
+
+    assert _GIT_APPLY == ["git", "apply", "--recount"]
+    src = inspect.getsource(ApplyPatchTool.run)
+    # 两处调用都要展开 _GIT_APPLY，不能有一处写死 ["git", "apply"]
+    assert src.count("*_GIT_APPLY") == 2, src
+
+
+async def test_a_diff_without_a_trailing_newline_still_applies(tmp_path):
+    """结尾少一个 `\\n` 就被判 corrupt —— 与 `--recount` 治的是同一类问题：
+    与修复正确性无关的形式要求。模型漏掉它是常事。"""
+    (tmp_path / "calc.py").write_text("def add(a, b):\n    return a - b\n",
+                                      encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+
+    sb = LocalSandbox(workspace=str(tmp_path))
+    await sb.start()
+    try:
+        t = ApplyPatchTool(sb, test_dirs=["tests"])
+        # 注意末尾**没有**换行
+        await t.run(t.Params(diff=(
+            "--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,2 @@\n"
+            " def add(a, b):\n-    return a - b\n+    return a + b")))
+        assert "a + b" in (tmp_path / "calc.py").read_text(encoding="utf-8")
+    finally:
+        await sb.close()
+
+
+def test_the_two_failures_get_different_advice():
+    """**两种失败要给不同的建议**，混成一句会把模型指向走不通的路。
+
+    实测里模型照着「你对文件当前内容的理解有误，请先 read_file 确认」去做，
+    重读了 16 次同一个文件、grep 了 14 次，然后交出一份同样有结构问题的
+    diff —— 那句建议把它带进了死循环。而语法坏掉的补丁，再读一百遍文件也
+    不会变好。
+    """
+    malformed = _apply_error("error: corrupt patch at line 12")
+    assert "重读文件没有用" in malformed
+    assert "不用你数" in malformed          # 别让它再去数行数
+
+    context = _apply_error("error: patch does not apply")
+    assert "read_file" in context
+    assert "重读文件没有用" not in context
+
+
+@pytest.mark.parametrize("stderr", [
+    "error: corrupt patch at line 12",
+    "error: unrecognized input",
+    "error: patch fragment without header at line 3",
+])
+def test_every_malformed_marker_is_recognised(stderr):
+    """git 报「格式坏了」有好几种措辞。漏掉任何一种，那一类就会拿到
+    「请先 read_file」—— 正是把模型送进死循环的那句话。"""
+    assert "重读文件没有用" in _apply_error(stderr)
+
+
+async def test_a_test_file_patch_is_still_refused(tmp_path):
+    """`--recount` 放松的只是数数，**守卫一条都不许放松**。
+
+    反向对照：这个开关让 git 更宽容，很容易顺手以为「宽容」是整体的。
+    """
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    sb = LocalSandbox(workspace=str(tmp_path))
+    await sb.start()
+    try:
+        t = ApplyPatchTool(sb, test_dirs=["tests"])
+        with pytest.raises(ToolError, match="测试文件"):
+            await t.run(t.Params(diff=(
+                "--- a/tests/test_x.py\n+++ b/tests/test_x.py\n"
+                "@@ -1,1 +1,1 @@\n-assert False\n+assert True\n")))
+    finally:
+        await sb.close()

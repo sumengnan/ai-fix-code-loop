@@ -10,7 +10,8 @@ from harness.sandbox.local import LocalSandbox
 from harness.types import Message, Role
 
 from ..agents.detector import Diagnosis
-from ..agents.fixer import SYSTEM_PROMPT, build_initial_messages, build_registry
+from ..agents.fixer import (SYSTEM_PROMPT, build_initial_messages,
+                            build_registry, locate_hint)
 from ..agents.runner import consume
 from ..graph import AifixState, progress_of, trace_of
 from ..progress import StepReporter
@@ -162,7 +163,11 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
             model_name=cfg.fixer.model,
             price_map=cfg.price_map,
         )
-        messages = build_initial_messages(failure, diagnosis)
+        # 诊断指错文件时补上真路径。放在 sandbox.start() 之后：它要问 git
+        # 仓库里到底有哪些文件，而这是唯一有资格回答的人。
+        messages = build_initial_messages(
+            failure, diagnosis,
+            locate=await locate_hint(sandbox, adapter, diagnosis))
 
         last_guard: str | None = None
         guard_repeats = 0
