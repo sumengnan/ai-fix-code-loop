@@ -8,6 +8,7 @@
 | `results-deepseek-v4-flash-39.jsonl` | 用 `deepseek-v4-flash` 跑一轮的逐任务明细（2026-07-29，$15.97 / 1568 万 tokens） |
 | `results-qwen3-coder-flash.jsonl` | `qwen3-coder-flash`，**旧工具面**（2026-07-31）。下面那次对照的基线 |
 | `results-qwen3-coder-flash-after.jsonl` | 同一个模型、同一批任务、**新工具面**（2026-07-31） |
+| `results-qwen3-coder-flash-recount.jsonl` | 同上，但补丁重算换成 git 的 `--recount`（2026-08-01）。口径确认，见下 |
 
 ## 结果
 
@@ -16,7 +17,30 @@
 | deepseek-v4-flash        | mined | 37 | 51% (19/37, CI 36%–67%) | 27% (10/37, CI 15%–43%) | $0.4316 | 423,693 | 0 | 0 | 2 |
 | qwen3-coder-flash        | mined | 39 | 90% (35/39, CI 76%–96%) | 18% ( 7/39, CI  9%–33%) | $0.2345 | 454,424 | 0 | 1 | 0 |
 | qwen3-coder-flash-after  | mined | 39 | 92% (36/39, CI 80%–97%) | 74% (29/39, CI 59%–85%) | $0.1311 | 249,501 | 0 | 2 | 0 |
+| qwen3-coder-flash-recount| mined | 39 | 90% (35/39, CI 76%–96%) | 79% (31/39, CI 64%–89%) | $0.1241 | 238,070 | 0 | 5 | 0 |
 ```
+
+### 第三轮是一次**口径确认**，不是新结论
+
+74% 那个数是用手写的 `repair_diff`（在 Python 里从正文重算 hunk 表头）量出来的。与另一条并行开发线合并时，那四十行被 git 自己的 `--recount` 取代了 —— 当时只做过**离线对照**（两份真实坏补丁上判定完全相同），而离线对照不等于重测。
+
+第三轮把这个口径补上：同一批任务、同一个模型、同一份预算，**只换补丁重算的实现**。
+
+    repair_diff  74% (29/39, CI 59%–85%)
+    --recount    79% (31/39, CI 64%–89%)
+
+两个区间几乎完全重叠，**结论是「换实现没让它掉下去」，不是「--recount 更好」**。逐任务只有 4 个判定翻转，而且方向是一进三出：
+
+| | |
+|---|---|
+| `repair_diff` ✅ → `--recount` ❌ | `test_run_aclose_closes_inner_generator` |
+| `repair_diff` ❌ → `--recount` ✅ | `test_simple_verified_redo_failing_review_still_delivers_once` |
+| `repair_diff` ❌ → `--recount` ✅ | `test_simple_verified_revalidates_the_redo` |
+| `repair_diff` ❌ → `--recount` ✅ | `test_container_tool_result_carries_image_meta` |
+
+**两个方向都有翻转，是模型采样噪声的形态**；如果 `--recount` 真的弱一档，翻转会一边倒。按仓库拆开也印证这一点：framework 12→11、helper 17→20，两边反向。**39 个任务分不出这 5 个百分点**，别把它读成改进。
+
+那 5 个「可疑信号」查过来源，全部是 `files_outside_suspect`（补丁落在 Detector 点名的文件之外），其中 2 个同时定位未命中 —— 与第二轮那次核对到 fact 层面的结论一致：是诊断指错了文件、模型改对了地方，不是规格套利。
 
 ### 18% → 74%：一次干净的对照
 
