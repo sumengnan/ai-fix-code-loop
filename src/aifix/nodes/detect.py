@@ -13,7 +13,12 @@ from ..agents.detector import SYSTEM_PROMPT, build_prompt, parse_diagnosis
 from ..agents.runner import consume
 from ..graph import AifixState, trace_of
 from ..signals import under_dirs
+from ..snippet import around
 from .baseline import adapter_from_state
+
+# 喂几段源码。三段各二十来行 ≈ 一屏半，再多就把 traceback 挤到模型注意力的
+# 边缘了 —— 而 traceback 仍然是最强的那条证据。
+_SNIPPET_TOP = 3
 
 
 async def detect_node(state: AifixState, client: Any = None) -> dict[str, Any]:
@@ -21,7 +26,20 @@ async def detect_node(state: AifixState, client: Any = None) -> dict[str, Any]:
     cfg = state["config"]
     failure = state["_failures"][state["current"]]
     adapter = adapter_from_state(state)
-    candidates = adapter.locate_source(failure, Path(state["worktree_path"]))
+    worktree = Path(state["worktree_path"])
+    candidates = adapter.locate_source(failure, worktree)
+    # 把前几个候选的**真实源码**读出来一起喂进去。零 LLM、不多花一个回合。
+    # 在这之前 Detector 判断「根本原因是什么」时压根没见过那段代码 ——
+    # 详见 snippet.around 的模块说明。
+    #
+    # 只给前三个：候选列表可以很长，而三段各二十来行已经把单步调用的上下文
+    # 用得差不多了。排序本身是确定性的（最深的栈帧在前），截断截掉的是最不
+    # 可疑的那几个。
+    snippets: dict[int, str] = {}
+    for i, c in enumerate(candidates[:_SNIPPET_TOP]):
+        body = around(worktree, c.path, c.line)
+        if body is not None:
+            snippets[i] = body
 
     loop = AgentLoop(
         client=client or OpenAICompatibleClient(cfg.detector),
@@ -33,7 +51,8 @@ async def detect_node(state: AifixState, client: Any = None) -> dict[str, Any]:
         price_map=cfg.price_map,
     )
     with json_output():
-        outcome = await consume(loop.run(build_prompt(failure, candidates)))
+        outcome = await consume(loop.run(
+            build_prompt(failure, candidates, snippets)))
 
     # 候选里有没有**非测试**文件，决定了 suspect_file 是推断还是猜测。
     # 一个源码候选都没有时模型只能按包名猜路径，猜错是常态 —— 下游的

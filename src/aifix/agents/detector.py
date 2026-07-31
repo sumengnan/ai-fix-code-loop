@@ -30,8 +30,15 @@ class Diagnosis(BaseModel):
     confidence: Literal["high", "medium", "low"]
 
 
-def build_prompt(failure: Failure, candidates: list[SourceCandidate]) -> str:
+def build_prompt(failure: Failure, candidates: list[SourceCandidate],
+                 snippets: dict[int, str] | None = None) -> str:
     """候选的来源必须写在行里，不能只列路径。
+
+    `snippets`：候选下标 → 那个位置周围的**真实源码**（由 snippet.around
+    读出来，零 LLM）。在它出现之前，Detector 判断「根本原因是什么」时看到的
+    只有路径、行号和 traceback —— 那段代码它从未见过，`suspect_lines` 更是
+    只能编。而编出来的行号会原样进入 Fixer 的开场白，把它的第一步引向一个
+    具体而错误的位置。代码就在磁盘上，读它不花一个回合也不花一分钱。
 
     纯断言失败下候选来自测试文件的 import（`SourceCandidate.origin`），证据
     比栈帧弱一档：「测试 import 了这个模块」不等于「缺陷在这个模块」。不标出
@@ -41,18 +48,29 @@ def build_prompt(failure: Failure, candidates: list[SourceCandidate]) -> str:
     `path` 一律照原样给出（相对 repo 根）。让模型自己改写路径形式，就是把
     定位准确率变成书写风格的函数 —— 那个坑记在 eval/runner.locate_hit 里。
     """
+    snippets = snippets or {}
     if candidates:
-        cand_text = "\n".join(
-            f"  {i + 1}. {c.path}:{c.line}  在 {c.frame or '?'}()"
-            f"{'' if c.origin == 'traceback' else '  ← 测试 import 的模块，非栈帧'}"
-            for i, c in enumerate(candidates))
+        rows: list[str] = []
+        for i, c in enumerate(candidates):
+            rows.append(
+                f"  {i + 1}. {c.path}:{c.line}  在 {c.frame or '?'}()"
+                f"{'' if c.origin == 'traceback' else '  ← 测试 import 的模块，非栈帧'}")
+            if i in snippets:
+                rows.append(snippets[i])
+        cand_text = "\n".join(rows)
     else:
         cand_text = "  （未能从栈帧定位到 repo 内的源码）"
+    lines_hint = (
+        "suspect_lines 请落在上面源码里**真实存在**的行号上"
+        if snippets else
+        "看不到源码时 suspect_lines 请填 null —— 编一个行号比不给更糟")
     return (
         f"失败用例：{failure.test_id}\n"
         f"断言信息：{failure.message}\n\n"
-        f"嫌疑位置（按可疑度排序，最深的栈帧在前）：\n{cand_text}\n\n"
-        f"suspect_file 请从上面的路径里原样选一条，不要改写形式。\n\n"
+        f"嫌疑位置（按可疑度排序，最深的栈帧在前；`>` 标出的是栈帧指向的那一行）："
+        f"\n{cand_text}\n\n"
+        f"suspect_file 请从上面的路径里原样选一条，不要改写形式。\n"
+        f"{lines_hint}。\n\n"
         f"完整 traceback：\n{failure.trace}\n")
 
 
