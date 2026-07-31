@@ -63,10 +63,12 @@ async def test_reproduce_registry_has_no_write_tools(tmp_path):
     reg = build_reproduce_registry(LocalSandbox(workspace=str(tmp_path)),
                                    PytestAdapter())
     names = {t.name for t in reg.tools()}
-    assert "apply_patch" not in names
+    # 白名单，等号：**每加一条写入路径都得在这里过一次**。2026-07-31 加了
+    # edit_file，如果这条断言只写「apply_patch not in names」，新路径就会
+    # 悄悄溜进 reproducer 的能力面 —— 而上面那整段推理会在无人察觉时失效。
+    assert names == {"read_file", "read_symbol", "list_files", "grep"}
+    assert "apply_patch" not in names and "edit_file" not in names
     assert "run_tests" not in names
-    # 反向对照：不是因为注册表恰好是空的
-    assert "read_file" in names and "grep" in names
 
 
 # ---------------------------------------------------------------- 红检

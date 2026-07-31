@@ -30,6 +30,7 @@ from .agents.runner import consume
 from .config import AifixConfig
 from .nodes.baseline import file_level_ids, run_scoped
 from .tools.read import ReadFileTool
+from .tools.read_symbol import ReadSymbolTool
 from .tools.search import GrepTool
 
 
@@ -123,11 +124,11 @@ def _route(config: AifixConfig):
 
 def build_reproduce_registry(sandbox: Sandbox,
                              adapter: ProjectAdapter) -> ToolRegistry:
-    """reproducer 的能力面：**只读**，三个工具。
+    """reproducer 的能力面：**只读**，四个工具。
 
-    没有 apply_patch：复现测试由确定性代码写下去，不经过工具面——这正是
-    「不许改测试文件」那道守卫不用为 M6 改一行的原因。给了 apply_patch，
-    它就能直接改产品代码，而那条路径上一道守卫都没有。
+    没有 apply_patch、也没有 edit_file：复现测试由确定性代码写下去，不经过
+    工具面——这正是「不许改测试文件」那道守卫不用为 M6 改一行的原因。给了
+    任何一条写入路径，它就能直接改产品代码去迎合自己写的测试。
 
     没有 run_tests：让它自己跑测试，「这条测试红不红」的判定权就落到了模型
     手里。红检是这一步唯一的确定性证据，不能交出去。
@@ -136,6 +137,7 @@ def build_reproduce_registry(sandbox: Sandbox,
     """
     reg = ToolRegistry()
     reg.register(ReadFileTool(sandbox))
+    reg.register(ReadSymbolTool(sandbox))
     reg.register(ListFilesTool(sandbox))
     reg.register(GrepTool(sandbox))
     return reg
