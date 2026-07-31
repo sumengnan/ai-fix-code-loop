@@ -13,13 +13,20 @@ _DIAG = Diagnosis(suspect_file="calc.py", suspect_lines=(1, 2),
                   confidence="high")
 
 
-async def test_registry_exposes_exactly_five_tools(buggy_repo):
+async def test_registry_exposes_exactly_the_whitelisted_tools(buggy_repo):
+    """能力面是**白名单**：这里写死一个集合，多一个少一个都要红。
+
+    2026-07-31 加了两个：`edit_file`（首选的修改方式，不用数 diff 行号）与
+    `read_symbol`（按名字读完整定义）。加工具是扩大攻击面，所以这条断言
+    必须是等号而不是包含 —— 将来谁顺手注册一个工具，得先在这里说明白。
+    """
     sb = LocalSandbox(workspace=str(buggy_repo))
     await sb.start()
     try:
         reg = build_registry(sb, PytestAdapter(), known_ids={_FAILURE.test_id})
         assert {t.name for t in reg.tools()} == {
-            "read_file", "list_files", "grep", "apply_patch", "run_tests"}
+            "read_file", "read_symbol", "list_files", "grep",
+            "edit_file", "apply_patch", "run_tests"}
     finally:
         await sb.close()
 

@@ -19,7 +19,8 @@ from .baseline import adapter_from_state
 
 _EMPTY_FEEDBACK = (
     "你没有对任何文件做出修改。只说「已修复」是无效的 —— "
-    "请先用 read_file 确认文件当前的真实内容，再用 apply_patch 提交具体改动。")
+    "请先用 read_symbol 或 read_file 确认那段代码当前的真实内容，"
+    "再用 edit_file 把它换成改好的样子。")
 
 # 改动落在被 .gitignore 盖住的路径上时**不能**发上面那句：模型确实改了文件，
 # 说它「没有对任何文件做出修改」是一句假话，而模型照这句话去做只会再改一次
@@ -56,8 +57,10 @@ async def _diff_lines(sandbox: LocalSandbox, touched: set[str]) -> int:
 
     只统计 `touched` 里的路径。worktree 里跑过测试会留下一堆未跟踪产物
     （__pycache__、覆盖率文件、日志），把它们算进来等于让 empty_diff 这道
-    守卫从此永不触发。touched 是 ApplyPatchTool 的记账，是 agent 唯一的修改
-    手段 —— 与 Worktree.commit 「绝不用 git add -A」是同一条理由、同一份名单。
+    守卫从此永不触发。touched 是**所有写入工具**（`edit_file` 与 `apply_patch`）
+    的共同记账 —— agent 只能经由它们改文件，与 Worktree.commit 「绝不用
+    git add -A」是同一条理由、同一份名单。加写入路径而忘了传 touched，这道
+    守卫会把一次成功的修复判成 empty_diff。
 
     `--exclude-standard` 的代价：被 .gitignore 盖住的新文件恒计 0 行。这一条
     是**有意**保留的 —— 那个文件交付不了（`git add` 对被忽略的路径直接以 1

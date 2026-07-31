@@ -104,8 +104,10 @@ class Worktree:
 
         绝不用 `git add -A`：worktree 里跑测试会产生未跟踪产物
         （__pycache__、覆盖率文件、日志……），全扫进去会污染交付分支。
-        paths 来自 ApplyPatchTool 的记账 —— 它是 agent 唯一的修改手段，
-        知道自己动过哪些文件。
+        paths 来自**写入类工具**的记账（`edit_file` 与 `apply_patch` 共用同
+        一个 `touched` 集合）—— agent 只能经由它们改文件，所以「动过哪些」是
+        已知的。加一条写入路径而忘了把 `touched` 传进去，后果不是报错：那次
+        改动不进交付分支，而报告照写「已修复」。
 
         失败必须抛。`git add -- <匹配不到的路径>` 退出码是 128、什么都不暂存，
         随后 `git commit` 因无内容以 1 退出 —— 两条都被忽略的话，报告照写

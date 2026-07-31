@@ -42,10 +42,24 @@ def test_ordinary_patch_failure_is_not_a_violation():
 
 
 def test_errors_from_other_tools_are_ignored():
-    """只有 apply_patch 能越界改文件；别的工具报错不算。"""
+    """只有写入类工具能越界改文件；别的工具报错不算。"""
     evs = [_started("1", "read_file"),
            _finished("1", "路径逃逸工作区：../../etc/passwd")]
     assert count_violations(evs)["path_escape"] == 0
+
+
+@pytest.mark.parametrize("tool", ["apply_patch", "edit_file"])
+def test_every_write_path_is_counted(tool):
+    """**每一条能写文件的路径都要被数到。**
+
+    edit_file 是第二条写入路径（2026-07-31）。守卫在 tools/guard.py 里是
+    共用的，但统计是另一套代码 —— 共用守卫不会自动让它被数到。漏掉一条的
+    后果不是报错，是这一列悄悄变小：模型看起来更听话了，而它只是换了条路
+    去撞墙。
+    """
+    evs = [_started("1", tool),
+           _finished("1", "拒绝修改测试文件：tests/test_x.py。请修改源码……")]
+    assert count_violations(evs)["test_edit"] == 1
 
 
 def test_successful_calls_are_not_counted():
@@ -108,7 +122,12 @@ def test_sentinel_loop_abort_wording_matches_upstream():
 
 
 def test_sentinel_test_edit_wording_matches_our_own_tool():
-    """对照组：这一条由本仓库的 patch.py 产生，改动在我们自己手上。"""
-    from aifix.tools import patch
+    """对照组：这一条由本仓库的 guard.py 产生，改动在我们自己手上。
 
-    assert _TEST_EDIT in inspect.getsource(patch)
+    措辞原先在 patch.py 里；`edit_file` 加进来之后守卫抽到了 tools/guard.py，
+    两条写入路径共用一份 —— 否则迟早有一条漏掉其中一项检查，而漏掉的后果
+    是静默的：报告仍然显示绿，只是绿的理由变成了「模型把测试改了」。
+    """
+    from aifix.tools import guard
+
+    assert _TEST_EDIT in inspect.getsource(guard)

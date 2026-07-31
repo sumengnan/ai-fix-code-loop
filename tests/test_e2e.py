@@ -71,6 +71,36 @@ async def test_red_in_green_out(buggy_repo):
     assert "1 / 1" in state["report_md"]
 
 
+async def test_red_in_green_out_via_edit_file(buggy_repo):
+    """同一条端到端，走**另一条写入路径**。
+
+    `edit_file` 是 2026-07-31 加的首选修改手段。上面那条只证明了 diff 那条
+    路通 —— 而交付依赖 `touched` 记账、`_diff_lines` 依赖同一份名单、
+    `Worktree.commit` 只 `git add` 记过账的路径。这几处任何一处漏接线，
+    结果都不是报错，而是「模型改对了，分支上却什么都没有，报告照写已修复」。
+    只有真跑一遍才看得出来。
+    """
+    fixer = _Scripted([
+        _tool("edit_file", json.dumps({
+            "path": "calc.py",
+            "old_text": "    return a - b        # bug: 应为 a + b",
+            "new_text": "    return a + b",
+        })),
+        _text("已修复"),
+    ])
+    original = (buggy_repo / "calc.py").read_text(encoding="utf-8")
+
+    state = await run_once(buggy_repo, AifixConfig(), run_id="e2e-edit",
+                           detector_client=_Scripted([_text(_DIAG)]),
+                           fixer_client=fixer)
+
+    assert [r["verdict"] for r in state["results"]] == ["better"]
+    assert (buggy_repo / "calc.py").read_text(encoding="utf-8") == original
+    show = subprocess.run(["git", "show", "aifix/e2e-edit:calc.py"],
+                          cwd=buggy_repo, capture_output=True, text=True)
+    assert "a + b" in show.stdout, show.stdout or show.stderr
+
+
 async def test_green_repo_reports_no_work(buggy_repo, fixed_source):
     (buggy_repo / "calc.py").write_text(fixed_source, encoding="utf-8")
     subprocess.run(["git", "commit", "-qam", "fix"], cwd=buggy_repo, check=True)
