@@ -88,8 +88,7 @@ build-backend = "hatchling.build"
 packages = ["src/aifix"]
 
 # 明确列出来，而不是靠 hatchling 的默认（「除 VCS 忽略之外全收」）：那个默认
-# 会把 `.claude/`、`.idea/`、`.superpowers/` 这些**只对本机开发有意义**的目录
-# 一起塞进源码包。tests 与 docs 是有意留下的 —— 装了源码包的人要能自己跑一遍
-# 验收；evals 只有 100K，而它是这个项目「拿数据说话」那部分的凭据。
+# 会把 `.claude/`、`.idea/` 这些**只对本机开发有意义**的目录一起塞进源码包。
+# tests 与 docs 是有意留下的 —— 装了源码包的人要能自己跑一遍验收。
 [tool.hatch.build.targets.sdist]
-include = ["/src", "/tests", "/docs", "/evals", "/README.md"]
+include = ["/src", "/tests", "/docs", "/README.md"]

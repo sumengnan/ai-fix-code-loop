@@ -348,7 +348,7 @@ aifix 自带一套评测：从 git history 里挖出**真实的「红转绿」�
 那一部分。
 
 完整方法、四轮明细、以及两处**作者自己读错然后更正**的记录，见
-[docs/evaluation.md](https://github.com/sumengnan/aifix-code/blob/main/docs/evaluation.md) 和 [evals/README.md](https://github.com/sumengnan/aifix-code/blob/main/evals/README.md)。
+[docs/evaluation.md](https://github.com/sumengnan/aifix-code/blob/main/docs/evaluation.md)。
 
 ---
 

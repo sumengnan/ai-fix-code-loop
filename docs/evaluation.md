@@ -224,7 +224,9 @@ same_file("other/mine.py",      "src/aifix/eval/mine.py")   # False
 ## 四轮真实读数
 
 39 个任务，来自两个真实仓库（ai-harness-framework 14 个 + ai-learning-helper 25 个）。
-明细在 [`evals/`](../evals/)。
+
+> **逐任务的原始 jsonl 已不在仓库里** —— `evals/` 于 2026-08-01 移除。下面的数字是
+> 当时那四轮的读数，要取回原始记录：`git checkout ea85ae8 -- evals/`。
 
 | 模型 | 任务数 | 定位准确率 | 修复成功率 | 平均成本 | 平均 tokens |
 |---|---|---|---|---|---|
@@ -437,6 +439,5 @@ helper 的 65 秒。
 
 ## 延伸阅读
 
-- [`evals/README.md`](../evals/README.md) —— 四轮的原始记录与逐任务翻转明细
 - [cli.md](cli.md#aifix-eval) —— `mine` / `mutate` / `eval` / `eval-report` 的完整参数
 - [safety.md](safety.md#9-静态信号守卫查行为这一层查合理性) —— 三类静态信号是怎么算的
