@@ -1,8 +1,42 @@
 [project]
-name = "aifix"
+# **发行名与 import 名刻意不同**，这不是笔误：
+#   发行名（pip install aifix-code）—— `aifix` 在 PyPI 上已被另一个无关的包
+#                                      占用（0.2 版，2026-08-01 查），拿不到。
+#   import 名（import aifix）        —— 保持不变。改它要动每一个文件的每一行
+#                                      import，换不来任何东西。
+#   命令名（aifix run ...）          —— 保持不变。issue 上的 `/aifix` 命令、
+#                                      产物目录 `.aifix/`、全部文档都是这个词。
+# 与 scikit-learn → sklearn 同一个形状。
+name = "aifix-code"
 version = "0.1.0"
-description = "测试失败驱动的自我改进 agentic loop"
+description = "测试失败驱动的自我修复 agentic loop：红着的测试进去，一条验证过的补丁分支出来"
+readme = "README.md"
 requires-python = ">=3.11"
+authors = [{ name = "sumengnan" }]
+# PEP 639 的写法（SPDX 表达式 + 许可证文件清单），需要 Metadata-Version 2.4。
+# 不写的话 PyPI 页面显示「许可证未知」，而在法律上那等于「保留所有权利」——
+# 别人不敢用，也过不了公司的合规检查。
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["agent", "llm", "pytest", "maven", "test-repair", "langgraph",
+            "code-repair", "自动修复", "agentic"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Natural Language :: Chinese (Simplified)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    # 刻意**不列** Windows：venv 探测里那条 Windows 分支从没在真机上验证过
+    # （见 adapters/pytest_adapter.py 那段注释），列上去就是一句没有依据的话。
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Utilities",
+]
 dependencies = [
     # 0.0.2 起提供 aifix 依赖的两处能力：LocalSandbox 接管既有目录、
     # AgentLoop.run 接收初始消息。
@@ -18,6 +52,12 @@ dependencies = [
     "langgraph>=1.2",
     "langgraph-checkpoint-sqlite>=3.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/sumengnan/aifix-code"
+Repository = "https://github.com/sumengnan/aifix-code"
+Documentation = "https://github.com/sumengnan/aifix-code/tree/main/docs"
+Issues = "https://github.com/sumengnan/aifix-code/issues"
 
 [project.scripts]
 aifix = "aifix.cli:main"
@@ -46,3 +86,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aifix"]
+
+# 明确列出来，而不是靠 hatchling 的默认（「除 VCS 忽略之外全收」）：那个默认
+# 会把 `.claude/`、`.idea/`、`.superpowers/` 这些**只对本机开发有意义**的目录
+# 一起塞进源码包。tests 与 docs 是有意留下的 —— 装了源码包的人要能自己跑一遍
+# 验收；evals 只有 100K，而它是这个项目「拿数据说话」那部分的凭据。
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/docs", "/evals", "/README.md"]

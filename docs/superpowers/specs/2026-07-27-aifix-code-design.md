@@ -1,4 +1,4 @@
-# ai-fix-code-loop 设计规格
+# aifix-code 设计规格
 
 日期：2026-07-27
 状态：已评审，待实现
@@ -57,7 +57,7 @@ ai-harness-framework（已发布，github.com/sumengnan/ai-harness-framework）
   模型接入 · 工具循环 · 打转检测 · 预算 · 快照 · 审批 · 事件流 · 沙箱抽象
         ▲ 依赖（只装核心 4 个依赖，不要 [all]）
         │
-ai-fix-code-loop
+aifix-code
   LangGraph 状态图 · Detector/Fixer · 项目适配器 · 三态判定 · worktree 交付 · 评测
 ```
 
@@ -515,7 +515,7 @@ if consecutive_failures >= config.consecutive_failure_limit:   # 默认 3
 ### 目录树
 
 ```
-ai-fix-code-loop/
+aifix-code/
 ├── pyproject.toml
 ├── src/aifix/
 │   ├── cli.py              aifix run / eval / replay / mine

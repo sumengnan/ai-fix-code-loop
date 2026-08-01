@@ -8,7 +8,7 @@
 
 **技术栈：** Python ≥3.11 · `ai-harness-framework` 0.0.2 · pydantic v2 · asyncio · pytest
 
-**规格：** `docs/superpowers/specs/2026-07-27-ai-fix-code-loop-design.md`（§9 评测、§13 M3）
+**规格：** `docs/superpowers/specs/2026-07-27-aifix-code-design.md`（§9 评测、§13 M3）
 **前置：** M2 已完成并合并（`main` @ 163 passed）
 
 ## 范围拆分
@@ -867,7 +867,7 @@ uv run pytest tests/test_trace_wiring.py -q -k "traceback"
 
 - [ ] **步骤 5：同步规格**
 
-把规格 `docs/superpowers/specs/2026-07-27-ai-fix-code-loop-design.md` §8 表格里的
+把规格 `docs/superpowers/specs/2026-07-27-aifix-code-design.md` §8 表格里的
 
 ```
 | `aifix.locate_hit` | detect | `suspect_file` 是否命中候选——§9 直接取用 |

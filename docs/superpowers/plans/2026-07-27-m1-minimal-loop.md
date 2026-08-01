@@ -8,7 +8,7 @@
 
 **技术栈：** Python ≥3.11 · `ai-harness-framework` ≥0.0.1 · `langgraph` ≥1.2 · `langgraph-checkpoint-sqlite` ≥3.1 · pydantic v2 · pytest + pytest-asyncio · uv
 
-**规格：** `docs/superpowers/specs/2026-07-27-ai-fix-code-loop-design.md`
+**规格：** `docs/superpowers/specs/2026-07-27-aifix-code-design.md`
 
 ## 与规格的偏差（已确认）
 

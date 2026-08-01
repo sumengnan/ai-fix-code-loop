@@ -8,7 +8,7 @@
 
 **技术栈：** Python ≥3.11 · `ai-harness-framework` 0.0.2（PyPI）· `langgraph` 1.2 · `langgraph-checkpoint-sqlite` 3.1 · OpenTelemetry · pytest
 
-**规格：** `docs/superpowers/specs/2026-07-27-ai-fix-code-loop-design.md`
+**规格：** `docs/superpowers/specs/2026-07-27-aifix-code-design.md`
 **前置：** M1 已完成并合并（`main` @ 94 passed）
 
 ## 起点：M1 遗留的已知隐患
