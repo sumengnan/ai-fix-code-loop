@@ -6,6 +6,42 @@
 
 ---
 
+## 跑的时候看得见什么
+
+一次真跑是分钟级起步（baseline 一次全量、每个 failure 两次模型调用、每轮 verify 再一次全量）。进度走 **stderr**，报告走 **stdout** —— `aifix run . > report.md` 是最常见的用法，存出来的文件顶上不该粘着几十行进度。`--quiet` 关掉进度（只在你连 stderr 一起收进日志时才需要）。
+
+```
+aifix run a06f346e · 适配器 pytest · 分支 aifix/a06f346e
+baseline：14 个用例，2 个红的（1s）
+[1/2] tests/test_cart.py::test_排行_按单品总价降序
+      第 1/3 轮
+      诊断：src/cart.py，无源码锚点  1,002 tokens
+      ✓ 第 1 步 read_file  tests/test_cart.py → 87 行
+      ✗ 第 2 步 read_file  src/cart.py → [Errno 2] No such file or directory: '…/src/cart.py'
+      ✓ 第 3 步 grep  /def most_expensive/ → 1 处匹配
+      ✓ 第 4 步 list_files  . → 7 项
+      ✓ 第 5 步 read_file  src/shopcart/cart.py → 56 行
+      ✓ 第 6 步 apply_patch  src/shopcart/cart.py → +1 -1
+      ✓ 第 7 步 run_tests  test_排行_按单品总价降序 → 1 passed in 0.04s
+      改动：src/shopcart/cart.py（2 行）
+      验证：已修复（1s）
+[2/2] …
+完成：修复 2/2 · 35,982 tokens · 成本未知
+```
+
+> 这段的工具行、诊断、判定、token 数全部来自一次真跑的 `events.jsonl` / `facts.jsonl`（demo 仓库，run `a06f346e`），用当前的渲染器重放出来；只有几个耗时括号是重放时补的占位。那次跑在 `edit_file` 加进来之前，所以写入走的是 `apply_patch`。
+
+几条不显然的取舍：
+
+- **绿勾 / 红叉在工具名前面，一列对齐。** 跟在名字后面的话工具名长短不一，勾和叉会散落在各个列上，而「哪一步栽了」是这几十行里唯一重要的问题。判据是 `ToolResult.is_error`，**不是退出码** —— `run_tests` 报「1 failed」是它成功跑完的结果，按退出码判会让屏幕上出现一片红叉而模型正在正常工作，真正的失败（守卫拒绝、补丁打不上）反倒淹没在里面。
+- **勾还是叉只有工具跑完才知道，而 `run_tests` 一跑几十秒。** 那几十秒不能是空屏：终端上先印一行「运行中…」，跑完用 `\r` 就地重写成带标记的那一行，最终屏幕上仍是一行。**重定向到文件时反过来** —— 开始时一个字不印，因为 `\r` 在文件里不生效，会凭空多出二十几行残句，而那时也没人盯着屏幕看。颜色同理，ANSI 码只在 tty 上发。
+- **失败原因不截断**，放不下就换行接着写（最多 5 行）；成功那行截掉无所谓。这条是被真事逼出来的：`✗ apply_patch → 补丁无法应用（git apply --check 失败）：error:…` —— 省略号后面正是 `corrupt patch at line 10`，也就是那次失败的全部信息量，而它被一句样板话挤掉了。
+- **「诊断：… 无源码锚点」**那半句是在说：这次定位是模型按包名猜的，traceback 里根本没有产品代码的栈帧（`locate_source` 返回 0 个候选）。它指错文件时，那不是模型笨。对应的 fact 是 `suspect_unanchored`。
+
+屏幕上的东西一条都不是唯一副本 —— 同样的内容按结构落在 `events.jsonl` 里，`aifix replay` 随时能重放。进度是给等待中的人看的，不是数据源。
+
+---
+
 ## 产物布局
 
 每次 run 往 `<repo>/.aifix/runs/<run_id>/` 落三份东西：
@@ -17,7 +53,7 @@
 └── report.md       渲染给人看的报告
 ```
 
-run 期间这里还有一个 `tree/`（agent 的 worktree），run 结束时被删掉。开了 `enable_checkpoint` 的话另有一个 `checkpoint.sqlite`。
+run 期间这里还有一个 `tree/`（agent 的 worktree），run 结束时被删掉。开了 `enable_checkpoint` 的话另有一个 `checkpoint.sqlite`。agent 停下来问了问题时多一份 `pending.json`（见下面[「它问了你一个问题」](#它问了你一个问题)）。
 
 **事实与事件分开落盘**，这是一条数据契约而不是排版偏好：事实是结论，事件是过程；报告是渲染，事实是数据。跨 run 的轨迹表只能从事实取，不能拿正则去解自己渲染的 markdown —— 报告改一个字，那几列就静默变成 `NULL`，而聚合查询照跑不误、给出的每个数都是「看着正常」的错数。
 
@@ -34,6 +70,46 @@ run 期间这里还有一个 `tree/`（agent 的 worktree），run 结束时被�
 ```
 
 failure 级的事实还带 `failure` 与 `attempt` 两个字段，那是它的**归属**。
+
+---
+
+## 退出码：这次 run 到底跑成没有
+
+在流水线里，`aifix run || 报警` 的价值全在这一位数字上。
+
+| 退出码 | 什么情况 |
+|---|---|
+| **0** | 正常收场 —— 包括「修好了 0 个」和「预算耗尽」。活干到钱花完为止，结论仍然可信 |
+| **1** | 这次 run **没跑成**：`abort_kind` 落在 `crash` / `collect` / `model` / `preflight` 四种之一 |
+
+四种之外的中止（`tokens` / `usd` / `wall` 预算耗尽、`needs_input`）走 0。
+
+这份名单只有一份（`cli._FAILED_RUN_KINDS`），`run` 与 `answer` 共用 —— 各写各的话，下次加一种中止必然只改一处。**每加一种中止都要列进来**：漏掉的后果不是报错，是那一类静默退 0。preflight 就这么漏了一整轮（2026-08-01 的功能巡检才撞出来）：`aifix run /打错的/路径` 印一句「中止」然后退 0，流水线一声不吭把它读成成功，而它一个用例都没跑过。
+
+同一条洁癖延伸到别的子命令：`replay` 找不到 run、`stats` 还没灌过库、`eval-report` 拿到一个不存在的路径，都是**一句人话 + 退出码 1**，不是一段 traceback。诊断工具自己吐调用栈，等于让人在查问题的时候先查你。
+
+---
+
+## 它问了你一个问题
+
+agent 判定「读多少代码都推不出来」时会停下来提问（`ask_user`，只在有人能回答的场合注册）。那一轮的改动**当场回滚** —— 模型是在声明「我不知道什么才算对」的同一轮里做的改动，没有任何人看过它们。
+
+run 以 `abort_kind = "needs_input"` 收尾（退出码 **0**，这不是故障），问题落在两处：报告里，以及 `.aifix/runs/<run_id>/pending.json`。
+
+```json
+{"run_id": "…", "repo": "/path/to/repo", "test_id": "tests/…::test_x",
+ "question": "空购物车时 most_expensive() 应该：",
+ "options": ["返回 None（当前行为）", "抛 ValueError"]}
+```
+
+带着答案重跑：
+
+```bash
+aifix answer 1                 # 默认取这个仓库最近一次待答的 run
+aifix answer 2 /path/to/repo --run-id 230356cb
+```
+
+**是重新跑一遍，不是从断点继续。** issue 那条路上 Actions 的 job 一次性，容器连磁盘一起消失，根本没有断点可恢复；两条入口用同一套语义，才不会各错各的。issue 那边的载荷存在状态评论的隐藏标记里，**schema 与 `pending.json` 逐字相同**（`src/aifix/pending.py`）—— 各存各的话，「选项编号从 0 还是从 1 数」这种事会在两条路上分叉，而分叉的表现是「人回答了 2，机器按 3 去改」：不报错、不崩溃，只是改错了地方。
 
 ---
 

@@ -24,7 +24,7 @@
 
 ```mermaid
 flowchart TD
-    P[preflight<br/>探测适配器 · 工作区是否干净] -->|abort| R
+    P[preflight<br/>解释器 · 适配器 · 工作区 · 模型端点] -->|abort| R
     P --> B[baseline<br/>跑一次全量，产出失败队列]
     B -->|全绿 / 已中止| R
     B --> T{取下一个 failure<br/>检查预算}
@@ -58,17 +58,20 @@ flowchart TD
 
 ## 节点逐个说
 
-### `preflight` — 零 LLM
+### `preflight` — 零 LLM（外加一次极小的模型调用）
 
-`src/aifix/nodes/preflight.py`，53 行。
+`src/aifix/nodes/preflight.py`，102 行。
 
 - 校验测试解释器：`AIFIX_TEST_PYTHON` 显式配了一个不可执行的路径就当场中止。放在这里而不是留给 baseline，是因为到了那一步失败的表现是「没写出 JUnit 报告」，中止消息会说「测试进程没能正常跑完」—— 一句指向**目标项目**的话，而真相是 aifix 的配置写错了
 - 探测适配器：走 `baseline.detect_adapter`，**全项目唯一的探测入口**
 - 确认主工作区干净：`delivery.ensure_clean`，只看**已跟踪**文件（`git status --porcelain --untracked-files=no`）
+- 探一次模型端点（`probe_model`，在 `run_once` 里调，非 `--dry-run` 时才跑）：发一个 `ping`、只读第一个 chunk 就断开。要确认的是**连得上、认得出凭据**，不是模型会说什么
 
 只看已跟踪文件是有意的：worktree 从 HEAD 创建，主工作区的 `__pycache__`、`.venv`、编辑器临时文件根本进不去 agent 的工作区，为它们中止会让任何跑过一次测试的项目直接用不了这个工具。而已跟踪文件的修改必须拦 —— baseline 从 HEAD 算出，工作区另有改动的话，算出来的失败集合和用户眼前看到的对不上。
 
-任一不满足即 `abort`，直接跳到 `report`。
+端点探针与解释器校验是同一条理由的两次应用：**能在一秒内确定的前提，不该拖到几分钟后以别人的面目暴露。** 不探的话，端点不通的表现是每一轮都修不好 → 重试到上限 → 连续失败熔断 → 报告写「连续 N 个 failure 均未修复，疑似系统性问题」—— 跑了几十分钟，最后给出一句指错方向的诊断，而真相是 key 配错了。探的是 **fixer** 那条路由：detector 可以配成另一个端点，但真正干活也真正花钱的是 fixer，而 detector 不通时本来就有「诊断解析失败」的降级兜底。
+
+任一不满足即 `abort`，直接跳到 `report`。**每条中止路径都要带上 `abort_kind`**（`PREFLIGHT_ABORT_KIND` / `MODEL_ABORT_KIND`）—— 退出码按 kind 判，漏写的后果是静默退 0，见[诊断 · 退出码](diagnostics.md#退出码这次-run-到底跑成没有)。
 
 ### 建 worktree 与 trace（在 `run_once` 里，不是节点）
 
@@ -106,7 +109,7 @@ flowchart TD
 
 ### `detect` — 模型路由一
 
-`src/aifix/nodes/detect.py`，55 行。
+`src/aifix/nodes/detect.py`，94 行。
 
 - 客户端：`OpenAICompatibleClient(cfg.detector)`
 - 工具面：**空的 `ToolRegistry()`** —— 模型必然一步出文本
@@ -125,7 +128,7 @@ flowchart TD
 
 ### `fix` — 模型路由二
 
-`src/aifix/nodes/fix.py`，245 行。
+`src/aifix/nodes/fix.py`，312 行。
 
 - 客户端：`OpenAICompatibleClient(cfg.fixer)`
 - 沙箱：`LocalSandbox(workspace=worktree_path)`
@@ -139,7 +142,7 @@ flowchart TD
 
 ### `verify` — 零 LLM，系统里唯一有资格说「修好了」的地方
 
-`src/aifix/nodes/verify.py`，204 行。
+`src/aifix/nodes/verify.py`，224 行。
 
 1. 跑一次全量
 2. **过滤抖动**：只在出现新失败时触发重跑，且只重跑那几个用例。成本近似为零，却能挡掉绝大部分因抖动导致的误回滚 —— 把一个本来正确的补丁滚掉，是这个系统最昂贵的错误
@@ -155,7 +158,7 @@ flowchart TD
 
 ### `report` — 零 LLM
 
-`src/aifix/nodes/report.py`，137 行。渲染 markdown，落盘到 `<artifact_dir>/report.md`，同时写进 `state["report_md"]`。
+`src/aifix/nodes/report.py`，175 行。渲染 markdown，落盘到 `<artifact_dir>/report.md`，同时写进 `state["report_md"]`。
 
 一个都没修好时**不给合并命令** —— 那条分支与 HEAD 逐字相同，`git merge` 是在邀请用户去合一个空分支。
 

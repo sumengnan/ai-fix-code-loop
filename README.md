@@ -83,7 +83,7 @@ uv run aifix run /path/to/your/repo --budget 0.50
 | **进程** | 测试进程的 cwd 锁在 worktree 里 |
 | **git** | 改动发生在 `.aifix/runs/<run_id>/tree` 的独立 worktree，交付物是一条分支。主工作区不可达 |
 
-加上七道守卫（空 diff、巨型 diff、改测试文件、回归回滚、flaky 过滤、连续失败熔断、守卫连撞放弃）和三层预算。
+加上八道守卫（改测试文件、空 diff、巨型 diff、守卫连撞放弃、回归回滚、flaky 过滤、baseline 全是收集错误、连续失败熔断）和三层预算。
 
 **成本闸的契约要说清楚**：是「**越线之后不再发起新的模型调用**」，**不是**「绝不超支」。成本只有在调用返回后才知道，所以最后那一次必然已经花掉。超支上界是可推导的，写在 `--help` 里。
 
@@ -185,7 +185,17 @@ M3 的真实模型验收里，探针任务的断言是 `add(1,1)==2 and add(1,1)
 
 ## 出了问题怎么查
 
-每次 run 都在 `.aifix/runs/<run_id>/` 落三份东西：`events.jsonl`（模型每一步看到什么、决定做什么）、`facts.jsonl`（领域判断的结论）、`report.md`。
+跑的时候屏幕上就有东西看 —— 进度走 stderr（报告走 stdout，`aifix run . > report.md` 存出来的文件顶上不会粘着进度）。模型每调一次工具印一行，**成功绿勾、失败红叉**，后面跟着它对什么做了这件事、结果如何：
+
+```
+      ✓ 第 5 步 read_file  src/shopcart/cart.py → 56 行
+      ✗ 第 6 步 apply_patch  src/shopcart/cart.py → 补丁无法应用（git apply --check 失败）：error: corrupt patch at line 10
+      ✓ 第 7 步 run_tests  test_排行_按单品总价降序 → 1 passed in 0.04s
+```
+
+失败那行**不截断**（放不下就换行接着写）—— 一次实测里被省略号吃掉的恰好是 `corrupt patch at line 10`，也就是那次失败的全部信息量。
+
+跑完之后，每次 run 都在 `.aifix/runs/<run_id>/` 落三份东西：`events.jsonl`（模型每一步看到什么、决定做什么）、`facts.jsonl`（领域判断的结论）、`report.md`。
 
 ```bash
 uv run aifix replay <run_id>            # 逐步复盘；--step N 只看某一步，--full 不截断
@@ -265,9 +275,9 @@ uv run aifix reproduce . --issue-text bug.md     # 首行当标题，其余当�
 | | |
 |---|---|
 | [架构](docs/architecture.md) | 一次 run 是怎么转的：六个节点、两层状态、worktree 交付 |
-| [安全边界](docs/safety.md) | 四层封闭、七道守卫、三层预算、成本闸的确切契约 |
+| [安全边界](docs/safety.md) | 四层封闭、八道守卫、三层预算、成本闸的确切契约 |
 | [评测](docs/evaluation.md) | `mine` / `mutate` / `eval`、双档打分、Wilson 区间、可疑信号 |
-| [诊断](docs/diagnostics.md) | trace 布局、`replay`、SQLite 跨 run 轨迹 |
+| [诊断](docs/diagnostics.md) | 跑的时候看得见什么、退出码、trace 布局、`replay`、SQLite 跨 run 轨迹 |
 | [适配器](docs/adapters.md) | 协议逐个成员、写新适配器的清单、六处裂缝的完整记录 |
 | [M6 计划](docs/superpowers/plans/2026-07-29-m6-issue-driven.md) | issue 驱动：七条设计决策、为什么只有一道人闸、Actions 的坑 |
 
@@ -276,20 +286,22 @@ uv run aifix reproduce . --issue-text bug.md     # 首行当标题，其余当�
 ## 命令一览
 
 ```
-aifix run <repo>            修复失败的测试            --test / --budget / --dry-run
-aifix answer <编号> [repo]   回答上次 run 提的问题      --run-id / --budget
+aifix run <repo>            修复失败的测试            --test / --budget / --dry-run / --quiet
+aifix answer <编号> [repo]   回答上次 run 提的问题      --run-id / --budget / --quiet
 aifix reproduce <repo>      把缺陷报告译成复现测试     --issue-text / --title / --keep
 aifix issue handle          处理一次 issue_comment 事件 --repo / --event
 aifix mine <repo>           从 git history 挖任务集    --limit / --max-tasks / --out
-aifix mutate <repo>         人造变异生成冒烟任务集      --max-tasks / --scope / --seed
-aifix eval <tasks.jsonl>    在任务集上跑评测           --parallel / --label / --budget-per-task / --budget-total
+aifix mutate <repo>         人造变异生成冒烟任务集      --max-tasks / --max-new-failures / --scope / --seed / --out
+aifix eval <tasks.jsonl>    在任务集上跑评测           --parallel / --label / --out / --budget-per-task / --budget-total
 aifix eval-report <...>     把若干轮结果渲染成对比表
-aifix replay <run_id>       回放一次 run 的逐步复盘     --step / --full
-aifix ingest                把各次 run 的事实灌进 SQLite
-aifix stats                 跨 run 汇总
+aifix replay <run_id>       回放一次 run 的逐步复盘     --repo / --step / --full
+aifix ingest                把各次 run 的事实灌进 SQLite --repo / --runs-dir
+aifix stats                 跨 run 汇总                 --repo
 ```
 
 每个子命令的 `--help` 都写了取舍，不只是参数说明。
+
+**退出码**：`aifix run` 只在这次 run **没跑成**时退 1（崩溃、baseline 全是收集错误、模型端点不通、preflight 拒绝）。「修好了 0 个」和「预算耗尽」都退 **0** —— 那是正常收场，结论仍然可信。判据只有一份名单（`cli._FAILED_RUN_KINDS`），漏登记一种的后果是那一类静默退 0、流水线把它读成成功；preflight 就这么漏过一整轮，见[诊断](docs/diagnostics.md#退出码这次-run-到底跑成没有)。
 
 ## 配置
 
@@ -303,6 +315,8 @@ aifix stats                 跨 run 汇总
 | `AIFIX_MAX_ATTEMPTS` | `3` | 每个 failure 最多试几轮 |
 | `AIFIX_MAX_DIFF_LINES` | `300` | 超过即判为整文件重写 |
 | `AIFIX_ASK_USER` | `true` | 信息不全时允不允许停下来问人。**没人能回答的场合要关掉** —— `aifix eval` 已经强制关了 |
+| `AIFIX_TEST_TIMEOUT_SECONDS` | `1800.0` | 跑一次**全量**的超时。套件本身就超过这个数的项目必须调大，否则每一轮 verify 都被杀在半路 |
+| `AIFIX_SCOPED_TEST_TIMEOUT_SECONDS` | `600.0` | 只跑几个用例时的超时（`run_tests` 与 flaky 复跑） |
 | `AIFIX_CONSECUTIVE_FAILURE_LIMIT` | `3` | 连着几个没修好就中止整个 run |
 | `AIFIX_PRICE_MAP` | `{}` | `{"模型名": [输入价/1k, 输出价/1k]}` |
 | `AIFIX_TEST_PYTHON` | 自动探测 | 跑**目标项目**测试用的解释器。不配就找源仓库的 `.venv/bin/python` / `venv/bin/python`，再没有才退回 aifix 自己的解释器 |
@@ -320,11 +334,13 @@ aifix stats                 跨 run 汇总
 
 ## 项目状态
 
-- **906 个测试**，全绿（2026-08-01 实测，`-n 8` 并行 **185 秒**；同一天 858 项的套件串行 **993 秒**）。**这两个数之间还夹着一个被我读错的 692 秒**：那次量的时候后台正跑着一轮 3 并发的评测，而评测的每个任务本身就在 spawn 完整的测试套件 —— 12 核被两边分掉，我却把它当成「并行只快 30%」写了进来。机器不空时量出来的不是并发度，是争抢。给多个读数而不是一个「权威」数字这条规矩，正是为这种事立的。本机装了 `mvn`，Maven 那批是真跑的
+- **925 个测试**，全绿（2026-08-01 实测，`-n 8` 并行 **145 秒**；同一天早些时候 906 项 `-n 8` **185 秒**、858 项串行 **993 秒**）。**这几个数之间还夹着一个被我读错的 692 秒**：那次量的时候后台正跑着一轮 3 并发的评测，而评测的每个任务本身就在 spawn 完整的测试套件 —— 12 核被两边分掉，我却把它当成「并行只快 30%」写了进来。机器不空时量出来的不是并发度，是争抢。给多个读数而不是一个「权威」数字这条规矩，正是为这种事立的。本机装了 `mvn`，Maven 那批是真跑的
 - 依赖 [ai-harness-framework](https://github.com/sumengnan/ai-harness-framework)（同作者，提供 AgentLoop / 沙箱 / 预算 / 遥测）
 - 第一阶段（M1 闭环 → M2 靠谱 → M3 可度量 → M3b 成本闸 → M4 有结论 → M5 跨语言与可诊断 → M6 issue 驱动）已完成
 
-**还没做的**（都是有意留的，不是忘了）：覆盖率差分、SWE-bench Lite / Defects4J 的对外可比数字、第三个适配器、issue 驱动那条链路的**真实端到端验收**（需要真 runner 与 API key，见上）、复现测试准确率的离线评测（拿 `evals/` 那 39 个任务、只喂 commit message、藏掉真实测试来量）。
+**还没做的**（都是有意留的，不是忘了）：覆盖率差分、SWE-bench Lite / Defects4J 的对外可比数字、第三个适配器、issue 驱动那条链路的**真实端到端验收**（需要真 runner 与 API key，见上）。
+
+**做了一半的**：复现测试准确率的离线评测 —— 方法与 workflow 已经写好（`.github/workflows/aifix-repro-eval.yml`：checkout 到真实 `fix(...)` 提交的父提交，只喂 commit message，看复现测试红不红），但**一个数字都还没跑出来**。别把「有 workflow」读成「量过了」。
 
 **已知限制**：目标项目把自己可编辑安装进测试解释器时，`import <目标包>` 可能解析到源仓库而不是打了补丁的 worktree —— aifix 只做一次**近似**探测并出声，不解决（解决它要么接管目标项目的安装方式，要么改写它的 `sys.path`）。那道探测复现不了 `conftest.py` 里手写的 `sys.path` 改动，**返回空不等于安全**。见 [适配器文档](docs/adapters.md#换来的真实风险可编辑安装会让验证悄悄失效)。
 

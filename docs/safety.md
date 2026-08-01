@@ -12,7 +12,7 @@
 
 ### 一、能力：白名单工具面，没有 `run_shell`
 
-Fixer 的 `ToolRegistry` 里只注册七个工具（`src/aifix/agents/fixer.py`）：
+Fixer 的 `ToolRegistry` 里只注册七个工具，外加一个**条件注册**的第八个（`src/aifix/agents/fixer.py`）：
 
 | 工具 | 能干什么 |
 |---|---|
@@ -40,7 +40,7 @@ Fixer 的 `ToolRegistry` 里只注册七个工具（`src/aifix/agents/fixer.py`�
 
 **两条写入路径，一份守卫。** `edit_file` 是 2026-07-31 加的（起因见下面「为什么不只留 diff」）。两者都走 `src/aifix/tools/guard.py` 的 `guard_write`，三道检查一次都不少；越界统计那边也在 `violations._WRITE_TOOLS` 里同步列了两条 —— 共用守卫**不会**自动让新路径被数到，那是另一套代码。`tests/test_violations.py::test_every_write_path_is_counted` 对两条路径各断言一次。
 
-`ai-harness-framework` 自带 `RunShellTool`（`name = "run_shell"`），**没有被注册**。这不是靠注释保证的 —— `tests/test_fixer.py` 里有两条测试钉住它：一条断言注册表里的工具名集合恰好是上面那七个（等号，不是包含：加工具就是扩大攻击面，得先在那条断言里说明白），另一条断言 `reg.get("run_shell") is None` 且 `reg.get("run_python") is None`。
+`ai-harness-framework` 自带 `RunShellTool`（`name = "run_shell"`），**没有被注册**。这不是靠注释保证的 —— `tests/test_fixer.py` 里有两条测试钉住它：`test_registry_exposes_exactly_the_whitelisted_tools` 断言工具名集合**恰好等于**上表前七个（等号，不是包含：加工具就是扩大攻击面，得先在那条断言里说明白），`test_registry_has_no_shell` 断言 `reg.get("run_shell") is None` 且 `reg.get("run_python") is None`。
 
 #### 为什么不只留 diff
 
@@ -90,7 +90,7 @@ pytest 那条命令的 argv[0] 是**目标项目自己的解释器**（`AIFIX_TE
 ### 不许改测试文件
 
 - **挡什么**：模型删掉断言让测试变绿。这是这个系统最核心的一道守卫。
-- **在哪**：`ApplyPatchTool._guard`（`src/aifix/tools/patch.py`）
+- **在哪**：`guard.guard_write`（`src/aifix/tools/guard.py`），`edit_file` 与 `apply_patch` **两条写入路径共用这一份**。守卫各写各的话迟早有一条漏掉其中一项，而漏掉的后果是静默的：报告仍然显示绿，只是绿的理由变成了「模型把测试改了」
 - **阈值**：没有阈值，无条件拒绝。判据是 `signals.under_dirs(path, adapter.test_dirs())`
 - **绕过的后果**：整个系统失去意义 —— 报告会写「已修复」，而补丁删的是断言。
 - **没有开关，这是有意的**：`AifixConfig` 里曾有一个 `allow_test_edits: bool = False`，从 M1 起就没有被任何地方读过（守卫一直是无条件的），已删除。删而不接，因为测试是这个系统判「修好了」的 **oracle** —— 允许 agent 改测试等于允许它改判卷标准。一个没接线的危险旋钮比没有旋钮更糟：它给人「需要时可以打开」的错觉。真要开这个口子是一次需要认真设计的改动（启动时的响亮警告、trace 里的显式记录、报告里的红字标注、评测里单独一列），不是把一个 bool 接上去。`tests/test_config.py::test_已移除的_allow_test_edits_不会复活` 钉住它不再回来。
