@@ -1,0 +1,737 @@
+# 接入教程：把 aifix 接到你自己的项目上
+
+这份文档讲的是**别人的项目怎么用上 aifix** —— 在你自己的仓库里评论一句 `/aifix`，
+让它读懂 issue、写复现测试、修、开 PR。
+
+（如果你想看的是 aifix 这个仓库自己怎么配，那是 [issue-driven.md](issue-driven.md)。）
+
+**预计耗时**：连通性自检 5 分钟 + 配置 20 分钟 + 第一次真跑 10~30 分钟。
+
+---
+
+## 目录
+
+- [第 0 步：五分钟判断能不能用](#第-0-步五分钟判断能不能用)
+- [第 1 步：连通性自检](#第-1-步连通性自检)
+- [第 2 步：本地先跑一次（强烈建议）](#第-2-步本地先跑一次强烈建议)
+- [第 3 步：把 workflow 放进你的仓库](#第-3-步把-workflow-放进你的仓库)
+  - [Python / pytest 项目](#python--pytest-项目完整可复制)
+  - [Java / Maven 项目](#java--maven-项目完整可复制)
+- [第 4 步：配 secrets 和 variables](#第-4-步配-secrets-和-variables)
+- [第 5 步：仓库设置里那两格](#第-5-步仓库设置里那两格)
+- [第 6 步：第一次真跑与验收清单](#第-6-步第一次真跑与验收清单)
+- [授权模型：为什么你的组织仓库跑不通](#授权模型为什么你的组织仓库跑不通)
+- [成本：这一下大概花多少钱](#成本这一下大概花多少钱)
+- [接入时最容易踩的七个坑](#接入时最容易踩的七个坑)
+- [不接 GitHub，只在本地用](#不接-github只在本地用)
+
+---
+
+## 第 0 步：五分钟判断能不能用
+
+对着下面这张表勾一遍。**任何一条是「否」，先别往下走。**
+
+| # | 条件 | 为什么 |
+|---|---|---|
+| 1 | 项目是 **pytest** 或 **Maven** 工程 | 目前只有这两个适配器。别的体系要先写一个，见 [adapters.md](adapters.md#怎么加第三个适配器) |
+| 2 | 仓库在**个人账号**名下，不是组织名下 | 授权判定目前只认 `OWNER` —— 组织仓库开箱跑不通，见[下面那一节](#授权模型为什么你的组织仓库跑不通) |
+| 3 | 你有一个 **OpenAI 兼容**的模型端点（base_url + api_key） | aifix 走 `/v1/chat/completions` |
+| 4 | 那个端点**没有 IP 白名单** | GitHub runner 的出口 IP 是 Azure 的动态大段。这一条做不成整条 Actions 路线就不成立 —— 所以它是第 1 步 |
+| 5 | 你的测试套件在 CI 上能跑起来，且**单次全量在 10 分钟以内** | 一次 run 要跑 1 次 baseline + 每轮 1 次 verify。20 分钟的套件意味着一次 run 一小时起步 |
+| 6 | 你的测试**基本不抖** | 抖动会被过滤，但 baseline 里本来就红的用例会稀释「这个补丁没弄坏别的」这个判断 |
+| 7 | 你能接受**每次触发花 $0.1 ~ $2** | 见[成本那一节](#成本这一下大概花多少钱) |
+
+第 5 条不满足也不是完全没戏 —— 调大 `AIFIX_TEST_TIMEOUT_SECONDS` 和 job 的
+`timeout-minutes` 能跑，只是慢且贵。
+
+---
+
+## 第 1 步：连通性自检
+
+**这是接 aifix 之前唯一一件做不成就得推倒重来的事。** runner 的出口 IP 是动态的，端点
+若有 IP 白名单，整条路线不成立 —— 而这个事实在写完全部胶水之后才发现的代价是几天。
+
+把下面这个文件放进你的仓库 `.github/workflows/aifix-connectivity.yml`，然后
+`gh workflow run aifix-connectivity.yml`：
+
+```yaml
+name: aifix-connectivity
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}          # 只往外打 HTTP，不碰仓库
+
+    steps:
+      - name: runner 的出口 IP（拿去比对你的白名单）
+        run: echo "出口 IP：$(curl -sS --max-time 10 https://api.ipify.org || echo '取不到')"
+
+      - name: 端点可达性 + 凭据
+        env:
+          BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
+          KEY: ${{ secrets.AIFIX_API_KEY }}
+          MODEL: ${{ vars.AIFIX_FIXER__MODEL || 'qwen3-coder-flash' }}
+        run: |
+          set -u
+          if [ -z "${BASE_URL:-}" ] || [ -z "${KEY:-}" ]; then
+            echo "::error::secrets.AIFIX_BASE_URL 或 secrets.AIFIX_API_KEY 没配"; exit 1
+          fi
+
+          # 真发一次最小的 chat completion —— 这才是 aifix 实际走的那条路。
+          # /models 通不代表 chat 通（鉴权范围、模型名、配额都可能只在这里炸）。
+          code=$(curl -sS --max-time 60 -o /tmp/chat.json -w '%{http_code}' \
+                 "$BASE_URL/chat/completions" \
+                 -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+                 -d "{\"model\":\"$MODEL\",\"max_tokens\":1,
+                      \"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" || echo 000)
+          echo "POST /chat/completions → HTTP $code"
+          head -c 600 /tmp/chat.json 2>/dev/null || true; echo
+
+          case "$code" in
+            2*)  echo "✅ 端点可达、凭据有效、模型名正确 —— Actions 这条路走得通" ;;
+            000) echo "::error::连不上（超时或 DNS）。最可能是端点有 IP 白名单，"\
+                      "而 runner 的出口 IP 是动态的 —— 见上面那行出口 IP"; exit 1 ;;
+            401|403) echo "::error::凭据被拒。key 错了，或这个 key 没有该模型的权限"; exit 1 ;;
+            404) echo "::error::路径或模型名不对。BASE_URL 要以 /v1 结尾"; exit 1 ;;
+            *)   echo "::error::HTTP $code，看上面的响应体"; exit 1 ;;
+          esac
+```
+
+（要跑它得先做完[第 4 步](#第-4-步配-secrets-和-variables)的两个 secret。）
+
+---
+
+## 第 2 步：本地先跑一次（强烈建议）
+
+在 Actions 上调试的反馈周期是几分钟一轮，而且 `issue_comment` 的 workflow **只从默认
+分支加载** —— 每改一次都要合一次。本地能跑通的东西，别拿到 CI 上去调。
+
+```bash
+# 1. 把 aifix 装到一个独立的地方 —— 千万别装进你项目的 venv
+#    （发行名是 aifix-code，装完命令叫 aifix）
+python -m venv /tmp/aifix-venv
+/tmp/aifix-venv/bin/pip install aifix-code
+
+# 2. 配模型
+export AIFIX_FIXER__BASE_URL="https://your-endpoint/v1"
+export AIFIX_FIXER__API_KEY="sk-..."
+export AIFIX_FIXER__MODEL="qwen3-coder-flash"
+export AIFIX_DETECTOR__BASE_URL="$AIFIX_FIXER__BASE_URL"
+export AIFIX_DETECTOR__API_KEY="$AIFIX_FIXER__API_KEY"
+export AIFIX_DETECTOR__MODEL="$AIFIX_FIXER__MODEL"
+export AIFIX_PRICE_MAP='{"qwen3-coder-flash": [0.0003, 0.0012]}'
+
+# 3. 指向你项目自己的解释器
+export AIFIX_TEST_PYTHON=/path/to/你的项目/.venv/bin/python
+
+# 4. 空跑：不调用任何模型、不花一分钱，只看它认不认得你的项目
+cd /path/to/你的项目
+/tmp/aifix-venv/bin/aifix run . --dry-run
+```
+
+`--dry-run` 要看到的是这样一份报告：
+
+```
+- 适配器：pytest
+- 修复：**0 / 0**          ← 你的仓库现在是全绿的，正常
+- 成本：$0.0000（0 tokens）
+```
+
+**这一步能挡掉绝大部分接入失败**：适配器认不认得、解释器对不对、工作区干不干净、
+测试跑不跑得起来，全在这里暴露。
+
+### 再试一次复现
+
+这一步单独量「模型读一段人话能不能写出复现测试」—— 它是 issue 那条路的天花板。
+
+```bash
+# 拿你项目历史上一个真实的修复提交，用它的 commit message 当缺陷报告
+git log -1 --format='%s%n%n%b' <某个 fix commit> > /tmp/issue.md
+git worktree add /tmp/before <某个 fix commit>^   # 回到缺陷还在的那个状态
+
+/tmp/aifix-venv/bin/aifix reproduce /tmp/before --issue-text /tmp/issue.md
+```
+
+退出码 0 = 写出了复现测试且它真的红了。多试几个 commit，心里对成功率有个数再往下走。
+
+---
+
+## 第 3 步：把 workflow 放进你的仓库
+
+### 两个必须理解的前提
+
+**一、aifix 和你的项目要用两个不同的 Python 环境。**
+
+aifix 自己依赖 langgraph、pydantic、openai；你的项目有自己的依赖。装在一起的话，
+轻则版本冲突装不上，重则**装上了、但你项目的测试环境被污染了** —— 而 baseline 是在
+那个环境里跑的，污染的后果是一批凭空多出来的红。
+
+所以：aifix 装在 `/tmp/aifix-venv`，你的项目装在 `.venv`，用 `AIFIX_TEST_PYTHON`
+把两者接起来。
+
+**二、这个文件必须在默认分支上。**
+
+GitHub 只从默认分支加载 `issue_comment` 的 workflow。在特性分支上改它是调不通的 ——
+**而且不报错，只是永远不触发。**
+
+---
+
+### Python / pytest 项目（完整可复制）
+
+`.github/workflows/aifix.yml`：
+
+```yaml
+name: aifix
+
+on:
+  issue_comment:
+    types: [created]
+
+# 同一个 issue 同时只跑一个。手滑连点两次 = 两倍开销，而且两个 run 会抢同一个 worktree 路径
+concurrency:
+  group: aifix-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    # 便宜的前置过滤：绝大多数评论在这里就被挡掉，一秒 runner 都不花。
+    # 权威判定在 aifix 的 authorize() 里（还要挡 PR、bot、命令不在第一行）。
+    # 两处都要 —— 这里挡不住的由代码挡。
+    if: >
+      github.event.comment.author_association == 'OWNER' &&
+      github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.comment.body, '/aifix')
+
+    runs-on: ubuntu-latest
+    # 必须显著大于 AIFIX_BUDGET_WALL_SECONDS。Actions 的超时是**杀进程**：
+    # aifix 里那个「保证报告先落地」的分支根本执行不到，跑一小时什么都留不下。
+    timeout-minutes: 90
+
+    # 显式写全。不写的话仓库默认可能是宽松的，而「我以为它是最小权限」
+    # 是这类事故最常见的开头。
+    permissions:
+      contents: write          # 推交付分支与 aifix/traces
+      issues: write            # 状态评论、reaction
+      pull-requests: write     # 开 PR
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 要完整历史：交付分支是从 HEAD 长出来的新分支，
+          # 从浅克隆推新分支在部分场景下会被拒（shallow update not allowed）
+          fetch-depth: 0
+          # 不要设成 false —— aifix 要用这份凭据 push 交付分支
+
+      # ┌───────────────────────────────────────────────────────┐
+      # │ 你的项目自己的测试环境。把你 ci.yml 里那段搬过来即可。   │
+      # │ 唯一要求：装完之后 .venv/bin/python 能跑起你的测试。     │
+      # └───────────────────────────────────────────────────────┘
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 装项目依赖
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[dev]"      # ← 换成你项目的装法
+
+      # 工作区必须干净，否则 aifix 的 preflight 会拒绝启动。
+      # 装依赖有时会改动被跟踪的文件（典型：uv sync 重写 uv.lock）。
+      - name: 确认工作区干净
+        run: |
+          if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+            echo "::warning::安装步骤改动了被跟踪的文件，已还原："
+            git status --porcelain --untracked-files=no
+            git checkout -- .
+          fi
+
+      # ┌───────────────────────────────────────────────────────┐
+      # │ aifix 装在一个**独立**的 venv 里，不碰你项目的环境       │
+      # └───────────────────────────────────────────────────────┘
+      - name: 装 aifix
+        run: |
+          python -m venv /tmp/aifix-venv
+          # 发行名是 aifix-code，装完命令叫 aifix。
+          # **CI 上钉住版本**：不钉的话某天 aifix 发个新版，你的流水线行为
+          # 会在你没改过任何东西的情况下变掉 —— 而它是会花钱、会开 PR 的。
+          /tmp/aifix-venv/bin/pip install --quiet "aifix-code==0.1.0"
+          /tmp/aifix-venv/bin/aifix --help > /dev/null && echo "aifix 就绪"
+
+      - name: aifix issue handle
+        run: /tmp/aifix-venv/bin/aifix issue handle
+        env:
+          # gh CLI 与 git push 都用它
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          # 两条模型路由。variable 名与环境变量同名 —— 设什么就是什么，
+          # 换模型不用改这个文件（改它要合进默认分支才生效）
+          AIFIX_FIXER__MODEL:    ${{ vars.AIFIX_FIXER__MODEL || 'qwen3-coder-flash' }}
+          AIFIX_FIXER__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
+          AIFIX_FIXER__API_KEY:  ${{ secrets.AIFIX_API_KEY }}
+          AIFIX_DETECTOR__MODEL:    ${{ vars.AIFIX_DETECTOR__MODEL || 'qwen3-coder-flash' }}
+          AIFIX_DETECTOR__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
+          AIFIX_DETECTOR__API_KEY:  ${{ secrets.AIFIX_API_KEY }}
+
+          # 价格表用 variable 不用 secret：它不是机密，而 secret 在日志里会被
+          # 遮成 ***，你反而看不出它配没配对 —— 而没配价格表 = 美元闸永远不触发
+          AIFIX_PRICE_MAP: ${{ vars.AIFIX_PRICE_MAP }}
+
+          # ★ 关键：跑你项目测试的解释器。别靠自动探测 ——
+          #   runner 上 clone 出来没有 .venv，探测落空会退回 aifix 自己的
+          #   解释器，然后是一整批 collection error
+          AIFIX_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
+
+          AIFIX_BUDGET_USD: ${{ vars.AIFIX_BUDGET_USD || '2.0' }}
+          AIFIX_BUDGET_WALL_SECONDS: "3600"
+          # 复现那一步的思考模式默认关。`|| 'false'` 不能省：variable 未设置时
+          # Actions 给的是**空串**，而空串的含义是「随端点默认」= 开，正好相反
+          AIFIX_REPRODUCER_THINKING: ${{ vars.AIFIX_REPRODUCER_THINKING || 'false' }}
+
+      # 崩了才最需要它。`if: always()` 不是可选的 ——
+      # job 失败时不上传，等于恰好在最需要诊断数据的那一次把它扔了
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aifix-trace-${{ github.event.issue.number }}-${{ github.run_id }}
+          path: .aifix/runs/
+          retention-days: 30
+```
+
+**用 uv 的项目**，把装依赖那步换成：
+
+```yaml
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen        # --frozen：别让它重写 uv.lock 把工作区弄脏
+```
+
+`AIFIX_TEST_PYTHON` 仍然是 `${{ github.workspace }}/.venv/bin/python`（`uv sync` 就建在
+那儿）。
+
+---
+
+### Java / Maven 项目（完整可复制）
+
+与上面的区别只有两处：不需要项目的 Python 环境（`mvn` 不走 Python 解释器），但
+**必须预热 `~/.m2`**。
+
+```yaml
+name: aifix
+
+on:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: aifix-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    if: >
+      github.event.comment.author_association == 'OWNER' &&
+      github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.comment.body, '/aifix')
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven          # 命中缓存时下面的预热几乎是白拿
+
+      # aifix 自己是个 Python 程序（要求 3.11+），哪怕你的项目是纯 Java。
+      # 它跑测试用的是 `mvn`，不走这个解释器。
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # ★ 必须有。aifix 的适配器命令是 `mvn -B -q -o clean test`，**带 -o（离线）**，
+      #   而 runner 上 ~/.m2 是空的。
+      #
+      #   注意最后那句 `mvn -B -q clean` 不是收尾，**是预热的一部分**：
+      #   `mvn test` 不会下载 maven-clean-plugin，离线仓库里缺它时 `clean` 这一
+      #   阶段当场失败，表现是 surefire 一份报告都没有 —— 被 aifix 报成
+      #   「测试进程没能正常跑完」。实测栽过一次，查了一轮才定位到。
+      #
+      #   通则：预热要覆盖**实际会跑的那条命令**，不是「差不多的那条」。
+      - name: 预热 ~/.m2
+        run: |
+          set -eu
+          mvn -B -q test || true        # 测试红不红无所谓，构件拉全就行
+          test -d target/surefire-reports \
+            || { echo "::error::预热失败：surefire 没写出报告，~/.m2 可能没拉全"; exit 1; }
+          mvn -B -q clean
+
+      - name: 确认工作区干净
+        run: |
+          if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+            git status --porcelain --untracked-files=no
+            git checkout -- .
+          fi
+
+      - name: 装 aifix
+        run: |
+          python3 -m venv /tmp/aifix-venv
+          # 理由同 pytest 那份：CI 上钉住版本
+          /tmp/aifix-venv/bin/pip install --quiet "aifix-code==0.1.0"
+
+      - name: aifix issue handle
+        run: /tmp/aifix-venv/bin/aifix issue handle
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AIFIX_FIXER__MODEL:    ${{ vars.AIFIX_FIXER__MODEL || 'qwen3-coder-flash' }}
+          AIFIX_FIXER__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
+          AIFIX_FIXER__API_KEY:  ${{ secrets.AIFIX_API_KEY }}
+          AIFIX_DETECTOR__MODEL:    ${{ vars.AIFIX_DETECTOR__MODEL || 'qwen3-coder-flash' }}
+          AIFIX_DETECTOR__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
+          AIFIX_DETECTOR__API_KEY:  ${{ secrets.AIFIX_API_KEY }}
+          AIFIX_PRICE_MAP: ${{ vars.AIFIX_PRICE_MAP }}
+          # Maven 项目**不要**设 AIFIX_TEST_PYTHON —— 它是给 pytest 适配器用的
+          AIFIX_BUDGET_USD: ${{ vars.AIFIX_BUDGET_USD || '2.0' }}
+          AIFIX_BUDGET_WALL_SECONDS: "3600"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aifix-trace-${{ github.event.issue.number }}-${{ github.run_id }}
+          path: .aifix/runs/
+          retention-days: 30
+```
+
+> **Maven 侧的两条已知边界**：适配器只映射**标准布局**（`src/main/java` / `src/test/java`），
+> 多模块工程（每个 `<module>` 各有自己的 src）不在支持范围内；`source_suffixes` 只认
+> `.java`，改 `pom.xml` 才能修好的问题它定位不到。
+
+---
+
+## 第 4 步：配 secrets 和 variables
+
+```bash
+# ── 机密（会在日志里被遮成 ***）
+gh secret set AIFIX_BASE_URL          # 端点，要以 /v1 结尾
+gh secret set AIFIX_API_KEY
+
+# ── 非机密（用 variable，这样日志里看得见）
+gh variable set AIFIX_FIXER__MODEL    --body qwen3-coder-flash
+gh variable set AIFIX_DETECTOR__MODEL --body qwen3-coder-flash
+gh variable set AIFIX_PRICE_MAP       --body '{"qwen3-coder-flash": [0.0003, 0.0012]}'
+gh variable set AIFIX_BUDGET_USD      --body 2.0
+```
+
+### 三件容易搞错的事
+
+**一、`AIFIX_PRICE_MAP` 用 variable，不要用 secret。** 模型名和价格表都不是机密，而
+secret 在日志里会被遮成 `***` —— 跑错模型时你从日志里根本看不出来。而没配价格表的后果
+更直接：成本恒算成 0，**美元预算闸永远不会触发**。
+
+（顺带：显式设了 `AIFIX_BUDGET_USD` 却没配价格表时，aifix **当场拒绝启动**并告诉你为
+什么 —— 与其给一个假的保证，不如现在就停。）
+
+**二、价格表是扁平价表**，格式是 `{模型名: [输入价/千token, 输出价/千token]}`。不是分档
+表。传错格式会在启动阶段就被拒绝。
+
+**三、两条路由可以指向两家不同的供应商** —— 诊断挑便宜的、修复挑强的。不设就沿用同一套：
+
+```bash
+gh secret set AIFIX_DETECTOR_BASE_URL   # 只在换供应商时才需要
+gh secret set AIFIX_DETECTOR_API_KEY
+```
+
+（上面那份 workflow 里两条路由都指向同一个 secret；要分开的话把 `AIFIX_DETECTOR__BASE_URL`
+那两行改成对应的 secret 即可。）
+
+---
+
+## 第 5 步：仓库设置里那两格
+
+`permissions:` 给够了**也不行**，还有两处仓库级设置：
+
+1. **Settings → Actions → General → Workflow permissions**
+   → 勾上 **「Allow GitHub Actions to create and approve pull requests」**
+
+   不勾的话 PR 开不出来，报的是 *not permitted to create and approve pull requests*。
+   （aifix 会把这句话连同「去哪一格勾」一起回帖到 issue 上 —— 这是实测撞过的第一名。）
+
+2. **分支保护 / rulesets**：确认没有规则匹配 `aifix/*`。
+
+   aifix 推的是一条**新分支**（`aifix/<run_id>`），不推你的默认分支，所以 main 上的保护
+   规则不影响它。但如果你有仓库级的 push restriction 或者匹配所有分支的 ruleset，就会被拒
+   —— 表现是「修复跑完了，但分支推不上去」。
+
+---
+
+## 第 6 步：第一次真跑与验收清单
+
+### 怎么触发
+
+在**你自己提的** issue 下，评论**第一行**恰好是：
+
+```
+/aifix
+```
+
+第一行之后可以接别的内容，但第一行必须是这个。（正文里引用别人的话或贴一段命令示例
+不会误触发 —— 它只看第一行。）
+
+### 它会依次做这些事
+
+```
+👀 给你那条评论加一个 eyes reaction        ← 几秒内。Actions 排队有几十秒空窗，
+                                              这个 reaction 是「命令被听见了」的回执
+   ↓
+   模型读 issue → 写一条复现测试
+   ↓
+   跑一遍确认它真的红了（红检）
+   ↓
+   提交这条测试 → 跑核心循环去修
+   ↓
+   推分支 → 开 PR → 更新状态评论（一条，不刷屏）
+```
+
+### 三种结局，都是正常的
+
+| 你会看到 | 意思 |
+|---|---|
+| 一条回帖说**缺什么信息** | issue 写得不够具体，模型如实说了写不出复现。补充 issue 再来一次 |
+| 一个标题带 **`[复现已就位，未修复]`** 的 PR | 没修好，但**那条红着的复现测试本身就是产出** —— 你可以直接接手 |
+| 一个 **`fix: ...`** 的 PR | 修好了，报告在 PR 正文里 |
+
+**Actions 页面绿着**是这三种的共同结果 —— 写不出复现、没修好都是正常结论，不是错误。
+只有真崩了（环境不对、端点不通、推不上去）才会红。
+
+### 第一次跑完，照着这张表验一遍
+
+```bash
+gh pr checkout <PR 号>
+
+# 1. 测试文件一个字节都不许变（除了新增的那条复现测试）
+git diff main...HEAD -- tests/
+
+# 2. 分支上真的有提交，不是空 PR
+git log --oneline main..HEAD
+
+# 3. 亲眼看一遍 diff —— 这是唯一那道人闸
+git diff main...HEAD
+
+# 4. 在你自己机器上跑一遍全量，别只信报告
+pytest        # 或 mvn test
+```
+
+**第 4 步别省。** aifix 的判定是可信的，但它是在 runner 那个环境上做出的 —— 而
+`baseline` 里如果本来就有别的红（runner 镜像漂移），「这个补丁没弄坏别的」这个结论要打
+折扣。这种情况 PR 正文里会有一段明确的告警，写着 baseline 里另外那几个红是谁。
+
+### 第一次就该去看的地方
+
+不管成没成，`.aifix/runs/` 会作为 artifact 上传（30 天）。下载解压后：
+
+```bash
+/tmp/aifix-venv/bin/aifix replay <run_id> --repo <解压出来的目录>
+```
+
+能看到模型每一步读了什么、改了什么、为什么被守卫拦下。详见
+[diagnostics.md](diagnostics.md)。
+
+---
+
+## 授权模型：为什么你的组织仓库跑不通
+
+**这是接入阶段最容易撞上的一堵墙，而且它是设计使然，不是 bug。**
+
+授权判定要求两条**同时**成立：
+
+```python
+comment["author_association"] == "OWNER"        # 评论者是仓库所有者
+issue["user"]["login"] == repository.owner.login  # 且 issue 是他自己提的
+```
+
+在**组织名下的仓库**上，这两条都不成立：
+
+- GitHub 对组织仓库不发 `OWNER` 这个 association —— 组织成员拿到的是 `MEMBER` 或
+  `COLLABORATOR`，而这两个**都被显式拒绝**。
+- `repository.owner.login` 是**组织名**，而 issue 的作者永远是一个人。
+
+结果：**每一条 `/aifix` 都会被拒，并回帖说「这个命令只对仓库所有者开放」。**
+
+### 第二条为什么这么严
+
+它不是权限洁癖，挡的是**提示注入**：
+
+> issue 正文会作为输入交给模型。只限制**触发者**挡不住注入 —— 攻击路径是「外人提一个
+> 藏了指令的 issue，等仓库主觉得该修、顺手打上 `/aifix`」，而仓库主本来就想修 bug，那一步
+> 门槛低得可怜。**模型读到的每个字都得是仓库主自己写的，注入面才归零。**
+
+`CONTRIBUTOR` 尤其不是信任信号：它的含义只是「有 commit 进过这个仓库」—— 一年前合过一个
+改错别字的 PR，就永久是 CONTRIBUTOR。
+
+### 组织仓库怎么办
+
+目前只能 fork 一份 aifix，改 `src/aifix/issue/event.py` 里的 `authorize()`，然后把
+workflow 里的安装地址指向你的 fork。**改之前先想清楚你在放开什么。**
+
+一个相对稳妥的改法 —— 用一份**显式的白名单**替掉 `OWNER`，同时**保留**「issue 必须由
+白名单里的人提出」这一条：
+
+```python
+# 改动示意，不是可直接粘贴的补丁
+TRUSTED = {"alice", "bob"}          # 从环境变量读更好，别写死
+
+if commenter not in TRUSTED:
+    return Decision(False, f"@{commenter} 没有触发 aifix 的权限。", notify=True)
+
+if (issue.get("user") or {}).get("login") not in TRUSTED:
+    return Decision(
+        False,
+        "aifix 只处理受信成员**自己提出**的 issue —— issue 正文会交给模型，"
+        "而外部提交的正文是不可信文本。要修这个问题的话，请另开一个 issue 复述一遍。",
+        notify=True)
+```
+
+**两条都要改，只改第一条等于把注入面整个打开。** 记得同步改 workflow 里那个前置
+`if:` 条件（它是便宜的过滤，不是权威判定，但两处不一致会让命令在 job 都没起来的时候
+静默消失）。
+
+改完务必跑一遍 `tests/test_issue_event.py` —— 那份测试把每一条授权判据都钉住了，它红了
+说明你放开的东西比你以为的多。
+
+---
+
+## 成本：这一下大概花多少钱
+
+一次 `/aifix` 触发包含两段模型调用：**写复现测试**（一轮）+ **修复**（最多
+`max_attempts` 轮，每轮一次诊断 + 一次修复）。
+
+参考读数（39 个真实任务，`qwen3-coder-flash`，只算修复那一段）：
+
+| | 每任务均值 |
+|---|---|
+| tokens | 238,070 |
+| 成本 | $0.1241 |
+
+复现那一步另算，取决于你仓库的规模 —— 实测在一个中等仓库上用较强的模型跑要 $0.21 以上。
+
+### 三个闸，配置里都有
+
+```bash
+AIFIX_BUDGET_USD=2.0            # 美元（需要价格表）
+AIFIX_BUDGET_TOKENS=500000      # token
+AIFIX_BUDGET_WALL_SECONDS=3600  # 墙钟
+```
+
+**准确的语义是「越线之后不再发起新的模型调用」，不是「绝不超过这个数」** —— 成本只有在
+调用返回后才知道，所以越线时那一次调用必然已经花掉。超支上界是可陈述的：**一次模型调用**。
+
+### 两条实用建议
+
+**别把预算设太紧。** 实测把每任务上限从 $0.60 调到 $0.20 时，某个任务 1 轮就被掐断判成
+「没修好」；放回去之后同一个任务修好了。**预算设太紧会把「模型不行」和「额度不够」混成
+同一个数字。**
+
+**先用便宜的模型验链路。** 第一次跑要验的是管道通不通，不是修复质量 —— 拿贵的模型验管道，
+贵在了不产生信息的地方。
+
+---
+
+## 接入时最容易踩的七个坑
+
+按撞上的概率排序。
+
+### 1. workflow 不在默认分支上 → 永远不触发，且不报错
+
+`issue_comment` 的 workflow **只从默认分支加载**。这也是为什么建议[先在本地跑通](#第-2-步本地先跑一次强烈建议)。
+
+### 2. 没配 `AIFIX_TEST_PYTHON` → 一整批 collection error
+
+runner 上 clone 出来没有 `.venv`，自动探测落空会退回 aifix 自己的解释器 —— 而你项目的
+测试依赖不在那里面。
+
+表现是 aifix 中止并说：
+
+> 本次 baseline 的 N 个失败里有 M 个是**整个测试文件没能跑起来**…… 这不是模型的问题
+
+这道闸是有意的：把那些 id 当成待修用例排进队列，模型会被派去修「这台机器上缺了点什么」
+这件事，**会真花钱，而报告最后写的是「模型没修好」—— 一个成绩，其实是一次故障。**
+
+### 3. 装依赖弄脏了工作区 → preflight 拒绝启动
+
+最常见的是 `uv sync` 重写 `uv.lock`。上面那份 workflow 里的「确认工作区干净」那一步就是
+处理它的；用 uv 的话更干净的做法是 `uv sync --frozen`。
+
+**为什么这道闸不能放松**：baseline 是从 HEAD 算出来的，工作区另有改动的话，算出来的失败
+集合和你眼前看到的对不上。（未跟踪文件不算 —— `__pycache__` 这些根本进不去 worktree。）
+
+### 4. 组织仓库 → 每次都被拒
+
+见[上面那一节](#授权模型为什么你的组织仓库跑不通)。
+
+### 5. Maven 项目没预热 `~/.m2` → 「测试进程没能正常跑完」
+
+适配器命令带 `-o`（离线）。而且预热必须**覆盖实际会跑的那条命令** —— `mvn test` 不会下载
+`maven-clean-plugin`，而适配器跑的是 `mvn -o clean test`。
+
+### 6. 端点有 IP 白名单 → 整条路线不成立
+
+这就是[第 1 步](#第-1-步连通性自检)要先做的原因。
+
+### 7. job 超时小于等于墙钟预算 → 跑了一小时什么都没留下
+
+Actions 的超时是**杀进程**。aifix 里那个「保证报告先落地」的分支根本执行不到。
+**让 aifix 自己的墙钟闸先响，硬杀只是兜底。**
+
+推荐比例：`timeout-minutes: 90` 配 `AIFIX_BUDGET_WALL_SECONDS: "3600"`（60 分钟）。
+
+---
+
+## 不接 GitHub，只在本地用
+
+不想接 Actions 也完全可以用 —— 主命令 `aifix run` 本来就是独立的。
+
+```bash
+# 你的仓库现在有几个红的用例，让它去修
+cd /path/to/你的项目
+/tmp/aifix-venv/bin/aifix run . --budget 1.0
+
+# 只修其中一个
+/tmp/aifix-venv/bin/aifix run . --test 'tests/test_cart.py::test_total'
+
+# 模型停下来问你问题时
+/tmp/aifix-venv/bin/aifix answer 1
+
+# 跑完看一眼再合
+git diff main aifix/<run_id>
+git merge aifix/<run_id>
+```
+
+它**不 push、不 merge、不碰你的主工作区、不删任何分支** —— 交付物是一条本地分支，合不合
+完全是你的事。完整清单见 [safety.md 的不可逆动作清单](safety.md#不可逆动作清单)。
+
+想要一条 cron 定时跑的话，用 `--quiet` 加个 `schedule` 触发的 workflow 即可，但注意
+**它仍然只会开分支，不会自动合**。
+
+---
+
+## 接下来
+
+| 想干什么 | 看哪儿 |
+|---|---|
+| 调旋钮（预算、轮数、超时、守卫） | [configuration.md](configuration.md) |
+| 弄明白它凭什么敢改我的代码 | [safety.md](safety.md) |
+| 跑挂了要查 | [diagnostics.md](diagnostics.md) |
+| 在**我自己的仓库**上量一下它到底行不行 | [evaluation.md](evaluation.md) —— `aifix mine` 能从你的 git history 里挖出自带标准答案的任务集 |
+| 我的项目既不是 pytest 也不是 Maven | [adapters.md](adapters.md#怎么加第三个适配器) |
+| issue 那条流水线内部是怎么走的 | [issue-driven.md](issue-driven.md) |
