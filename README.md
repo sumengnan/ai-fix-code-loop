@@ -1,5 +1,10 @@
 # aifix
 
+[![PyPI](https://img.shields.io/pypi/v/aifix-code.svg)](https://pypi.org/project/aifix-code/)
+[![Python](https://img.shields.io/pypi/pyversions/aifix-code.svg)](https://pypi.org/project/aifix-code/)
+[![License](https://img.shields.io/pypi/l/aifix-code.svg)](https://github.com/sumengnan/aifix-code/blob/main/LICENSE)
+[![Tests](https://github.com/sumengnan/aifix-code/actions/workflows/tests.yml/badge.svg)](https://github.com/sumengnan/aifix-code/actions/workflows/tests.yml)
+
 **红着的测试进去，一条验证过的补丁分支出来。**
 
 aifix 是一个测试失败驱动的自我修复循环：它跑一遍你的测试，把失败的用例一个个
@@ -98,7 +103,7 @@ aifix 是一个测试失败驱动的自我修复循环：它跑一遍你的测�
 ### 安装
 
 ```bash
-pip install aifix-code
+pip install aifix-code        # 或者：uv tool install aifix-code
 ```
 
 装完之后命令叫 **`aifix`**（不是 `aifix-code`）：
@@ -107,18 +112,30 @@ pip install aifix-code
 aifix --help
 ```
 
-> 发行名与命令名不同不是笔误 —— `aifix` 这个名字在 PyPI 上已被另一个无关的包占用。
-> 而命令、issue 上的 `/aifix`、产物目录 `.aifix/` 全都用 `aifix` 这个词，改它的代价
-> 比换一个发行名大得多。
+> **发行名与命令名不同不是笔误。** `aifix` 这个名字在 PyPI 上已被另一个无关的包占用，
+> 拿不到；而命令、issue 上的 `/aifix`、产物目录 `.aifix/`、全部文档都用 `aifix` 这个
+> 词，改它的代价比换一个发行名大得多。与 `scikit-learn` → `sklearn` 同一个形状。
 
-**要改代码的话**，从源码装：
+**推荐用 `uv tool install`**：aifix 自己依赖 langgraph、pydantic、openai，装进你项目的
+环境里可能起冲突 —— 而它本来就是个独立跑的命令行工具，不需要和被修的项目共用一个环境。
+（跑测试用哪个解释器是**另一个**旋钮，见下面那条「最常见的坑」。）
+
+升级：
+
+```bash
+pip install --upgrade aifix-code      # uv tool upgrade aifix-code
+```
+
+**要改 aifix 自己的代码**，从源码装：
 
 ```bash
 git clone https://github.com/sumengnan/aifix-code.git
 cd aifix-code
 uv sync
-uv run aifix --help
+uv run aifix --help          # 源码树里要带 uv run 前缀
 ```
+
+> 下文所有例子写的都是 `aifix ...`。如果你是从源码跑的，前面加 `uv run`。
 
 ### 配模型
 
@@ -414,3 +431,42 @@ src/aifix/
 
 分工边界：`harness/` 里不出现 `pytest`、`failure`、`patch` 这些词，它只知道
 「模型、工具、循环、预算」；领域知识全在 aifix 这一层。
+
+---
+
+## 参与开发
+
+```bash
+git clone https://github.com/sumengnan/aifix-code.git
+cd aifix-code
+uv sync
+uv run pytest -q -n auto      # 925 个用例，并行约 3 分钟
+```
+
+`main` 与 PR 上会自动跑 Python 3.11 / 3.12 / 3.13 三个版本
+（[tests.yml](https://github.com/sumengnan/aifix-code/actions/workflows/tests.yml)）。
+Maven 那几条用例在没有可用 `mvn` 的机器上会自己跳过 —— 判据是「`mvn -o` 跑不跑得
+起来」，不是「`mvn` 在不在」。
+
+### 发新版本
+
+发布走 **PyPI Trusted Publishing**（OIDC），仓库里没有、也不需要任何 API 令牌。
+
+```bash
+# 1. 改 pyproject.toml 里的 version，提交
+# 2. 打 Release —— 剩下的全自动
+gh release create v0.1.1 --generate-notes
+```
+
+`release.yml` 会依次做：三个 Python 版本跑全量测试 → **核对 tag 与 pyproject 版本
+是否一致** → `uv build` → `twine check` → 上传 PyPI。
+
+两处刻意的闸：
+
+- **版本号对不上就停。** 不查的话，标签打成 `v0.2.0` 而 pyproject 还写着 0.1.0 时，
+  发出去的是 0.1.0 —— PyPI 报一句「File already exists」，错在标签，消息却指向别处。
+- **传之前 `twine check`。** 构建成功不等于传得上去，而那时 Release 已经发出去了，
+  看起来像「发布成功了但包没上去」。
+
+> **PyPI 不允许重传同一个版本号。** 发错了只能发下一个补丁号，而错的那个仍然挂在
+> 上面能被装到 —— 这就是为什么测试挡在发布前面，而不是发完再补跑。

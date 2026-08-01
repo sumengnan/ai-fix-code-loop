@@ -1,6 +1,6 @@
 # 命令参考
 
-所有命令都可以用 `uv run aifix <命令> --help` 看到内置说明，这份文档补充的是
+所有命令都可以用 `aifix <命令> --help` 看到内置说明，这份文档补充的是
 **每个命令的退出码语义**和**什么时候该用哪一个**。
 
 ```
@@ -68,14 +68,14 @@ aifix answer <编号> [repo] [--run-id RUN_ID] [--budget USD] [--quiet]
 这个命令把答案带回去。
 
 ```bash
-uv run aifix run .
+aifix run .
 # 报告里：
 #   ## 需要你回答一个问题
 #   **购物车为空时 total() 应该返回什么？**
 #   1. 返回 0
 #   2. 抛 EmptyCartError
 
-uv run aifix answer 1
+aifix answer 1
 ```
 
 `--run-id` 不填就用最近那个 —— 问题是刚才印在屏幕上的，不该再要人去翻一个哈希串。

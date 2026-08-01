@@ -515,7 +515,7 @@ ground truth 自带 —— 与 `aifix mine` 同一个思路，只是量的是复
 （`if: always()` —— 崩了才最需要它），下载下来跑
 
 ```bash
-uv run aifix replay <run_id> --repo <解压出来的目录>
+aifix replay <run_id> --repo <解压出来的目录>
 ```
 
 而 `facts.jsonl` + `report.md` 另有一条永久去处：`aifix/traces` 孤儿分支。详见

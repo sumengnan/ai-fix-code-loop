@@ -111,10 +111,12 @@ jobs:
 分支加载** —— 每改一次都要合一次。本地能跑通的东西，别拿到 CI 上去调。
 
 ```bash
-# 1. 把 aifix 装到一个独立的地方 —— 千万别装进你项目的 venv
-#    （发行名是 aifix-code，装完命令叫 aifix）
-python -m venv /tmp/aifix-venv
-/tmp/aifix-venv/bin/pip install aifix-code
+# 1. 装 aifix。**千万别装进你项目的 venv** —— 它自己依赖 langgraph、pydantic、
+#    openai，混进去可能起冲突，更糟的是污染跑 baseline 的那套环境。
+#    uv tool install 天然装在隔离环境里；发行名是 aifix-code，命令叫 aifix。
+uv tool install aifix-code
+# 没有 uv 就用这两行：
+# python -m venv /tmp/aifix-venv && /tmp/aifix-venv/bin/pip install aifix-code
 
 # 2. 配模型
 export AIFIX_FIXER__BASE_URL="https://your-endpoint/v1"
@@ -130,7 +132,7 @@ export AIFIX_TEST_PYTHON=/path/to/你的项目/.venv/bin/python
 
 # 4. 空跑：不调用任何模型、不花一分钱，只看它认不认得你的项目
 cd /path/to/你的项目
-/tmp/aifix-venv/bin/aifix run . --dry-run
+aifix run . --dry-run
 ```
 
 `--dry-run` 要看到的是这样一份报告：
@@ -153,7 +155,7 @@ cd /path/to/你的项目
 git log -1 --format='%s%n%n%b' <某个 fix commit> > /tmp/issue.md
 git worktree add /tmp/before <某个 fix commit>^   # 回到缺陷还在的那个状态
 
-/tmp/aifix-venv/bin/aifix reproduce /tmp/before --issue-text /tmp/issue.md
+aifix reproduce /tmp/before --issue-text /tmp/issue.md
 ```
 
 退出码 0 = 写出了复现测试且它真的红了。多试几个 commit，心里对成功率有个数再往下走。
@@ -541,7 +543,7 @@ pytest        # 或 mvn test
 不管成没成，`.aifix/runs/` 会作为 artifact 上传（30 天）。下载解压后：
 
 ```bash
-/tmp/aifix-venv/bin/aifix replay <run_id> --repo <解压出来的目录>
+aifix replay <run_id> --repo <解压出来的目录>
 ```
 
 能看到模型每一步读了什么、改了什么、为什么被守卫拦下。详见
@@ -704,13 +706,13 @@ Actions 的超时是**杀进程**。aifix 里那个「保证报告先落地」�
 ```bash
 # 你的仓库现在有几个红的用例，让它去修
 cd /path/to/你的项目
-/tmp/aifix-venv/bin/aifix run . --budget 1.0
+aifix run . --budget 1.0
 
 # 只修其中一个
-/tmp/aifix-venv/bin/aifix run . --test 'tests/test_cart.py::test_total'
+aifix run . --test 'tests/test_cart.py::test_total'
 
 # 模型停下来问你问题时
-/tmp/aifix-venv/bin/aifix answer 1
+aifix answer 1
 
 # 跑完看一眼再合
 git diff main aifix/<run_id>

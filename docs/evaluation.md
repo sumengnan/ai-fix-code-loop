@@ -40,7 +40,7 @@
 的 bug。
 
 ```bash
-uv run aifix mine /path/to/repo --limit 200 --max-tasks 40 --out evals/tasks.jsonl
+aifix mine /path/to/repo --limit 200 --max-tasks 40 --out evals/tasks.jsonl
 ```
 
 一个 `target_test` 一个任务（不是一个 commit 一个任务）：一个 commit 修好多个测试时
@@ -56,7 +56,7 @@ uv run aifix mine /path/to/repo --limit 200 --max-tasks 40 --out evals/tasks.jso
 跑测试确认真的弄红了，落成任务。
 
 ```bash
-uv run aifix mutate /path/to/repo --max-tasks 20 --seed 42
+aifix mutate /path/to/repo --max-tasks 20 --seed 42
 ```
 
 > **这是冒烟集，不是基准。** 一个把 `<` 改回 `<=` 的单点变异，和从 git history 里挖出来
@@ -99,7 +99,7 @@ uv run aifix mutate /path/to/repo --max-tasks 20 --seed 42
 ## 跑一轮
 
 ```bash
-uv run aifix eval evals/tasks-two-repos.jsonl \
+aifix eval evals/tasks-two-repos.jsonl \
     --label qwen3-coder-flash --parallel 3 \
     --budget-per-task 0.60 --budget-total 16.00
 ```

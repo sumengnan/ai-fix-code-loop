@@ -126,8 +126,8 @@ baseline：跑了 214 个，红 3 个（1:07）
 ## 跑完之后：`aifix replay`
 
 ```bash
-uv run aifix replay a1b2c3d4 --repo /path/to/repo
-uv run aifix replay a1b2c3d4 --step 7 --full
+aifix replay a1b2c3d4 --repo /path/to/repo
+aifix replay a1b2c3d4 --step 7 --full
 ```
 
 把 `events.jsonl` / `facts.jsonl` 渲染成可读的时间轴：每一步模型说了什么、调了什么工具、
@@ -162,8 +162,8 @@ uv run aifix replay a1b2c3d4 --step 7 --full
 干的事；用 grep 拼出来的数字既不可信也不可复用。
 
 ```bash
-uv run aifix ingest --repo /path/to/repo
-uv run aifix stats  --repo /path/to/repo
+aifix ingest --repo /path/to/repo
+aifix stats  --repo /path/to/repo
 ```
 
 ### 为什么不在 run 结束时自动灌库
@@ -272,8 +272,8 @@ aifix/traces（孤儿分支，永不合并）
 
 ```bash
 git clone --branch aifix/traces <repo> /tmp/traces
-uv run aifix ingest --repo . --runs-dir /tmp/traces/runs
-uv run aifix stats
+aifix ingest --repo . --runs-dir /tmp/traces/runs
+aifix stats
 ```
 
 几处细节：
@@ -377,8 +377,8 @@ cat .aifix/runs/a1b2c3d4/report.md
 cat .aifix/runs/a1b2c3d4/facts.jsonl | python -m json.tool --json-lines
 
 # 3. 找到可疑的那一步，看模型当时到底做了什么
-uv run aifix replay a1b2c3d4 | less
-uv run aifix replay a1b2c3d4 --step 12 --full
+aifix replay a1b2c3d4 | less
+aifix replay a1b2c3d4 --step 12 --full
 
 # 4. 用 git 直接验，别信报告里的数字
 git log --oneline main..aifix/a1b2c3d4
@@ -386,7 +386,7 @@ git diff main aifix/a1b2c3d4
 git diff main aifix/a1b2c3d4 -- tests/     # 必须是空的
 
 # 5. 如果怀疑是系统性问题，看跨 run 的形态
-uv run aifix ingest && uv run aifix stats
+aifix ingest && aifix stats
 ```
 
 第 4 步值得强调：**「报告说修好了时，分支上必须真的有东西」这条主张要用 git 验，不是读报告
