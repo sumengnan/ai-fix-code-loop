@@ -1,0 +1,58 @@
+name: Tests
+
+# 这个仓库此前**没有跑单元测试的 CI** —— 四个 aifix-* workflow 全都要真实模型、
+# 全都是手动触发的验收/评测。于是 925 个单测只在本机跑过，而发布是要挡在它们
+# 后面的：一个没人跑过测试的版本推上 PyPI，撤不回来。
+#
+# 三个触发口：
+#   push / pull_request  —— 日常防回归
+#   workflow_call        —— 被 release.yml 调用，作为发布前的闸
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+# 同一个分支上后推的提交取消前一次，省 runner 分钟数。
+# 发布那条路不受影响：release.yml 的 concurrency 是另一个 group。
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # checkout 需要 contents: read。写成 `{}` 在公开仓库上也能跑（匿名克隆），
+    # 但那是碰巧成立 —— 仓库哪天转私有就会以一句和权限无关的 checkout 报错挂掉。
+    # 显式给最小的那一条，不靠「反正是公开的」。
+    permissions:
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 与 pyproject 的 requires-python 和分类器保持一致。
+        # 三个版本都要跑：这个项目大量使用 asyncio 与 AST，两者在小版本之间
+        # 都出过行为差异（read_symbol 的 end_lineno、asyncio 的生成器收尾）。
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # setup-uv 不发布浮动 major 标签，这里钉具体版本
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # --locked：uv.lock 与 pyproject.toml 不一致时**直接失败**，而不是悄悄
+      # 改锁然后测一套和仓库里不一样的依赖
+      - name: Install
+        run: uv sync --locked --python ${{ matrix.python-version }}
+
+      # -n auto：本机 925 个用例串行约 11 分钟，并行 3 分钟。
+      # Maven 那几条在 runner 上会自己跳过 —— 判据是「mvn -o 跑不跑得起来」，
+      # 而 runner 的 ~/.m2 是空的（见 tests/conftest.maven_skip_mark）。
+      - name: Test
+        run: uv run --no-sync pytest -q -n auto

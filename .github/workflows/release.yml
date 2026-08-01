@@ -1,0 +1,73 @@
+name: Release
+
+# 在 GitHub 上 publish 一个 Release → 自动发到 PyPI。
+#
+# **不需要 API token**：走 PyPI 的 Trusted Publishing（OIDC）。GitHub 签一个
+# 短命的身份令牌，PyPI 按「哪个仓库、哪个 workflow 文件、哪个 environment」
+# 核对之后放行。没有长期密钥可泄漏，也没有人需要保管它。
+#
+# 配置在 PyPI 那一侧：https://pypi.org/manage/account/publishing/
+#   Owner        sumengnan
+#   Repository   aifix-code
+#   Workflow     release.yml        ← 改这个文件名要同步改 PyPI 上的配置
+#   Environment  pypi
+#
+# 触发的是 `published`，不是 `created`：草稿 Release 不该发包。
+on:
+  release:
+    types: [published]
+
+jobs:
+  # 发布前必须先绿。**不能省**：这个仓库的其它 workflow 全是手动触发的，
+  # 一个没人跑过测试的版本推上 PyPI 之后，那个版本号就永远占住了 —— PyPI 不
+  # 允许重传同一个版本，只能发下一个补丁号，而坏版本仍然挂在那儿能被装到。
+  test:
+    uses: ./.github/workflows/tests.yml
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # environment 是第二道闸：可以在仓库设置里给它加上人工审批或分支限制，
+    # 而 PyPI 那边的 Trusted Publisher 配置也会核对这个名字。
+    environment:
+      name: pypi
+      url: https://pypi.org/p/aifix-code
+
+    permissions:
+      id-token: write        # OIDC 取令牌用，Trusted Publishing 的全部权限需求
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # tag 与 pyproject 的版本对不上就停下。
+      # 少了这一步，`git tag v0.2.0` 而 pyproject 还写着 0.1.0 时，发出去的是
+      # 0.1.0 —— 而 0.1.0 早就存在，PyPI 直接拒，报的是一句和版本号无关的
+      # 「File already exists」。错在标签，消息却指向别处。
+      - name: 检查 tag 与 pyproject 版本一致
+        run: |
+          set -euo pipefail
+          version="$(python3 -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "::error::release tag '$GITHUB_REF_NAME' 与 pyproject 版本 '$version' 对不上"
+            exit 1
+          fi
+          echo "版本一致：$version"
+
+      - name: Build
+        run: uv build
+
+      # 传之前先验一遍元数据能不能被 PyPI 渲染。构建成功不等于传得上去 ——
+      # 长描述里一个 PyPI 不认的结构就会在上传那一步被拒，而那时 Release 已经
+      # 发出去了，看起来像「发布成功了但包没上去」。
+      - name: Check
+        run: uvx twine check dist/*
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
