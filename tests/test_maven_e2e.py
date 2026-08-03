@@ -236,7 +236,7 @@ def test_red_java_in_green_branch_out(maven_run):
     """整条链路跑通：surefire 的 id 一路流到判定与报告。"""
     state = maven_run["state"]
     assert state["abort"] is None, state["abort"]
-    assert state["adapter_name"] == "maven"
+    assert state["adapter_names"] == ["maven"]
     # baseline 只该有那一个红的；zeroIsStable 在修复前后都通过
     assert state["baseline_ids"] == [_TARGET_ID], state["baseline_ids"]
     assert [r["verdict"] for r in state["results"]] == ["better"], state["results"]

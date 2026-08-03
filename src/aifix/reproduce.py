@@ -277,10 +277,10 @@ async def red_check(worktree: Path, adapter: ProjectAdapter,
     第 4 条只能排在最后——它要读那次失败的栈帧，而前三条成立时压根没有失败
     对象可读。
     """
-    fs = await run_scoped(worktree, adapter, [target_id],
+    fs = await run_scoped(worktree, [adapter], [target_id],
                           timeout=timeout)
 
-    stuck = file_level_ids(sorted(fs.ids), adapter)
+    stuck = file_level_ids(sorted(fs.ids), [adapter])
     if stuck:
         return False, (
             f"复现测试在**收集**阶段就失败了（{'、'.join(stuck)}）。\n"

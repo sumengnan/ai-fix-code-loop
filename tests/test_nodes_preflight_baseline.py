@@ -1,6 +1,7 @@
 import subprocess
 import sys
 import typing
+from typing import Sequence
 from pathlib import Path
 
 import pytest
@@ -58,7 +59,7 @@ def test_new_state_defaults(buggy_repo):
 def test_preflight_detects_adapter_and_rejects_dirty(buggy_repo):
     st = new_state(buggy_repo, AifixConfig(), run_id="r1")
     out = preflight_node(st)
-    assert out["adapter_name"] == "pytest"
+    assert out["adapter_names"] == ["pytest"]
     assert out["abort"] is None
 
     (buggy_repo / "calc.py").write_text("dirty", encoding="utf-8")
@@ -72,18 +73,18 @@ def test_preflight_detects_a_maven_project(tmp_path):
     """新适配器加进注册表却接不上探测，等于没加：Maven 工程会直接 abort。
 
     preflight 一度有第二份注册表（`ADAPTERS = [PytestAdapter]`），
-    adapter_name 由它决定 —— baseline 那边把 maven 登记好了也没用。
+    adapter_names 由它决定 —— baseline 那边把 maven 登记好了也没用。
     """
     repo = _maven_project(tmp_path / "mvn")
     out = preflight_node(new_state(repo, AifixConfig(), run_id="r1"))
     assert out["abort"] is None, out["abort"]
-    assert out["adapter_name"] == "maven"
+    assert out["adapter_names"] == ["maven"]
 
 
 def test_preflight_still_detects_a_pytest_project(buggy_repo):
     """反向断言：一个「无脑返回 maven」的实现必须过不了这里。"""
     out = preflight_node(new_state(buggy_repo, AifixConfig(), run_id="r1"))
-    assert out["adapter_name"] == "pytest"
+    assert out["adapter_names"] == ["pytest"]
 
 
 def test_maven_wins_over_pytest_when_both_detect(tmp_path):
@@ -100,7 +101,7 @@ def test_maven_wins_over_pytest_when_both_detect(tmp_path):
     assert MavenAdapter.detect(repo) is True
     assert PytestAdapter.detect(repo) is True
     out = preflight_node(new_state(repo, AifixConfig(), run_id="r1"))
-    assert out["adapter_name"] == "maven"
+    assert out["adapter_names"] == ["maven"]
 
 
 @pytest.mark.parametrize("kind", ["maven", "pytest"])
@@ -112,9 +113,9 @@ def test_detected_name_is_resolvable_by_adapter_for(tmp_path, buggy_repo, kind):
     过来登记了却永远探测不到。
     """
     repo = buggy_repo if kind == "pytest" else _maven_project(tmp_path / "m")
-    name = preflight_node(new_state(repo, AifixConfig(), run_id="r1"))["adapter_name"]
-    assert name == kind
-    assert adapter_for(name).name == kind
+    names = preflight_node(new_state(repo, AifixConfig(), run_id="r1"))["adapter_names"]
+    assert names == [kind]
+    assert adapter_for(names[0]).name == kind
 
 
 _PROTOCOL_MEMBERS = sorted(n for n in vars(ProjectAdapter)
@@ -152,9 +153,13 @@ def test_suite_runners_are_annotated_with_the_protocol(fn):
     注解不会在运行时报错，所以这条只能盯注解本身：它写的是「这里只接
     PytestAdapter」，而 adapter_for 早已可能返回 MavenAdapter。读代码的人
     和静态检查都会据此得出错误结论。
+
+    参数改成**序列**之后这条继续做功，而且多守一件事：写成
+    `Sequence[PytestAdapter]` 同样是假话，写成裸 `list` 则等于什么都没说。
+    这条测试在改名那一刻就红了（KeyError: 'adapter'），正是它该有的样子。
     """
     hints = typing.get_type_hints(fn)
-    assert hints["adapter"] is ProjectAdapter, hints["adapter"]
+    assert hints["adapters"] == Sequence[ProjectAdapter], hints["adapters"]
 
 
 def test_preflight_rejects_unknown_project(tmp_path):
@@ -190,9 +195,9 @@ class _SilentAdapter(PytestAdapter):
 
 async def test_missing_report_is_tolerated_by_default(buggy_repo):
     """M1/M2 的既有行为：报告缺失 → 空集合，不抛 —— 不能改。"""
-    fs = await run_full_suite(buggy_repo, _SilentAdapter())
+    fs = await run_full_suite(buggy_repo, [_SilentAdapter()])
     assert fs.ids == set()
-    fs2 = await run_scoped(buggy_repo, _SilentAdapter(), ["随便一个"])
+    fs2 = await run_scoped(buggy_repo, [_SilentAdapter()], ["随便一个"])
     assert fs2.ids == set()
 
 
@@ -203,9 +208,9 @@ async def test_missing_report_raises_when_required(buggy_repo):
     全部当成「红转绿」吐出来 —— 凭空捏造一整批任务。
     """
     with pytest.raises(RuntimeError, match="报告"):
-        await run_full_suite(buggy_repo, _SilentAdapter(), require_report=True)
+        await run_full_suite(buggy_repo, [_SilentAdapter()], require_report=True)
     with pytest.raises(RuntimeError, match="报告"):
-        await run_scoped(buggy_repo, _SilentAdapter(), ["随便一个"],
+        await run_scoped(buggy_repo, [_SilentAdapter()], ["随便一个"],
                          require_report=True)
 
 
@@ -240,10 +245,10 @@ async def test_a_report_with_zero_cases_is_not_all_green(buggy_repo):
     记着这个形状，一直没有对应的闸。
     """
     with pytest.raises(RuntimeError, match="一个用例都没跑"):
-        await run_full_suite(buggy_repo, _ZeroCaseAdapter(),
+        await run_full_suite(buggy_repo, [_ZeroCaseAdapter()],
                              require_report=True)
     with pytest.raises(RuntimeError, match="一个用例都没跑"):
-        await run_scoped(buggy_repo, _ZeroCaseAdapter(), ["随便一个"],
+        await run_scoped(buggy_repo, [_ZeroCaseAdapter()], ["随便一个"],
                          require_report=True)
 
 
@@ -255,9 +260,9 @@ async def test_zero_case_and_missing_report_say_different_things(buggy_repo):
     conftest 抛异常、测试依赖缺失）。给错方向的排查提示比不给更费时间。
     """
     with pytest.raises(RuntimeError) as missing:
-        await run_full_suite(buggy_repo, _SilentAdapter(), require_report=True)
+        await run_full_suite(buggy_repo, [_SilentAdapter()], require_report=True)
     with pytest.raises(RuntimeError) as empty:
-        await run_full_suite(buggy_repo, _ZeroCaseAdapter(),
+        await run_full_suite(buggy_repo, [_ZeroCaseAdapter()],
                              require_report=True)
     assert "未产出任何 JUnit 报告" in str(missing.value)
     assert "收集" in str(empty.value)
@@ -266,7 +271,7 @@ async def test_zero_case_and_missing_report_say_different_things(buggy_repo):
 
 async def test_zero_case_report_is_still_tolerated_by_default(buggy_repo):
     """默认档不变：非 required 的调用方拿到空集合，不抛。"""
-    fs = await run_full_suite(buggy_repo, _ZeroCaseAdapter())
+    fs = await run_full_suite(buggy_repo, [_ZeroCaseAdapter()])
     assert fs.ids == set() and set(fs.ran) == set()
 
 
@@ -277,7 +282,7 @@ async def test_missing_report_message_names_no_particular_file(buggy_repo):
     「消息说了一件代码没做的事」与「数字造假」同等对待。
     """
     with pytest.raises(RuntimeError) as ei:
-        await run_full_suite(buggy_repo, _SilentAdapter(), require_report=True)
+        await run_full_suite(buggy_repo, [_SilentAdapter()], require_report=True)
     msg = str(ei.value)
     assert ".xml" not in msg, f"消息里点名了具体报告文件：{msg}"
     assert str(buggy_repo) in msg, f"消息没说是哪个 worktree：{msg}"
@@ -290,7 +295,7 @@ async def test_run_full_suite_result_is_unchanged_by_the_refactor(buggy_repo):
     接口重构最典型的失败形状是「测试全绿，但某条路径悄悄少解析了一份报告」——
     只断言 ids 非空是发现不了的，所以连 ran / 字段值一起钉住。
     """
-    fs = await run_full_suite(buggy_repo, PytestAdapter())
+    fs = await run_full_suite(buggy_repo, [PytestAdapter()])
     assert fs.ids == {"tests/test_calc.py::test_add"}
     assert set(fs.ran) == {"tests/test_calc.py::test_add",
                            "tests/test_calc.py::test_identity"}
@@ -307,7 +312,7 @@ async def test_run_full_suite_result_is_unchanged_by_the_refactor(buggy_repo):
 
 async def test_run_scoped_result_is_unchanged_by_the_refactor(buggy_repo):
     """同上，scoped 那条路径的基准。两个用例都点名跑，只有 test_add 该红。"""
-    fs = await run_scoped(buggy_repo, PytestAdapter(),
+    fs = await run_scoped(buggy_repo, [PytestAdapter()],
                           ["tests/test_calc.py::test_add",
                            "tests/test_calc.py::test_identity"])
     assert fs.ids == {"tests/test_calc.py::test_add"}
@@ -326,7 +331,7 @@ async def test_scoped_run_does_not_clobber_the_full_report(buggy_repo):
     sentinel = "<testsuites/>"
     (buggy_repo / a.REPORT_NAME).write_text(sentinel, encoding="utf-8")
     try:
-        await run_scoped(buggy_repo, a, ["tests/test_calc.py::test_identity"])
+        await run_scoped(buggy_repo, [a], ["tests/test_calc.py::test_identity"])
         assert (buggy_repo / a.REPORT_NAME).read_text(encoding="utf-8") == sentinel
     finally:
         (buggy_repo / a.REPORT_NAME).unlink(missing_ok=True)
@@ -349,8 +354,8 @@ async def test_baseline_refuses_to_read_a_dead_test_run_as_all_green(
     st.update(preflight_node(st))
     with Worktree(buggy_repo, run_id="r1") as wt:
         st["worktree_path"] = str(wt.path)
-        monkeypatch.setattr(baseline_mod, "adapter_from_state",
-                            lambda state: _SilentAdapter())
+        monkeypatch.setattr(baseline_mod, "adapters_from_state",
+                            lambda state: [_SilentAdapter()])
         with pytest.raises(RuntimeError, match="报告"):
             await baseline_node(st)
 

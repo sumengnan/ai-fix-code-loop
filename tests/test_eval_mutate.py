@@ -287,7 +287,7 @@ async def test_generated_task_is_actually_red(tmp_path):
         assert "\n" not in t.task_id and '"' not in t.task_id
         dest = tmp_path / "check" / f"t{i}"
         prepare_task_repo(t, dest)
-        fs = await run_full_suite(dest, PytestAdapter(), require_report=True)
+        fs = await run_full_suite(dest, [PytestAdapter()], require_report=True)
         assert t.target_test in fs.ids, \
             f"任务不红：{t.target_test} 不在 {sorted(fs.ids)}"
         # 单点缺陷：变异只该弄红这一个用例，其余照常跑过

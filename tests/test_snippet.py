@@ -138,7 +138,7 @@ def test_detect_node_actually_reads_the_files(repo, monkeypatch):
 
     monkeypatch.setattr(detect_mod, "AgentLoop", _Loop)
     monkeypatch.setattr(detect_mod, "consume", _consume)
-    monkeypatch.setattr(detect_mod, "adapter_from_state", lambda s: _Adapter())
+    monkeypatch.setattr(detect_mod, "adapter_for_test", lambda s, t: _Adapter())
 
     from aifix.config import AifixConfig
 

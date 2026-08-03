@@ -17,7 +17,7 @@ from ..graph import AifixState, progress_of, trace_of
 from ..progress import StepReporter
 from ..tools.ask import Pending
 from ..violations import count_violations
-from .baseline import adapter_from_state
+from .baseline import adapter_for_test
 
 _EMPTY_FEEDBACK = (
     "你没有对任何文件做出修改。只说「已修复」是无效的 —— "
@@ -119,7 +119,7 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
     """
     cfg = state["config"]
     failure = state["_failures"][state["current"]]
-    adapter = adapter_from_state(state)
+    adapter = adapter_for_test(state, state["current"])
     raw = state.get("diagnosis")
     diagnosis = Diagnosis.model_validate(raw) if raw else None
 

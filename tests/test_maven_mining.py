@@ -179,7 +179,7 @@ def replayed(mined, tmp_path_factory) -> dict:
         pytest.skip("没挖出任务，复现无从谈起（由 test_mining_really_produces_tasks 报告）")
     dest = tmp_path_factory.mktemp("mvn_replay") / "task"
     prepare_task_repo(mined["tasks"][0], dest)
-    fs = asyncio.run(run_full_suite(dest, MavenAdapter(), require_report=True))
+    fs = asyncio.run(run_full_suite(dest, [MavenAdapter()], require_report=True))
     return {"dest": dest, "fs": fs}
 
 

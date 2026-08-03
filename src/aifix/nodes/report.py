@@ -138,7 +138,7 @@ def render_report(state: dict[str, Any]) -> str:
         if state.get("abort_kind") == COLLECTION_ABORT_KIND
         else f"- 修复：**{fixed} / {total}**")
     lines += [
-        f"- 适配器：{state['adapter_name']}",
+        f"- 适配器：{'、'.join(state['adapter_names']) or '（无）'}",
         f"- 分支：`{state['branch']}`",
         fixed_line,
         f"- 成本：{cost}",

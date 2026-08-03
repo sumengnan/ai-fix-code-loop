@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from harness.sandbox.local import LocalSandbox
 
-from ..adapters.base import ProjectAdapter
+from ..adapters.base import FailureSet, ProjectAdapter, merge, tag_owner
 from ..adapters.junit import parse_junit
 from ..adapters.maven_adapter import MavenAdapter
 from ..adapters.pytest_adapter import (PytestAdapter,
@@ -60,7 +60,7 @@ def adapter_for(name: str, python: str | None = None,
     return ADAPTERS[name](python=python, parallel=parallel)
 
 
-def adapter_from_state(state: AifixState) -> ProjectAdapter:
+def adapters_from_state(state: AifixState) -> list[ProjectAdapter]:
     """核心循环取适配器的**唯一**入口 —— 解释器在这里注入。
 
     为什么不是各节点自己 `adapter_for(name)`：解释器要同时看配置和**源仓库**
@@ -71,17 +71,44 @@ def adapter_from_state(state: AifixState) -> ProjectAdapter:
     漏了看不出来；但 fix 漏掉的话，FixerAgent 手里的 RunTestsTool 会用另一个
     解释器复跑 —— 模型看到的证据和 verify 的判定依据不是同一套环境，而两边
     都不会报错。tests/test_interpreter.py 有一条对着源码的断言钉这件事。
+
+    返回**列表**：前后端同仓的工程有两套测试套件，跑全量时两套都要跑。
+    需要「这条 id 归谁」的地方走 `adapter_for_test`。
     """
     python = resolve_test_python(Path(state["repo"]),
                                  state["config"].test_python)
-    return adapter_for(
-        state["adapter_name"], python=python,
-        # 并行度也在这里解析，理由与解释器同一条：探测要问**目标解释器**
-        # 有没有 xdist，而只有 state 同时握着配置与源仓库。
-        # 探测带缓存（见 pytest_adapter.has_xdist），四个节点各调一次不会
-        # 各起一个子进程。
-        parallel=resolve_test_parallel(python,
-                                       state["config"].test_parallel))
+    # 并行度也在这里解析，理由与解释器同一条：探测要问**目标解释器**有没有
+    # xdist，而只有 state 同时握着配置与源仓库。探测带缓存（见
+    # pytest_adapter.has_xdist），四个节点各调一次不会各起一个子进程。
+    parallel = resolve_test_parallel(python, state["config"].test_parallel)
+    return [adapter_for(n, python=python, parallel=parallel)
+            for n in state["adapter_names"]]
+
+
+def adapter_for_test(state: AifixState, test_id: str) -> ProjectAdapter:
+    """这条 id 该问哪个适配器。
+
+    `locate_source` 解的栈、`scoped_test_command` 拼的选择器、`is_test_path`
+    的判据 —— 三个适配器各不相同，拿错一个的后果全是静默的（栈解不出来就退回
+    「没有锚点」，选择器不对就跑个空）。
+
+    判据是 baseline 那一跑记下来的**出处**（`FailureSet.owner` → `_owners`），
+    不是 id 的形状。按形状猜在这个仓库有前科，且 pytest 与 vitest 的 id 恰好
+    都用 `::`，再猜一次只会把两者混在一起。
+
+    记账里没有它、而当前只有一个适配器时就是那一个 —— 那是今天绝大多数仓库的
+    形状。多适配器而记账缺失则抛异常，与 `_dispatch` 同一条理由。
+    """
+    adapters = adapters_from_state(state)
+    name = (state.get("_owners") or {}).get(test_id, "")
+    if not name:
+        if len(adapters) == 1:
+            return adapters[0]
+        raise RuntimeError(
+            f"不知道 `{test_id}` 归哪个适配器（记账里没有它，而当前有 "
+            f"{len(adapters)} 个）。这是记账漏了，不是可以猜的事。")
+    by_name = {a.name: a for a in adapters}
+    return by_name[name]
 
 
 def warn_if_patch_may_be_invisible(state: AifixState,
@@ -123,9 +150,9 @@ def warn_if_patch_may_be_invisible(state: AifixState,
         file=sys.stderr, flush=True)
 
 
-def detect_adapter(repo: Path,
-                   python: str | None = None) -> ProjectAdapter | None:
-    """按注册表顺序探测这个仓库归谁管；没人认领返回 None。
+def detect_adapters(repo: Path,
+                    python: str | None = None) -> list[ProjectAdapter]:
+    """按注册表顺序探测这个仓库归谁管。**认领的全都要**，没人认领返回空列表。
 
     **全项目唯一的探测入口**，preflight_node 与 `aifix mine` 都走这里。
     分头写就是「第二份注册表」那处裂缝的形状：`_cmd_mine` 曾直接
@@ -133,11 +160,30 @@ def detect_adapter(repo: Path,
     gold_files 恒空 → is_candidate 恒 False → 产出 0 个任务，不报一个错，
     与「这个仓库最近没有红转绿的提交」完全无法区分 —— 而适配层里为 Maven
     补的每一处缺口都在这一行之后，全都到不了。
+
+    改成「全都要」而不是「第一个」，是为了前后端同仓的工程：只取第一个的话，
+    另一套测试的用例在 baseline 里**根本不存在**，于是 verify 的三态比较永远
+    不会因为它们变红而判 WORSE。那不是「通过」，是没测 —— 而报告里看不出差别。
     """
-    for cls in ADAPTERS.values():
-        if cls.detect(Path(repo)):
-            return cls(python=python)
-    return None
+    return [cls(python=python) for cls in ADAPTERS.values()
+            if cls.detect(Path(repo))]
+
+
+def detect_adapter(repo: Path,
+                   python: str | None = None) -> ProjectAdapter | None:
+    """探测出的**第一个**适配器；没人认领返回 None。
+
+    留着单数版本是因为有三个调用点天然只能要一个：`aifix reproduce` 与 issue
+    那条路要让模型写**一条**复现测试（一条测试只能是一种语言），`aifix mine`
+    挖任务时的路径拆分也只按一套规则走。
+
+    **这是一个已知的窟窿，不是设计**：前后端同仓的工程走这三条路时，只有排在
+    前面的那套体系能被复现/挖掘到。写这条 issue 的人如果报的是另一侧的缺陷，
+    模型会拿错语言写测试，而红检只会说「这条测试没红」——一句指错方向的话。
+    补它要让 reproducer 自己判断该写哪一侧，那需要先有数据说明它判得准不准。
+    """
+    found = detect_adapters(repo, python=python)
+    return found[0] if found else None
 
 
 # 判据的两个阈值，**同时成立**才中止。分开两条是因为它们防的不是同一件事：
@@ -160,7 +206,20 @@ COLLECTION_ABORT_MIN_COUNT = 2
 COLLECTION_ABORT_RATIO = 0.5
 
 
-def file_level_ids(ids: list[str], adapter: ProjectAdapter) -> list[str]:
+def _owning(adapters: Sequence[ProjectAdapter], owner: dict[str, str],
+            test_id: str) -> ProjectAdapter:
+    """这条 id 归谁。记账缺失且只有一个适配器时就是那一个。
+
+    这里**不抛异常**，与 `_dispatch` 不同：判文件级 id 是一次分类，分错一条
+    的代价是阈值算得略偏，而抛出去会让整个 baseline 崩在一条无关紧要的 id 上。
+    记账缺失时退回第一个 —— 单适配器仓库里那就是唯一正确答案。
+    """
+    by_name = {a.name: a for a in adapters}
+    return by_name.get(owner.get(test_id, ""), adapters[0])
+
+
+def file_level_ids(ids: list[str], adapters: Sequence[ProjectAdapter],
+                   owner: dict[str, str] | None = None) -> list[str]:
     """baseline 里哪些 id 指的是一整个测试文件 / 测试类，而不是单个用例。
 
     判据问适配器，不自己写一套语法。`eval/mine` 曾写死 `"::" not in i`，
@@ -168,7 +227,8 @@ def file_level_ids(ids: list[str], adapter: ProjectAdapter) -> list[str]:
     Maven id 都被判成文件级。这里若重蹈覆辙，后果是对称的：一个纯用例
     失败的 Maven baseline 会被整个误判成环境故障、当场中止。
     """
-    return [i for i in ids if adapter.is_file_level_id(i)]
+    own = owner or {}
+    return [i for i in ids if _owning(adapters, own, i).is_file_level_id(i)]
 
 
 def _collection_hint(adapter: ProjectAdapter) -> list[str]:
@@ -191,7 +251,8 @@ def _collection_hint(adapter: ProjectAdapter) -> list[str]:
 
 
 def collection_error_abort(ids: list[str],
-                           adapter: ProjectAdapter) -> str | None:
+                           adapters: Sequence[ProjectAdapter],
+                           owner: dict[str, str] | None = None) -> str | None:
     """baseline 里文件级 error 占比过高 → 返回中止理由；否则 None。
 
     存在的理由（实测挖出来的）：pytest 收集阶段整轮中断时**照样写出一份完整
@@ -216,7 +277,7 @@ def collection_error_abort(ids: list[str],
     """
     if not ids:
         return None
-    bad = file_level_ids(ids, adapter)
+    bad = file_level_ids(ids, adapters, owner)
     if len(bad) < COLLECTION_ABORT_MIN_COUNT:
         return None
     if len(bad) <= len(ids) * COLLECTION_ABORT_RATIO:
@@ -234,7 +295,10 @@ def collection_error_abort(ids: list[str],
         "把它们当成待修用例排进队列，Detector 与 Fixer 会被派去修"
         "「这台机器上缺了点什么」这件事，会真花钱，而报告最后写的是"
         "「模型没修好」—— 一个成绩，其实是一次故障。",
-        *_collection_hint(adapter),
+        # 提示按**出问题那批 id** 的归属给：两套体系混在一起时，劝一个 Java
+        # 或前端项目换 Python 解释器是一句假话。取 bad 里第一条的归属 ——
+        # 收集错误几乎总是整套一起坏，混着坏的情形没见过。
+        *_collection_hint(_owning(adapters, owner or {}, bad[0])),
         f"  没跑起来的{more}：",
         *(f"    {i}" for i in shown),
         "  如果确认这些**就是**这个仓库自己的 bug（例如某个模块被改名，"
@@ -349,15 +413,8 @@ async def _rm_reports(sb: LocalSandbox, adapter: ProjectAdapter,
         await sb.exec(["rm", "-f", *(str(p) for p in stale)], 10.0)
 
 
-async def run_full_suite(worktree: Path, adapter: ProjectAdapter,
-                         timeout: float = 1800.0,
-                         require_report: bool = False):
-    """在 worktree 里跑全量测试并解析报告。零 LLM。
-
-    require_report 默认 False，但核心循环的每一个调用点都显式传了 True
-    （见 _check_report）：默认值留给「少一份报告确实无所谓」的调用方，
-    产品路径上不存在这样的调用方。
-    """
+async def _run_one_full(worktree: Path, adapter: ProjectAdapter,
+                        timeout: float, require_report: bool) -> FailureSet:
     sb = LocalSandbox(workspace=str(worktree))
     await sb.start()
     try:
@@ -369,19 +426,68 @@ async def run_full_suite(worktree: Path, adapter: ProjectAdapter,
         # 先解析再检查：「跑了几个用例」只有报告内容知道，文件在不在答不了
         fs = parse_junit(paths, adapter.make_test_id)
         _check_report(worktree, paths, fs.ran, require_report, res, timeout)
-        return fs
+        return tag_owner(fs, adapter.name)
     finally:
         await _rm_reports(sb, adapter, worktree, scoped=False)
         await sb.close()
 
 
-async def run_scoped(worktree: Path, adapter: ProjectAdapter,
-                     test_ids: list[str], timeout: float = 600.0,
-                     require_report: bool = False):
-    """只跑指定用例并解析报告。供 flaky 确认使用 —— 成本远低于全量。
+async def run_full_suite(worktree: Path, adapters: Sequence[ProjectAdapter],
+                         timeout: float = 1800.0,
+                         require_report: bool = False):
+    """在 worktree 里跑全量测试并解析报告。零 LLM。
 
-    走 scoped 那份报告：调用它的时候全量那份通常还要继续用，不能被覆盖。
+    收的是**列表**：前后端同仓的工程有两套测试套件，两套都得跑。只跑一套的
+    后果不是报错 —— 另一套的用例在 baseline 里根本不存在，于是 verify 的三态
+    比较永远不会因为它们变红而判 WORSE。**那不是「通过」，是没测**。
+
+    串行跑，不并发：两套测试可能抢同一批端口、同一个测试数据库、同一个临时目录。
+    真要并发得先证明它们互不干扰，而这里省下的那点墙钟远不值那个风险。
+
+    `require_report` 对**每一个**适配器分别成立。少一份报告就是少一整套测试的
+    结果，而合并之后那副样子与「那套测试全绿」一模一样。
+
+    require_report 默认 False，但核心循环的每一个调用点都显式传了 True
+    （见 _check_report）：默认值留给「少一份报告确实无所谓」的调用方，
+    产品路径上不存在这样的调用方。
     """
+    out = []
+    for a in adapters:
+        out.append(await _run_one_full(worktree, a, timeout, require_report))
+    return merge(out)
+
+
+def _dispatch(test_ids: list[str], adapters: Sequence[ProjectAdapter],
+              owner: dict[str, str] | None) -> list[tuple[ProjectAdapter, list[str]]]:
+    """把一批 id 按 owner 分给各自的适配器，保持传入顺序。
+
+    只有一个适配器时不需要 owner —— 那是今天绝大多数调用点的形状（红检、
+    fixer 的 run_tests），要求它们凭空造一份记账是纯粹的负担。
+
+    **多适配器而某条 id 没有记账时抛异常，不猜。** 猜错的后果在三种适配器上
+    都是静默的：id 进了另一套体系的命令行，那套体系不报错，只是一个用例都不跑，
+    写出一份 tests="0" 的报告 —— 而复跑「跑了个空」会被 filter_flaky 读成
+    「重跑就绿」，于是真的被补丁弄红的用例被划进抖动、从判定里剔除。
+    """
+    by_name = {a.name: a for a in adapters}
+    groups: dict[str, list[str]] = {}
+    for tid in test_ids:
+        if len(adapters) == 1 and (owner is None or tid not in owner):
+            name = adapters[0].name
+        else:
+            name = (owner or {}).get(tid, "")
+            if name not in by_name:
+                raise RuntimeError(
+                    f"不知道 `{tid}` 该交给哪个适配器复跑"
+                    f"（记账里没有它，而当前有 {len(adapters)} 个适配器："
+                    f"{'、'.join(by_name)}）。这是记账漏了，不是可以猜的事。")
+        groups.setdefault(name, []).append(tid)
+    return [(by_name[n], ids) for n, ids in groups.items()]
+
+
+async def _run_one_scoped(worktree: Path, adapter: ProjectAdapter,
+                          test_ids: list[str], timeout: float,
+                          require_report: bool) -> FailureSet:
     sb = LocalSandbox(workspace=str(worktree))
     await sb.start()
     try:
@@ -391,10 +497,29 @@ async def run_scoped(worktree: Path, adapter: ProjectAdapter,
         paths = adapter.report_paths(worktree, scoped=True)
         fs = parse_junit(paths, adapter.make_test_id)
         _check_report(worktree, paths, fs.ran, require_report, res, timeout)
-        return fs
+        return tag_owner(fs, adapter.name)
     finally:
         await _rm_reports(sb, adapter, worktree, scoped=True)
         await sb.close()
+
+
+async def run_scoped(worktree: Path, adapters: Sequence[ProjectAdapter],
+                     test_ids: list[str], timeout: float = 600.0,
+                     require_report: bool = False,
+                     owner: dict[str, str] | None = None):
+    """只跑指定用例并解析报告。供 flaky 确认使用 —— 成本远低于全量。
+
+    走 scoped 那份报告：调用它的时候全量那份通常还要继续用，不能被覆盖。
+
+    `owner`：id → 适配器名的记账（`FailureSet.owner`）。只有一个适配器时可以
+    不给。多适配器时**只跑记账里点到名的那些适配器** —— 复跑两个用例不该顺带
+    把另一整套套件也跑一遍。
+    """
+    out = []
+    for adapter, ids in _dispatch(test_ids, adapters, owner):
+        out.append(await _run_one_scoped(worktree, adapter, ids, timeout,
+                                         require_report))
+    return merge(out)
 
 
 async def baseline_node(state: AifixState) -> dict[str, Any]:
@@ -412,9 +537,10 @@ async def baseline_node(state: AifixState) -> dict[str, Any]:
     与 trace 都不该因为我们不信任它就假装没看见。不可信的是「拿它当工单」这个
     动作，所以被清空的是 queue。
     """
-    adapter = adapter_from_state(state)
-    warn_if_patch_may_be_invisible(state, adapter)
-    fs = await run_full_suite(Path(state["worktree_path"]), adapter,
+    adapters = adapters_from_state(state)
+    for a in adapters:
+        warn_if_patch_may_be_invisible(state, a)
+    fs = await run_full_suite(Path(state["worktree_path"]), adapters,
                               timeout=state["config"].test_timeout_seconds,
                               require_report=True)
     ids = sorted(fs.ids)
@@ -423,8 +549,11 @@ async def baseline_node(state: AifixState) -> dict[str, Any]:
     # verify 都要再跑一次那 2000 个 —— 用户看到的停顿会长得多，且那是正常的。
     out: dict[str, Any] = {"baseline_ids": ids, "queue": list(ids),
                            "_failures": dict(fs.failures), "_ran": len(fs.ran),
+                           # 出处记账。detect / fix / 复跑都靠它知道手上这条
+                           # id 该问哪个适配器 —— 见 adapter_for_test。
+                           "_owners": dict(fs.owner),
                            "abort": None, "abort_kind": None}
-    bad = collection_error_abort(ids, adapter)
+    bad = collection_error_abort(ids, adapters, fs.owner)
     if bad is None:
         return out
     trace = trace_of(state)
@@ -432,7 +561,7 @@ async def baseline_node(state: AifixState) -> dict[str, Any]:
         # 逃生口开着也要留痕：一条被静默绕过的守卫等于没有守卫。写 stderr 是
         # 因为报告要等整个 run 跑完才渲染，而这句话得在花钱之前说出来。
         trace.fact("collection_errors_allowed",
-                   len(file_level_ids(ids, adapter)))
+                   len(file_level_ids(ids, adapters, fs.owner)))
         print(f"⚠️  警告：{bad}\n"
               "    AIFIX_ALLOW_COLLECTION_ERRORS 已开启，"
               "这批 id 会照常排队开修。", file=sys.stderr, flush=True)

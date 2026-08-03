@@ -76,7 +76,11 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-pythonpath = ["src"]
+# tests 也进去：几个测试文件之间要共享探测器（`npm install --offline` 装不装
+# 得上 vitest、`mvn -o` 跑不跑得起来）。不加的话 `from test_vitest_adapter
+# import _vitest_skip` 是 ModuleNotFoundError，而替代方案是把同一段探测
+# 逻辑复制几份 —— 复制出来的探测器会各自漂移。
+pythonpath = ["src", "tests"]
 testpaths = ["tests"]
 addopts = "--import-mode=importlib"
 

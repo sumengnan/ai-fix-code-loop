@@ -241,7 +241,7 @@ def test_a_broken_interpreter_never_takes_down_the_run(tmp_path):
 def _state(repo: Path, worktree: Path, config: AifixConfig):
     from aifix.graph import new_state
     st = new_state(repo, config, run_id="r1")
-    st["adapter_name"] = "pytest"
+    st["adapter_names"] = ["pytest"]
     st["worktree_path"] = str(worktree)
     return st
 
@@ -254,7 +254,7 @@ def test_nodes_probe_the_source_repo_not_the_worktree(tmp_path):
     跟踪）。照着 worktree 探，探测永远为空，整个功能静默退化成 sys.executable
     而所有「显式配置优先」的测试照样绿。
     """
-    from aifix.nodes.baseline import adapter_from_state
+    from aifix.nodes.baseline import adapters_from_state
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -263,34 +263,40 @@ def test_nodes_probe_the_source_repo_not_the_worktree(tmp_path):
     worktree.mkdir(parents=True)
     assert discover_test_python(worktree) is None       # worktree 里确实没有
 
-    adapter = adapter_from_state(_state(repo, worktree, AifixConfig()))
+    adapter, = adapters_from_state(_state(repo, worktree, AifixConfig()))
     assert adapter.full_test_command()[0] == str(exe)
 
 
 def test_nodes_let_the_explicit_config_win(tmp_path):
-    from aifix.nodes.baseline import adapter_from_state
+    from aifix.nodes.baseline import adapters_from_state
 
     repo = tmp_path / "repo"
     repo.mkdir()
     found = _fake_venv(repo)
     cfg = AifixConfig(test_python="/usr/local/bin/python3.12")
-    adapter = adapter_from_state(_state(repo, repo / "tree", cfg))
+    adapter, = adapters_from_state(_state(repo, repo / "tree", cfg))
     assert adapter.full_test_command()[0] == "/usr/local/bin/python3.12"
     assert adapter.full_test_command()[0] != str(found)
 
 
 def test_every_node_that_runs_tests_goes_through_the_same_entry():
-    """四个节点必须都走 adapter_from_state，否则解释器只对其中几个生效。
+    """四个节点必须都走那**两个**入口之一，否则解释器只对其中几个生效。
 
     fix 那条尤其致命：RunTestsTool 拿的是 fix_node 构造的适配器，模型自己
     跑的复跑会用另一个解释器 —— 与 verify 的判定依据不是同一套环境。
+
+    多适配器落地之后入口是两个，而**两个都在 baseline 里注入解释器**：
+    `adapters_from_state` 给要跑全量的节点（baseline / verify），
+    `adapter_for_test` 给按单条 id 办事的节点（detect / fix）。绕过它们自己
+    `adapter_for(...)` 的那条路仍然要堵死 —— 那里没有解释器。
     """
     import inspect
 
     from aifix.nodes import baseline, detect, fix, verify
+    entries = ("adapters_from_state(state)", "adapter_for_test(state,")
     for mod in (baseline, detect, fix, verify):
         src = inspect.getsource(mod)
-        assert "adapter_from_state(state)" in src, mod.__name__
+        assert any(e in src for e in entries), mod.__name__
         assert "adapter_for(state[" not in src, mod.__name__
 
 
@@ -316,7 +322,7 @@ def test_preflight_accepts_a_real_interpreter(buggy_repo):
     cfg = AifixConfig(test_python=sys.executable)
     out = preflight_node(new_state(buggy_repo, cfg, run_id="r1"))
     assert out["abort"] is None
-    assert out["adapter_name"] == "pytest"
+    assert out["adapter_names"] == ["pytest"]
 
 
 # 造真 venv 的 `real_venv` 工厂在 conftest.py：评测那条路（eval/runner）也要用
@@ -452,28 +458,30 @@ def test_resolve_parallel_is_off_unless_asked():
 
 
 def test_the_parallel_setting_reaches_the_actual_command(tmp_path):
-    """**整条线**：config → adapter_from_state → 真正发出去的命令。
+    """**整条线**：config → adapters_from_state → 真正发出去的命令。
 
     断在任何一环，表现都是「并行一声不吭地没生效」—— 而这个功能唯一的
     观测方式就是「跑得快不快」，没人会因为慢就去查它是不是没接上。
     """
-    from aifix.nodes.baseline import adapter_from_state
+    from aifix.nodes.baseline import adapters_from_state
 
-    state = {"adapter_name": "pytest", "repo": str(tmp_path),
+    state = {"adapter_names": ["pytest"], "repo": str(tmp_path),
              "config": AifixConfig(test_python=sys.executable,
                                    test_parallel="3")}
-    cmd = adapter_from_state(state).full_test_command()
+    adapter, = adapters_from_state(state)
+    cmd = adapter.full_test_command()
     assert cmd[cmd.index("-n") + 1] == "3"
 
 
 def test_turning_it_off_in_config_really_turns_it_off(tmp_path):
     """撞上 xdist-不安全的套件时，这个开关是唯一的出路 —— 它必须真的管用。"""
-    from aifix.nodes.baseline import adapter_from_state
+    from aifix.nodes.baseline import adapters_from_state
 
-    state = {"adapter_name": "pytest", "repo": str(tmp_path),
+    state = {"adapter_names": ["pytest"], "repo": str(tmp_path),
              "config": AifixConfig(test_python=sys.executable,
                                    test_parallel="off")}
-    assert "-n" not in adapter_from_state(state).full_test_command()
+    adapter, = adapters_from_state(state)
+    assert "-n" not in adapter.full_test_command()
 
 
 def test_maven_takes_the_parallel_argument_without_choking(tmp_path):

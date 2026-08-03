@@ -39,7 +39,11 @@ class AifixState(TypedDict, total=False):
     repo: str
     config: AifixConfig
 
-    adapter_name: str
+    # 认领了这个仓库的适配器名，**注册表顺序**。前后端同仓时会有两个。
+    # 复数不是装饰：单数时另一套测试的用例在 baseline 里根本不存在，于是
+    # verify 的三态比较永远不会因为它们变红而判 WORSE ——「没测」被显示成
+    # 了「通过」。
+    adapter_names: list[str]
     worktree_path: str
     branch: str
     artifact_dir: str
@@ -105,6 +109,10 @@ class AifixState(TypedDict, total=False):
     _failures: dict[str, Any]
     # baseline 跑出结果的用例总数，只供进度显示（见 progress.py）
     _ran: int
+    # test_id → 适配器名。哪条 id 是哪套体系跑出来的（见 FailureSet.owner）。
+    # detect / fix / 复跑都靠它知道手上这条 id 该问谁 —— 三个适配器的栈解法、
+    # 选择器语法、测试文件判据各不相同，而拿错一个的后果全是静默的。
+    _owners: dict[str, str]
     # 当前 run 的 RunTrace。同样不参与路由，只是各节点写观测数据的出口。
     _trace: Any
     # 进度回调（见 progress.py），侧信道，理由同 _trace
@@ -114,7 +122,7 @@ class AifixState(TypedDict, total=False):
 def new_state(repo: Path, config: AifixConfig, run_id: str) -> AifixState:
     return AifixState(
         run_id=run_id, repo=str(repo), config=config,
-        adapter_name="", worktree_path="", branch="", artifact_dir="",
+        adapter_names=[], worktree_path="", branch="", artifact_dir="",
         baseline_ids=[], queue=[], current=None, attempt=0,
         diagnosis=None, verdict=None, ask=None, answer=None,
         touched=[], guard_hits=[], diff_lines=0, abort_reason=None,

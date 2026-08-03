@@ -34,7 +34,7 @@ def test_route_after_verify_reports_when_done():
 
 def test_render_report_lists_outcomes():
     md = render_report({
-        "run_id": "r1", "branch": "aifix/r1", "adapter_name": "pytest",
+        "run_id": "r1", "branch": "aifix/r1", "adapter_names": ["pytest"],
         "baseline_ids": ["a", "b"], "spent_usd": 0.23, "spent_tokens": 12345,
         "abort": None,
         "results": [
@@ -51,7 +51,7 @@ def test_render_report_lists_outcomes():
 
 def test_render_report_shows_abort():
     md = render_report({
-        "run_id": "r1", "branch": "", "adapter_name": "",
+        "run_id": "r1", "branch": "", "adapter_names": [],
         "baseline_ids": [], "spent_usd": 0.0, "spent_tokens": 0,
         "results": [], "abort": "工作区不干净",
     })
@@ -67,7 +67,7 @@ def test_render_report_keeps_delivered_work_when_aborted_midrun():
     分支上已经躺着一个可合并的修复。
     """
     md = render_report({
-        "run_id": "r1", "branch": "aifix/r1", "adapter_name": "pytest",
+        "run_id": "r1", "branch": "aifix/r1", "adapter_names": ["pytest"],
         "baseline_ids": ["a", "b"], "spent_usd": 0.06, "spent_tokens": 19678,
         "abort": "美元预算耗尽：$0.06 / $0.001",
         "results": [
@@ -90,7 +90,7 @@ def test_render_report_survives_a_legacy_checkpoint_signals_dict():
     run_once 不读 checkpoint，现实中打不到，但一道形状检查很便宜。
     """
     md = render_report({
-        "run_id": "r1", "branch": "aifix/r1", "adapter_name": "pytest",
+        "run_id": "r1", "branch": "aifix/r1", "adapter_names": ["pytest"],
         "baseline_ids": ["a"], "spent_usd": 0.0, "spent_tokens": 0,
         "abort": None,
         "results": [{"test_id": "a", "verdict": "better", "attempts": 1,
@@ -107,7 +107,7 @@ def test_render_report_survives_a_legacy_checkpoint_signals_dict():
 def test_render_report_still_renders_well_formed_signal_entries():
     """区分度：形状检查不能顺手把正常的信号条目也跳掉。"""
     md = render_report({
-        "run_id": "r1", "branch": "aifix/r1", "adapter_name": "pytest",
+        "run_id": "r1", "branch": "aifix/r1", "adapter_names": ["pytest"],
         "baseline_ids": ["a"], "spent_usd": 0.0, "spent_tokens": 0,
         "abort": None,
         "results": [{"test_id": "a", "verdict": "better", "attempts": 1,
@@ -130,7 +130,7 @@ def test_render_report_does_not_invite_a_merge_of_an_empty_branch():
     行只在 Worktree.commit 真的产生了提交之后才写（见 verify_node）。
     """
     md = render_report({
-        "run_id": "r1", "branch": "aifix/r1", "adapter_name": "pytest",
+        "run_id": "r1", "branch": "aifix/r1", "adapter_names": ["pytest"],
         "baseline_ids": ["a"], "spent_usd": 0.0, "spent_tokens": 0,
         "abort": None,
         "results": [{"test_id": "a", "verdict": "same", "attempts": 3,
@@ -146,7 +146,7 @@ def test_render_report_does_not_invite_a_merge_of_an_empty_branch():
 def test_render_report_says_nothing_was_delivered_on_a_dry_run():
     """--dry-run 一个模型都不调，分支必然是空的。"""
     md = render_report({
-        "run_id": "r1", "branch": "aifix/r1", "adapter_name": "pytest",
+        "run_id": "r1", "branch": "aifix/r1", "adapter_names": ["pytest"],
         "baseline_ids": ["a", "b"], "spent_usd": 0.0, "spent_tokens": 0,
         "abort": None, "results": [],
     })

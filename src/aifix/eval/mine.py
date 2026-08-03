@@ -190,11 +190,11 @@ async def verify_commit(repo: str, commit: str, base_commit: str,
     # 那个提交 —— 阶段 4 要回到这里，所以现在就记下来
     staged_head = _git(workdir, "rev-parse", "HEAD").strip()
 
-    red = await run_scoped(workdir, adapter, scope, require_report=True)
+    red = await run_scoped(workdir, [adapter], scope, require_report=True)
     if not red.ids:
         return []
     _git(workdir, "checkout", "--force", "--quiet", commit)
-    green = await run_scoped(workdir, adapter, scope, require_report=True)
+    green = await run_scoped(workdir, [adapter], scope, require_report=True)
 
     # 交 green.ran 而不是只做差集：一个用例在 C 处被删掉或被跳过时，同样
     # 不会出现在 green.failures 里，但那不是「红转绿」——拿它当任务，
@@ -212,7 +212,7 @@ async def verify_commit(repo: str, commit: str, base_commit: str,
         return []
     # 再单跑一遍这几个用例：顺序依赖与状态污染会让「碰巧这一次绿了」混进来。
     # 这一步很便宜（只跑几个用例），而一个误判会污染此后每一轮评测。
-    recheck = await run_scoped(workdir, adapter, sorted(cand),
+    recheck = await run_scoped(workdir, [adapter], sorted(cand),
                                require_report=True)
     # 只认真的跑到了的候选。少了这一步，一旦 make_test_id 对某个候选合成出
     # 无效路径导致 pytest 整轮中止，recheck.ids 会是空集，
@@ -228,7 +228,7 @@ async def verify_commit(repo: str, commit: str, base_commit: str,
     # 污染）到那时会变成 error —— 安全，但白跑一次模型。把这份浪费挪到
     # 这里一次性付清
     _git(workdir, "checkout", "--force", "--quiet", staged_head)
-    red_full = await run_full_suite(workdir, adapter, require_report=True)
+    red_full = await run_full_suite(workdir, [adapter], require_report=True)
     # 能走到这里，说明阶段 1 的 scoped 已经真跑出过失败 —— 所以全量「一个用例
     # 都没跑到」一定是异常（收集整轮中止、报告为空），不可能是「这个仓库没有
     # 测试」。不抛的话 red_full.ids 是空集，返回值静默退化成 []，on_progress

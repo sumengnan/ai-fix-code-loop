@@ -9,7 +9,7 @@ from ..delivery import Worktree
 from ..graph import AifixState, trace_of
 from ..signals import analyze
 from ..verify import compare
-from .baseline import adapter_from_state, run_full_suite, run_scoped
+from .baseline import adapters_from_state, run_full_suite, run_scoped
 
 
 def _worktree(state: AifixState) -> Worktree:
@@ -46,7 +46,7 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
     cfg = state["config"]
     target = state["current"]
     wt = _worktree(state)
-    adapter = adapter_from_state(state)
+    adapters = adapters_from_state(state)
     worktree_path = Path(state["worktree_path"])
 
     baseline = FailureSet({i: state["_failures"][i]
@@ -65,12 +65,19 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
     #
     # 代价是这一轮直接抛出去、run 记成 crash（退出码 1）。这正是想要的：
     # 环境坏了的话后面每一轮都会坏，快速失败比匀速烧钱好。
-    current = await run_full_suite(worktree_path, adapter, require_report=True,
+    current = await run_full_suite(worktree_path, adapters,
+                                   require_report=True,
                                    timeout=cfg.test_timeout_seconds)
 
+    # 复跑要知道每条 id 归谁。**两份记账并起来**：要复跑的 id 既可能来自
+    # baseline（这一跑里它已经变绿，于是不在 current.owner 里），也可能是这一跑
+    # 才冒出来的新失败（baseline 里没有它）。只用其中一份，另一半会落进
+    # 「记账里没有它」而抛异常 —— 而那两半都是正常情形，不是错误。
+    owners = {**(state.get("_owners") or {}), **current.owner}
+
     async def _rerun(ids: list[str]) -> FailureSet:
-        return await run_scoped(worktree_path, adapter, ids,
-                                require_report=True,
+        return await run_scoped(worktree_path, adapters, ids,
+                                require_report=True, owner=owners,
                                 timeout=cfg.scoped_test_timeout_seconds)
 
     confirmed, flaky = await filter_flaky(baseline, current, _rerun)

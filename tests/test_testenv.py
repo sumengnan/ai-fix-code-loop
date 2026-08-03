@@ -110,7 +110,7 @@ async def test_run_full_suite_hands_the_target_a_clean_environment(
         "    leaked = sorted(k for k in os.environ if k.startswith('AIFIX_'))\n"
         "    assert leaked == [], leaked\n", encoding="utf-8")
 
-    fs = await run_full_suite(tmp_path, PytestAdapter())
+    fs = await run_full_suite(tmp_path, [PytestAdapter()])
     assert fs.ids == set(), f"aifix 把自己的环境泄漏进了目标测试：{fs.failures}"
     assert fs.ran, "反向对照：测试确实跑了，不是一个都没收集到"
 
@@ -138,7 +138,7 @@ async def test_a_timeout_says_it_was_a_timeout_and_names_the_knob(tmp_path):
 
     with pytest.raises(RuntimeError) as e:
         # require_report=True 是核心循环每个调用点都传的（见 _check_report）
-        await run_full_suite(tmp_path, PytestAdapter(), timeout=1.0,
+        await run_full_suite(tmp_path, [PytestAdapter()], timeout=1.0,
                              require_report=True)
     msg = str(e.value)
     assert "超时" in msg
@@ -193,5 +193,5 @@ async def test_a_failed_test_command_shows_what_it_actually_said(tmp_path):
         encoding="utf-8")
 
     with pytest.raises(RuntimeError) as e:
-        await run_full_suite(tmp_path, PytestAdapter(), require_report=True)
+        await run_full_suite(tmp_path, [PytestAdapter()], require_report=True)
     assert "这句话必须出现在 aifix 的报错里" in str(e.value)

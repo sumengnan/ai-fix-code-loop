@@ -175,8 +175,8 @@ async def test_verify_refuses_to_read_a_dead_test_run_as_all_green(
 
     import pytest as _pytest
     tid = "tests/test_calc.py::test_add"
-    monkeypatch.setattr(verify_mod, "adapter_from_state",
-                        lambda state: _SilentAdapter())
+    monkeypatch.setattr(verify_mod, "adapters_from_state",
+                        lambda state: [_SilentAdapter()])
 
     with Worktree(buggy_repo, run_id="v3") as wt:
         (wt.path / "calc.py").write_text("def add(a, b):\n    return a + b\n",
@@ -215,8 +215,8 @@ async def test_flaky_rerun_that_never_ran_is_not_evidence_of_flakiness(
 
     # 全量跑正常产出（有一个新失败），只有复跑那一步跑不出报告
     monkeypatch.setattr(verify_mod, "run_full_suite", _full_with_a_new_failure)
-    monkeypatch.setattr(verify_mod, "adapter_from_state",
-                        lambda state: _SilentAdapter())
+    monkeypatch.setattr(verify_mod, "adapters_from_state",
+                        lambda state: [_SilentAdapter()])
 
     with Worktree(buggy_repo, run_id="v4") as wt:
         (wt.path / "calc.py").write_text("def add(a, b):\n    return a + b\n",

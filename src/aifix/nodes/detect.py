@@ -13,7 +13,7 @@ from ..agents.detector import SYSTEM_PROMPT, build_prompt, parse_diagnosis
 from ..agents.runner import consume
 from ..graph import AifixState, trace_of
 from ..snippet import around
-from .baseline import adapter_from_state
+from .baseline import adapter_for_test
 
 # 喂几段源码。三段各二十来行 ≈ 一屏半，再多就把 traceback 挤到模型注意力的
 # 边缘了 —— 而 traceback 仍然是最强的那条证据。
@@ -24,7 +24,8 @@ async def detect_node(state: AifixState, client: Any = None) -> dict[str, Any]:
     """无工具、单步、强制 JSON。解析失败降级为 diagnosis=None。"""
     cfg = state["config"]
     failure = state["_failures"][state["current"]]
-    adapter = adapter_from_state(state)
+    # 按**这条 id 的出处**取适配器：栈的形状、测试文件的判据都各不相同。
+    adapter = adapter_for_test(state, state["current"])
     worktree = Path(state["worktree_path"])
     candidates = adapter.locate_source(failure, worktree)
     # 把前几个候选的**真实源码**读出来一起喂进去。零 LLM、不多花一个回合。

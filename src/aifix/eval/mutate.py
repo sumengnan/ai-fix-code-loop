@@ -400,11 +400,11 @@ def _mutation_tag(m: Mutation) -> str:
 async def _run(tree: Path, adapter: PytestAdapter,
                scope_files: list[str] | None, timeout: float):
     if scope_files is None:
-        return await run_full_suite(tree, adapter, timeout=timeout,
+        return await run_full_suite(tree, [adapter], timeout=timeout,
                                     require_report=True)
     # run_scoped 的形参叫 test_ids，这里传的是测试**文件**路径：pytest 接受
     # 文件路径作为 node id 的前缀形式，mine.py 也是同样用法
-    return await run_scoped(tree, adapter, scope_files, timeout=timeout,
+    return await run_scoped(tree, [adapter], scope_files, timeout=timeout,
                             require_report=True)
 
 
@@ -452,7 +452,7 @@ async def mutate_tasks(repo: str, adapter: PytestAdapter, max_tasks: int = 10,
         # unified diff，materialize 时才现场施加
         materialize(repo, head, head, [], tree)
         t0 = time.monotonic()
-        green = await run_full_suite(tree, adapter, require_report=True)
+        green = await run_full_suite(tree, [adapter], require_report=True)
         baseline_secs = time.monotonic() - t0
         if green.ids:
             shown = sorted(green.ids)[:3]

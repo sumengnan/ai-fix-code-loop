@@ -152,7 +152,8 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
         with Worktree(repo, run_id=run_id) as wt, trace.run_span():
             state["worktree_path"] = str(wt.path)
             state["branch"] = wt.branch
-            prog.run_start(run_id=run_id, adapter=state["adapter_name"],
+            prog.run_start(run_id=run_id,
+                           adapter="+".join(state["adapter_names"]),
                            branch=wt.branch)
 
             # 全量测试很贵，整个 run 只在这里跑一次；后续每轮 verify 各跑一次
@@ -314,7 +315,7 @@ def _record_run_summary(trace: RunTrace, state: AifixState) -> None:
 
     写在 report_node 之前：报告本身会因为字段缺失而少印一行，事实不会。
     """
-    trace.fact("adapter", state["adapter_name"])
+    trace.fact("adapter", "+".join(state["adapter_names"]))
     trace.fact("branch", state["branch"])
     trace.fact("fixed", count_fixed(state["results"]))
     tokens, usd = state["spent_tokens"], state["spent_usd"]

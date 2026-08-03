@@ -8,7 +8,7 @@ from typing import Any
 from ..config import AifixConfig
 from ..delivery import ensure_clean
 from ..graph import PREFLIGHT_ABORT_KIND, AifixState
-from .baseline import detect_adapter
+from .baseline import ADAPTERS, detect_adapters
 
 
 def _bad_test_python(configured: str | None) -> str | None:
@@ -51,15 +51,30 @@ def preflight_node(state: AifixState) -> dict[str, Any]:
     if bad:
         return {"abort": bad, "abort_kind": PREFLIGHT_ABORT_KIND}
     repo = Path(state["repo"])
-    adapter = detect_adapter(repo)
-    if adapter is None:
-        return {"abort": f"没有适配器认领这个项目：{repo}",
-                "abort_kind": PREFLIGHT_ABORT_KIND}
+    configured = state["config"].adapters
+    if configured:
+        # 显式声明优先。名字写错在这里就拒，不等到 baseline 才炸 —— 那时
+        # 用户看到的会是一句指向目标项目的话。
+        unknown = [n for n in configured if n not in ADAPTERS]
+        if unknown:
+            return {"abort": f"AIFIX_ADAPTERS 里有不认识的适配器："
+                             f"{'、'.join(unknown)}（可选：{'、'.join(ADAPTERS)}）",
+                    "abort_kind": PREFLIGHT_ABORT_KIND}
+        names = list(configured)
+    else:
+        # 没显式声明就**只用第一个** —— 与加多适配器之前逐字节相同的行为。
+        # 理由见 config.adapters 上面那段：自动全跑会让「Java 工程带 Python
+        # 胶水脚本」那类仓库在升级之后直接打不开。
+        found = detect_adapters(repo)
+        if not found:
+            return {"abort": f"没有适配器认领这个项目：{repo}",
+                    "abort_kind": PREFLIGHT_ABORT_KIND}
+        names = [found[0].name]
     try:
         ensure_clean(repo)
     except RuntimeError as e:
         return {"abort": str(e), "abort_kind": PREFLIGHT_ABORT_KIND}
-    return {"adapter_name": adapter.name, "abort": None}
+    return {"adapter_names": names, "abort": None}
 
 
 async def probe_model(config: AifixConfig, client: Any = None) -> str | None:

@@ -45,11 +45,11 @@ def _repo(tmp_path: Path, files: dict[str, str]) -> Path:
 def _state(repo: Path, **cfg):
     """直接喂给 baseline_node 的 state。
 
-    adapter_name 手工填死而不走 preflight：这几条测试要验的是 baseline 拿到
+    adapter_names 手工填死而不走 preflight：这几条测试要验的是 baseline 拿到
     报告之后的判定，探测与「工作区干净」是另一件事。
     """
     st = new_state(repo, AifixConfig(test_python=None, **cfg), run_id="r1")
-    st["adapter_name"] = "pytest"
+    st["adapter_names"] = ["pytest"]
     st["worktree_path"] = str(repo)
     return st
 
@@ -155,11 +155,11 @@ def test_file_level_ids_go_through_the_adapter_not_pytest_syntax():
     文件级，从而在一个纯用例失败的 Maven baseline 上误中止。
     """
     mixed = _maven_ids(files=2, cases=2)
-    assert file_level_ids(mixed, MavenAdapter()) == ["demo.Boot0Test",
+    assert file_level_ids(mixed, [MavenAdapter()]) == ["demo.Boot0Test",
                                                      "demo.Boot1Test"]
     cases_only = _maven_ids(files=0, cases=4)
-    assert file_level_ids(cases_only, MavenAdapter()) == []
-    assert collection_error_abort(cases_only, MavenAdapter()) is None
+    assert file_level_ids(cases_only, [MavenAdapter()]) == []
+    assert collection_error_abort(cases_only, [MavenAdapter()]) is None
 
 
 @pytest.mark.parametrize("files,cases,aborts", [
@@ -177,13 +177,13 @@ def test_file_level_ids_go_through_the_adapter_not_pytest_syntax():
 def test_threshold_boundaries(files, cases, aborts):
     """阈值的两侧各钉一条 —— 「全拦」和「全不拦」都要过不了这组。"""
     ids = _maven_ids(files, cases)
-    got = collection_error_abort(ids, MavenAdapter())
+    got = collection_error_abort(ids, [MavenAdapter()])
     assert (got is not None) is aborts, (files, cases, got)
 
 
 def test_an_empty_or_all_green_baseline_never_aborts():
     """全绿的 baseline 没有任何失败，占比无从谈起，绝不能除零或误判。"""
-    assert collection_error_abort([], PytestAdapter()) is None
+    assert collection_error_abort([], [PytestAdapter()]) is None
 
 
 # ---------------------------------------------------------------- 消息
@@ -192,7 +192,7 @@ def test_an_empty_or_all_green_baseline_never_aborts():
 def test_the_message_says_it_is_not_the_model_and_gives_a_next_step():
     """中止消息要能让人看出这不是模型的问题，并给出可操作的下一步。"""
     adapter = PytestAdapter(python="/tmp/某个/解释器/python")
-    msg = collection_error_abort(["tests/test_a.py", "tests/test_b.py"], adapter)
+    msg = collection_error_abort(["tests/test_a.py", "tests/test_b.py"], [adapter])
     assert msg
     assert "不是模型" in msg
     assert "AIFIX_TEST_PYTHON" in msg
@@ -206,7 +206,7 @@ def test_the_message_does_not_talk_about_python_on_a_maven_project():
 
     本项目把「消息说了一件代码没做的事」与「数字造假」同等对待。
     """
-    msg = collection_error_abort(_maven_ids(files=3, cases=0), MavenAdapter())
+    msg = collection_error_abort(_maven_ids(files=3, cases=0), [MavenAdapter()])
     assert msg
     assert "AIFIX_TEST_PYTHON" not in msg
     assert "pytest" not in msg
@@ -216,7 +216,7 @@ def test_the_message_does_not_talk_about_python_on_a_maven_project():
 
 
 def _report_state(**over):
-    st = {"run_id": "r1", "adapter_name": "pytest", "branch": "aifix/r1",
+    st = {"run_id": "r1", "adapter_names": ["pytest"], "branch": "aifix/r1",
           "baseline_ids": [f"tests/test_bad{i}.py" for i in range(4)],
           "results": [], "spent_tokens": 0, "spent_usd": 0.0,
           "signals": [], "abort": None, "abort_kind": None}

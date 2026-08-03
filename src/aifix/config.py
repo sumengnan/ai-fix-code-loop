@@ -151,6 +151,39 @@ class AifixConfig(BaseSettings):
     # 三态比较仍然是同一把尺量两次。
     test_parallel: str | None = "auto"
 
+    # 显式指定这个仓库要跑哪几套测试，逗号分隔（如 `pytest,vitest`）。
+    # 不设时**只用探测到的第一个**，也就是加多适配器之前的行为。
+    #
+    # 为什么不自动「探测到几个就跑几个」：`PytestAdapter.detect` 极宽松 ——
+    # 有 `tests/` 目录或 `pyproject.toml` 就认领，而 Java 工程的工具链里带
+    # Python 脚本（发版、代码生成、CI 胶水）是常事。自动全跑的话，那类仓库
+    # 会凭空多跑一套 pytest、收不到任何用例，然后被 `require_report` 判成
+    # 「测试没跑成」当场中止 —— 一个今天能正常工作的仓库在升级之后打不开。
+    #
+    # 而「该不该两套都跑」**没有可靠的自动判据**：前后端同仓（pyproject.toml
+    # + package.json）与 Java 带 Python 胶水，在探测那一层长得一模一样。
+    # 分不清就不猜，让人说一句 —— 这比猜错之后静默少测一整套要好，也比猜错
+    # 之后打不开要好。
+    #
+    #   export AIFIX_ADAPTERS=pytest,vitest
+    #
+    # 名字必须在注册表里（见 nodes.baseline.ADAPTERS），写错的名字在 preflight
+    # 就被拒，不会等到 baseline 才炸。
+    adapters: Annotated[tuple[str, ...], NoDecode] = ()
+
+    @field_validator("adapters", mode="before")
+    @classmethod
+    def _split_adapters(cls, v: Any) -> Any:
+        """`"pytest,vitest"` → `("pytest", "vitest")`。
+
+        要 `NoDecode` 的理由与 `allowed_users` 那条相同：pydantic-settings 会先
+        拿环境变量去 JSON 解码，而 `pytest,vitest` 不是合法 JSON —— 不加的话
+        配置一填就是 JSONDecodeError，且报错完全指不到点子上。
+        """
+        if isinstance(v, str):
+            return tuple(x.strip() for x in v.split(",") if x.strip())
+        return v
+
     # 跑目标项目测试的超时。**实测逼出来的**（2026-07-30，轮 9）：拿 aifix 自己
     # 当目标跑 `--dry-run`，套件在 worktree 里跑满 900 秒被杀，而这个数此前是
     # 写死在 `run_full_suite` 签名里的默认值，config 里没有任何旋钮 ——
