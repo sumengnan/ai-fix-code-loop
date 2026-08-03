@@ -11,8 +11,8 @@ from aifix.adapters.pytest_adapter import PytestAdapter
 from aifix.config import AifixConfig
 from aifix.delivery import Worktree
 from aifix.graph import AifixState, new_state
-from aifix.nodes.baseline import (adapter_for, baseline_node, run_full_suite,
-                                  run_scoped)
+from aifix.nodes.baseline import (ADAPTERS, adapter_for, baseline_node,
+                                  run_full_suite, run_scoped)
 from aifix.nodes.preflight import preflight_node
 
 
@@ -121,7 +121,11 @@ _PROTOCOL_MEMBERS = sorted(n for n in vars(ProjectAdapter)
                            if not n.startswith("_") and n != "name")
 
 
-@pytest.mark.parametrize("cls", [PytestAdapter, MavenAdapter])
+# 参数化**跟着注册表走**，不写死名单：写死的名单加新适配器时不会报错，
+# 只是那个适配器悄悄不被检查 —— 而这条测试存在的全部意义就是检查它们。
+# VitestAdapter 落地时这里正是写死的，它就那样漏了一整轮。
+@pytest.mark.parametrize("cls", list(ADAPTERS.values()),
+                         ids=lambda c: c.__name__)
 def test_adapter_matches_the_protocol_member_for_member(cls):
     """注册表里的每个实现都要真的满足 ProjectAdapter，逐个成员比签名。
 

@@ -13,6 +13,7 @@ from ..adapters.pytest_adapter import (PytestAdapter,
                                        imports_outside_worktree,
                                        resolve_test_parallel,
                                        resolve_test_python)
+from ..adapters.vitest_adapter import VitestAdapter
 from ..graph import COLLECTION_ABORT_KIND, AifixState, trace_of
 from ..testenv import sanitized_command
 
@@ -29,8 +30,17 @@ from ..testenv import sanitized_command
 # 是常事。反过来排的后果不是报错而是静默：Maven 工程被判成 pytest 工程，
 # baseline 跑 pytest 命令收不到任何用例，报告写「0 个失败」。
 # 通则：detect 越具体的排越前，兜底式的排最后。
+#
+# vitest 排在 pytest 之前、Maven 之后：它要求根目录 package.json 的依赖里**直接**
+# 列了 vitest，同样具体。而排在 pytest 之前是必须的 —— 前后端同仓的工程根目录
+# 往往两样都有（pyproject.toml + package.json），反过来排的话前端工程会被判成
+# pytest 工程，然后 baseline 收不到任何用例、报告写「0 个失败」。
+#
+# 注意这个注册表**一个 run 只选一个**：前后端同仓时今天仍然只会跑到其中一侧，
+# 另一侧的用例一条都不执行（不是「通过」，是不存在）。让两个适配器并存是下一步
+# 的事，那要动 `adapter_name: str` 这个字段本身。
 ADAPTERS: dict[str, type[ProjectAdapter]] = {
-    "maven": MavenAdapter, "pytest": PytestAdapter}
+    "maven": MavenAdapter, "vitest": VitestAdapter, "pytest": PytestAdapter}
 
 
 # 返回类型是协议而不是某个具体适配器：注册表里现在有两个实现，写死其中
