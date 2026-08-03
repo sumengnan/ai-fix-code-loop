@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +62,23 @@ def preflight_node(state: AifixState) -> dict[str, Any]:
                              f"{'、'.join(unknown)}（可选：{'、'.join(ADAPTERS)}）",
                     "abort_kind": PREFLIGHT_ABORT_KIND}
         names = list(configured)
+        # 配了但探测不到的那些，**出声不拦**。
+        #
+        # 出声的理由：不说的话，baseline 会去跑一个根本不存在的命令，报告写的是
+        # 「测试进程没能正常跑完」—— 一句指向目标项目的话，而真相是这个变量配
+        # 错了。`AIFIX_ADAPTERS` 是新旋钮，配错的概率不低。
+        #
+        # 不拦的理由：`detect` 是启发式的（vitest 那条要求依赖里**直接**列了
+        # vitest，而 monorepo 里靠 workspace 提上去、或者装在父目录的情形是真
+        # 存在的）。拿一个可能误报的信号去拦住整个 run，会让人为了跑起来而干脆
+        # 不用这个开关 —— 与 `warn_if_patch_may_be_invisible` 同一条取舍。
+        missing = [n for n in names if not ADAPTERS[n].detect(repo)]
+        if missing:
+            print(f"⚠️  警告：AIFIX_ADAPTERS 里的 {'、'.join(missing)} "
+                  f"在 {repo} 上探测不到。\n"
+                  "    仍会照配置去跑；跑不起来的话报错会长得像"
+                  "「测试进程没能正常跑完」，而真正的原因在这一行。",
+                  file=sys.stderr, flush=True)
     else:
         # 没显式声明就**只用第一个** —— 与加多适配器之前逐字节相同的行为。
         # 理由见 config.adapters 上面那段：自动全跑会让「Java 工程带 Python

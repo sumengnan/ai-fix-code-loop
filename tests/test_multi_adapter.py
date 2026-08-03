@@ -215,3 +215,33 @@ async def test_both_suites_really_run_and_both_failures_show_up(tmp_path):
     only_front = await run_scoped(tmp_path, adapters, [front],
                                   require_report=True, owner=fs.owner)
     assert only_front.ran == {front}, sorted(only_front.ran)
+
+
+def test_a_configured_but_undetectable_adapter_warns_without_blocking(
+        tmp_path, capsys):
+    """配了但探测不到 —— **出声，不拦**。
+
+    出声：不说的话 baseline 会去跑一个根本不存在的命令，报告写「测试进程没能
+    正常跑完」，一句指向目标项目的话，而真相是这个变量配错了。
+
+    不拦：`detect` 是启发式的（vitest 那条要求依赖里**直接**列了 vitest，而
+    monorepo 里靠 workspace 提上去的情形是真存在的）。拿可能误报的信号拦住整个
+    run，人会干脆不用这个开关。
+    """
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n",
+                                             encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.email=t@e.com", "-c", "user.name=t",
+                    "commit", "-qm", "init"], cwd=tmp_path, check=True)
+
+    cfg = AifixConfig(adapters=("pytest", "vitest"))   # 这里没有 vitest
+    out = preflight_node(new_state(tmp_path, cfg, run_id="r1"))
+    assert out["abort"] is None, "不该拦"
+    assert out["adapter_names"] == ["pytest", "vitest"], "照配置来"
+    err = capsys.readouterr().err
+    # 断言**被点名的那一段**，不是整段输出：pytest 的 tmp_path 长成
+    # `/…/pytest-of-<user>/pytest-123/…`，而警告里带着仓库路径 —— 一句
+    # `"pytest" not in err` 会匹配到那个路径，测的是别的东西。
+    assert "里的 vitest 在" in err, err
+    assert "探测不到" in err
