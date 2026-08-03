@@ -12,7 +12,6 @@ from harness.tools.base import ToolRegistry
 from ..agents.detector import SYSTEM_PROMPT, build_prompt, parse_diagnosis
 from ..agents.runner import consume
 from ..graph import AifixState, trace_of
-from ..signals import under_dirs
 from ..snippet import around
 from .baseline import adapter_from_state
 
@@ -57,8 +56,7 @@ async def detect_node(state: AifixState, client: Any = None) -> dict[str, Any]:
     # 候选里有没有**非测试**文件，决定了 suspect_file 是推断还是猜测。
     # 一个源码候选都没有时模型只能按包名猜路径，猜错是常态 —— 下游的
     # files_outside_suspect 据此决定要不要发声。
-    sources = [c for c in candidates
-               if not under_dirs(c.path, adapter.test_dirs())]
+    sources = [c for c in candidates if not adapter.is_test_path(c.path)]
     anchored = bool(sources)
     # 锚点**种类**要与「有没有锚点」分开记。两种强度不同：traceback 是
     # 「失败真的穿过这里」，import 只是「测试用到了这个模块」。合成一个

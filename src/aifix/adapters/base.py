@@ -81,7 +81,32 @@ class ProjectAdapter(Protocol):
     # 一份都没写出来时返回空列表，不抛 —— 「没跑成」由 require_report 那层判定。
     def report_paths(self, worktree: Path, scoped: bool = False) -> list[Path]: ...
 
+    # 测试**住在**哪。只用于两件事：给 reproducer 的提示词说明「新测试写哪去」，
+    # 以及挖任务时把改动路径拆成测试侧/源文件。
+    #
+    # **判断「这个文件是不是测试」用 `is_test_path`，不要用这个。** 见下。
     def test_dirs(self) -> list[str]: ...
+
+    # 这个路径是不是测试文件。**「不许改测试文件」那道守卫的唯一判据。**
+    #
+    # 为什么不能继续用 `under_dirs(path, test_dirs())`：那等于断言「测试都住在
+    # 某个目录下」，而这个前提对 vitest 不成立 —— JS 生态的主流约定是测试与源码
+    # **同目录**（`src/components/ChatView.test.tsx`），靠后缀而不是目录区分。
+    # 拿目录列表去表达它，两条路都是坏的：返回 `[]` 会让守卫**静默放行**，于是
+    # 修复阶段的 agent 可以直接改掉自己的判卷标准；返回 `["src"]` 又会把整个源码
+    # 树判成测试，什么都改不了。
+    #
+    # 所以判据必须由适配器给，而且必须是**谓词**而不是目录列表。pytest 与 Maven
+    # 的实现就是 `under_dirs(path, self.test_dirs())`，行为与改造前逐字节相同。
+    #
+    # 传的是**谓词这个值**，不是 adapter 对象 —— 与 `eval/mine.split_paths` 那段
+    # 「两个判据都是传进来的值」是同一条理由：拿着 adapter 就得在测试里造一个假
+    # 适配器才能覆盖一种布局。
+    #
+    # 这道守卫**已经静默失效过一次**（见 `signals.under_dirs` 的注释：Maven 的
+    # `["src/test"]` 遇上当时只比首段的实现，首段是 `src`，直接放行）。它失效时
+    # 不报错、报告照样显示绿，只是绿的理由变成了「模型把测试改了」。
+    def is_test_path(self, path: str) -> bool: ...
 
     # 挖任务时「哪些后缀算源文件」。判据必须由适配器给，不能写死在挖掘代码
     # 里：`eval/mine.split_paths` 曾经只认 `.py`，于是 Java 仓库的源码全部

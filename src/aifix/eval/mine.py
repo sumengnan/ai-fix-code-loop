@@ -14,15 +14,15 @@ from __future__ import annotations
 import shutil
 import subprocess
 from pathlib import Path, PurePosixPath
+from typing import Callable
 
 from ..adapters.base import ProjectAdapter
 from ..nodes.baseline import run_full_suite, run_scoped
-from ..signals import under_dirs
 from .task import Task
 from .workspace import materialize
 
 
-def split_paths(paths: list[str], test_dirs: list[str],
+def split_paths(paths: list[str], is_test: Callable[[str], bool],
                 source_suffixes: tuple[str, ...],
                 ) -> tuple[list[str], list[str]]:
     """把 commit 改动的路径拆成（测试侧, 源文件）。
@@ -52,12 +52,13 @@ def split_paths(paths: list[str], test_dirs: list[str],
     src: list[str] = []
     for p in paths:
         pp = PurePosixPath(p)
-        # 「在不在测试目录里」这个判定与 tools/patch.py 的「不许改测试文件」
-        # 守卫问的是同一个问题，共用 signals.under_dirs 的那一份实现。本分支
-        # 上这两处一度各有一份：mine 升级成了分段前缀匹配，patch.py 还停在
-        # `parts[0] in test_dirs` —— M5 的 MavenAdapter 一落地（test_dirs 是
-        # `["src/test"]`，首段为 `src`），那道守卫就会静默放行改测试的补丁。
-        in_test_dir = under_dirs(p, test_dirs)
+        # 「这是不是测试文件」这个判定与 tools/guard.py 的「不许改测试文件」
+        # 守卫问的是同一个问题，共用**适配器给的同一个谓词**
+        # （`ProjectAdapter.is_test_path`）。本分支上这两处一度各有一份：mine
+        # 升级成了分段前缀匹配，patch.py 还停在 `parts[0] in test_dirs` ——
+        # M5 的 MavenAdapter 一落地（test_dirs 是 `["src/test"]`，首段为
+        # `src`），那道守卫就会静默放行改测试的补丁。
+        in_test_dir = is_test(p)
         is_src = pp.suffix in source_suffixes
         # 两侧的判据刻意不对称。测试目录**内**的任意文件都算测试侧，后缀不
         # 限：夹具、数据、快照都得跟着测试一起被 materialize 嫁接。目录**外**
@@ -278,7 +279,7 @@ async def mine_tasks(repo: str, adapter: ProjectAdapter, limit: int = 50,
         if base is None:
             continue
         test_files, gold_files = split_paths(
-            _changed_paths(repo, sha), adapter.test_dirs(),
+            _changed_paths(repo, sha), adapter.is_test_path,
             adapter.source_suffixes())
         if not is_candidate(test_files, gold_files):
             continue

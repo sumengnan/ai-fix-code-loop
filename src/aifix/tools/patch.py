@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Callable
 
 from pydantic import BaseModel, Field
 
@@ -80,10 +81,12 @@ class ApplyPatchTool(Tool):
     class Params(BaseModel):
         diff: str = Field(description="标准 unified diff，须含 --- / +++ 文件头")
 
-    def __init__(self, sandbox: Sandbox, test_dirs: list[str],
+    def __init__(self, sandbox: Sandbox, is_test: Callable[[str], bool],
                  timeout: float = 60.0, touched: set[str] | None = None) -> None:
         self._sandbox = sandbox
-        self._test_dirs = [d.strip("/") for d in test_dirs]
+        # 谓词由适配器给（`ProjectAdapter.is_test_path`）。原先收的是目录列表，
+        # 而目录表达不了 vitest 的同目录布局 —— 见 guard.guard_write。
+        self._is_test = is_test
         self._timeout = timeout
         # 本次 run 中被成功应用的补丁触及的路径。这份记账是交付时
         # `git add -- <paths>` 的**全部**输入（delivery.Worktree.commit），
@@ -115,14 +118,15 @@ class ApplyPatchTool(Tool):
     def _guard(self, targets: list[tuple[str, str]]) -> None:
         """三道检查在 tools.guard 里，与 `edit_file` 共用同一份。
 
-        分段前缀、不是首段：Maven 标准布局的 test_dirs 是 `["src/test"]`，
-        只看首段会把 `src/test/java/...` 当成源文件放行。原样路径与写入路径
-        两条都查 —— 守卫宁可多拦不可漏放。理由与实现都在 guard.guard_write。
+        判据是适配器给的谓词，不是目录列表：Maven 标准布局按分段前缀比
+        （只看首段会把 `src/test/java/...` 当成源文件放行），vitest 按 `.test.ts`
+        后缀比 —— 这里不该知道是哪一种。原样路径与写入路径两条都查，守卫宁可
+        多拦不可漏放。理由与实现都在 guard.guard_write。
         """
         if not targets:
             raise ToolError("diff 里没有找到 --- / +++ 文件头，无法确定要改哪个文件。")
         for raw, real in targets:
-            guard_write(self._sandbox, self._test_dirs, real, raw)
+            guard_write(self._sandbox, self._is_test, real, raw)
 
     async def run(self, params: "ApplyPatchTool.Params") -> str:
         targets = self._targets(params.diff)

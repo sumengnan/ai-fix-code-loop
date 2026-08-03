@@ -23,10 +23,24 @@ apply_patch 332 次」的循环里烧完 50 万 token，一个字节都没改（
 import subprocess
 
 import pytest
+
 from harness.sandbox.local import LocalSandbox
 from harness.tools.base import ToolError
 
+from aifix.signals import under_dirs
 from aifix.tools.patch import ApplyPatchTool, _apply_error
+
+
+def _dirs(dirs):
+    """目录列表 → `ProjectAdapter.is_test_path` 那种谓词。
+
+    守卫从「收目录列表」改成「收谓词」（为了 vitest 的同目录布局）之后，
+    这些用例各自在考的判断没有变。**逐个包、不统一换成
+    `PytestAdapter().is_test_path`**：那会把只给 `["tests"]` 的用例悄悄放宽
+    成 `["tests", "test"]`，考的东西被改掉了而测试照样绿。
+    """
+    return lambda p: under_dirs(p, dirs)
+
 
 # 真实样本一：表头写 @@ -1,13 +1,13 @@，而正文实际是 15 个旧侧行 / 16 个新侧行
 # —— **旧侧那个 13 也是错的**。注意 hunk 内部还夹着**裸空行**（前导空格丢了），
@@ -122,7 +136,7 @@ async def test_a_diff_without_a_trailing_newline_still_applies(tmp_path):
     sb = LocalSandbox(workspace=str(tmp_path))
     await sb.start()
     try:
-        t = ApplyPatchTool(sb, test_dirs=["tests"])
+        t = ApplyPatchTool(sb, is_test=_dirs(["tests"]))
         # 注意末尾**没有**换行
         await t.run(t.Params(diff=(
             "--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,2 @@\n"
@@ -169,7 +183,7 @@ async def test_a_test_file_patch_is_still_refused(tmp_path):
     sb = LocalSandbox(workspace=str(tmp_path))
     await sb.start()
     try:
-        t = ApplyPatchTool(sb, test_dirs=["tests"])
+        t = ApplyPatchTool(sb, is_test=_dirs(["tests"]))
         with pytest.raises(ToolError, match="测试文件"):
             await t.run(t.Params(diff=(
                 "--- a/tests/test_x.py\n+++ b/tests/test_x.py\n"

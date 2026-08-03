@@ -17,16 +17,30 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
 from harness.llm.base import StreamChunk, ToolCallDelta
 from harness.sandbox.local import LocalSandbox
 from harness.tools.base import ToolError
 from harness.usage import Usage
 
+from aifix.signals import under_dirs
 from aifix.adapters.maven_adapter import MavenAdapter
 from aifix.cli import run_once
 from aifix.config import AifixConfig
 from aifix.eval.mine import split_paths
 from aifix.tools.patch import ApplyPatchTool
+
+
+def _dirs(dirs):
+    """目录列表 → `ProjectAdapter.is_test_path` 那种谓词。
+
+    守卫从「收目录列表」改成「收谓词」（为了 vitest 的同目录布局）之后，
+    这些用例各自在考的判断没有变。**逐个包、不统一换成
+    `PytestAdapter().is_test_path`**：那会把只给 `["tests"]` 的用例悄悄放宽
+    成 `["tests", "test"]`，考的东西被改掉了而测试照样绿。
+    """
+    return lambda p: under_dirs(p, dirs)
+
 
 from tests.conftest import maven_skip_mark  # noqa: E402
 
@@ -89,6 +103,7 @@ _CALC_TEST = """package demo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import org.junit.jupiter.api.Test;
+
 
 class CalcTest {
     @Test
@@ -313,7 +328,7 @@ async def test_patch_guard_refuses_the_maven_test_file(project):
     sb = LocalSandbox(workspace=str(project))
     await sb.start()
     try:
-        tool = ApplyPatchTool(sb, test_dirs=MavenAdapter().test_dirs())
+        tool = ApplyPatchTool(sb, is_test=MavenAdapter().is_test_path)
         with pytest.raises(ToolError, match="拒绝修改测试文件"):
             await tool.run(tool.Params(diff=_TEST_PATCH))
         assert (project / _TEST_PATH).read_text(encoding="utf-8") == _CALC_TEST
@@ -330,7 +345,7 @@ async def test_that_same_patch_applies_cleanly_without_the_guard(project):
     sb = LocalSandbox(workspace=str(project))
     await sb.start()
     try:
-        tool = ApplyPatchTool(sb, test_dirs=_PYTEST_DIRS)
+        tool = ApplyPatchTool(sb, is_test=_dirs(_PYTEST_DIRS))
         out = await tool.run(tool.Params(diff=_TEST_PATCH))
         assert "补丁已应用" in out
         assert "assertEquals(-1" in (project / _TEST_PATH).read_text(
@@ -345,7 +360,7 @@ async def test_guard_still_lets_the_production_source_through(project):
     await sb.start()
     try:
         touched: set[str] = set()
-        tool = ApplyPatchTool(sb, test_dirs=MavenAdapter().test_dirs(),
+        tool = ApplyPatchTool(sb, is_test=MavenAdapter().is_test_path,
                               touched=touched)
         await tool.run(tool.Params(diff=_GOOD_PATCH))
         assert "return a + b;" in (project / _SRC_PATH).read_text(
@@ -357,7 +372,7 @@ async def test_guard_still_lets_the_production_source_through(project):
 
 
 def test_split_paths_classifies_the_maven_test_dir(project):
-    """挖任务侧对 `src/test/java/...` 的判定 —— 与守卫共用 under_dirs。
+    """挖任务侧对 `src/test/java/...` 的判定 —— 与守卫共用同一个谓词。
 
     路径取自真实存在的文件：写死一个不存在的路径，这条测试就退化成
     在验证一个字符串函数对虚构输入的行为。
@@ -366,7 +381,7 @@ def test_split_paths_classifies_the_maven_test_dir(project):
     for p in paths:
         assert (project / p).is_file(), p
     adapter = MavenAdapter()
-    tests, gold = split_paths(paths, adapter.test_dirs(),
+    tests, gold = split_paths(paths, adapter.is_test_path,
                               adapter.source_suffixes())
     assert tests == [_TEST_PATH], tests
     # 这里曾是一条「现状快照」：源文件侧写死 `.py`，Java 源码一律落空，

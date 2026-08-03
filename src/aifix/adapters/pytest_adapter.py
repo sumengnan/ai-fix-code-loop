@@ -541,6 +541,15 @@ class PytestAdapter:
     def test_dirs(self) -> list[str]:
         return ["tests", "test"]
 
+    def is_test_path(self, path: str) -> bool:
+        """pytest 的测试住在目录里，判据就是「在不在测试目录之下」。
+
+        与改造前各调用点写的 `under_dirs(path, adapter.test_dirs())` 逐字节
+        相同 —— 这个方法存在的理由是 vitest（测试与源码同目录、靠后缀区分），
+        不是这里。
+        """
+        return under_dirs(path, self.test_dirs())
+
     def source_suffixes(self) -> tuple[str, ...]:
         # 不含 `.pyi`：存根文件里没有可执行的实现，改它修不好任何测试，
         # 进 gold_files 只会让 locate_hit 变得更难达成。
@@ -668,7 +677,7 @@ class PytestAdapter:
 
         # 栈帧里已经有源码文件时**不掺 import**：那是更弱的证据，混进来只会
         # 稀释真锚点，把「失败穿过这里」和「测试用到了这个模块」摆成同一档。
-        if any(not under_dirs(c.path, self.test_dirs()) for c in frames):
+        if any(not self.is_test_path(c.path) for c in frames):
             return frames
         imported = self._import_candidates(failure, frames, repo_real)
         # 源码候选排在测试文件那一帧前面 —— 「按可疑度排序」，而断言所在的
@@ -720,7 +729,7 @@ class PytestAdapter:
                 path, line, fn = _anchor_for(repo_real, entry, named, index)
                 # 去重按**追完之后**的路径：同一个包的两条 import 会汇到同一
                 # 个实现文件，按入口去重的话它会重复出现在候选列表里
-                if path in seen or under_dirs(path, self.test_dirs()):
+                if path in seen or self.is_test_path(path):
                     continue
                 seen.add(path)
                 # 排序键：点名数降序（负号），其次保持 import 出现顺序，

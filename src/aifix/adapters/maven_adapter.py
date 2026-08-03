@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path, PurePosixPath
 
+from ..signals import under_dirs
 from .base import Failure, SourceCandidate
 
 # Java 栈帧：`\tat demo.Calc.divide(Calc.java:9)`。
@@ -81,6 +82,15 @@ class MavenAdapter:
 
     def test_dirs(self) -> list[str]:
         return ["src/test"]
+
+    def is_test_path(self, path: str) -> bool:
+        """Maven 标准布局把测试关在 `src/test` 下，判据就是目录。
+
+        必须按**分段**比前缀 —— 这里正是 `under_dirs` 那段注释记录的事故现场：
+        守卫当时只比首段，而 `src/test/java/...` 的首段是 `src`，于是每一次
+        改测试都被放行，且不报错。
+        """
+        return under_dirs(path, self.test_dirs())
 
     def source_suffixes(self) -> tuple[str, ...]:
         # 只有 `.java`。pom.xml 的改动确实能让测试转红转绿（依赖版本、

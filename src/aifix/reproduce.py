@@ -424,7 +424,7 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
             None, f"模型没有吐出任何正文。\n  {hint}",
             kind=KIND_EMPTY_ANSWER, **common)
 
-    r = parse_reproduction(outcome.text, adapter.test_dirs())
+    r = parse_reproduction(outcome.text, adapter.is_test_path)
     if r is None:
         return ReproduceOutcome(
             None,

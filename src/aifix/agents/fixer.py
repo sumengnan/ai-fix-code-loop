@@ -6,7 +6,6 @@ from harness.tools.builtins.fs_tools import ListFilesTool
 from harness.types import Message, Role
 
 from ..adapters.base import Failure, ProjectAdapter
-from ..signals import under_dirs
 from ..tools.ask import AskUserTool, Pending
 from ..tools.edit import EditFileTool
 from ..tools.patch import ApplyPatchTool
@@ -88,9 +87,9 @@ def build_registry(sandbox: Sandbox, adapter: ProjectAdapter,
     reg.register(ReadSymbolTool(sandbox))
     reg.register(ListFilesTool(sandbox))
     reg.register(GrepTool(sandbox))
-    reg.register(EditFileTool(sandbox, test_dirs=adapter.test_dirs(),
+    reg.register(EditFileTool(sandbox, is_test=adapter.is_test_path,
                               touched=touched))
-    reg.register(ApplyPatchTool(sandbox, test_dirs=adapter.test_dirs(),
+    reg.register(ApplyPatchTool(sandbox, is_test=adapter.is_test_path,
                                 touched=touched))
     reg.register(RunTestsTool(sandbox, adapter, known_ids=known_ids))
     if pending is not None:
@@ -128,7 +127,7 @@ async def locate_hint(sandbox: Sandbox, adapter: ProjectAdapter,
         return None
 
     # 测试文件排除在外：改测试是被守卫拦死的动作，列出来只会把模型往那边引
-    sources = [p for p in tracked if not under_dirs(p, adapter.test_dirs())]
+    sources = [p for p in tracked if not adapter.is_test_path(p)]
     if not sources:
         return None
 

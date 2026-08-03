@@ -128,6 +128,11 @@ def test_detect_node_actually_reads_the_files(repo, monkeypatch):
         def test_dirs(self):
             return ["tests"]
 
+        # detect_node 现在问的是谓词，不是目录列表。替身缺了它会
+        # AttributeError —— 而那正是这条测试该替真实适配器守住的接口。
+        def is_test_path(self, path):
+            return path.startswith("tests/")
+
         def locate_source(self, failure, repo_):
             return [_cand()]
 

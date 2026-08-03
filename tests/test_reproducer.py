@@ -3,7 +3,15 @@ import json
 from aifix.agents.reproducer import (SYSTEM_PROMPT, Reproduction, build_prompt,
                                     parse_reproduction)
 
+from aifix.signals import under_dirs
+
+# 判据由目录列表变成谓词（见 ProjectAdapter.is_test_path），
+# 这里包的仍是原来那组目录 —— 用例考的东西一个字没改。
 _TEST_DIRS = ["tests"]
+# build_prompt 要的仍是**目录列表**（写进提示词给模型看「新测试放哪」），
+# parse_reproduction 要的是**谓词**（校验模型给的路径，与写入守卫同一份判据）。
+# 两者不是一回事，共用一个名字正是上一版把测试跑挂的原因。
+_IS_TEST = lambda p: under_dirs(p, _TEST_DIRS)
 
 _TITLE = "导出 CSV 少了一列"
 _BODY = "调用 export_csv 导出订单，期望 5 列，实际只有 3 列，缺了单价和小计。"
@@ -53,7 +61,7 @@ def test_prompt_marks_the_issue_text_as_data_not_instructions():
 # ---------------------------------------------------------------- 解析
 
 def test_parse_accepts_a_complete_reproduction():
-    r = parse_reproduction(_ok(), _TEST_DIRS)
+    r = parse_reproduction(_ok(), _IS_TEST)
     assert isinstance(r, Reproduction)
     assert r.can_reproduce is True
     assert r.target_test_id == "tests/test_issue_42.py::test_export_csv_columns"
@@ -62,7 +70,7 @@ def test_parse_accepts_a_complete_reproduction():
 def test_parse_accepts_a_well_formed_giving_up():
     r = parse_reproduction(json.dumps({
         "can_reproduce": False, "missing_info": ["缺少复现步骤", "没说期望行为"],
-    }), _TEST_DIRS)
+    }), _IS_TEST)
     assert r is not None and r.can_reproduce is False
     assert r.missing_info == ["缺少复现步骤", "没说期望行为"]
 
@@ -74,12 +82,12 @@ def test_parse_rejects_reproducible_claim_without_a_target_id():
     用例、以退出码 5 结束，而那个形态和「测试红了」区分不开：一次从未被
     执行过的复现会被读成「复现成功」。
     """
-    assert parse_reproduction(_ok(target_test_id=None), _TEST_DIRS) is None
+    assert parse_reproduction(_ok(target_test_id=None), _IS_TEST) is None
 
 
 def test_parse_rejects_reproducible_claim_without_test_code():
     """能复现却没有代码 —— 写下去会是一个空文件，跑起来同样是收集不到用例。"""
-    assert parse_reproduction(_ok(test_code=""), _TEST_DIRS) is None
+    assert parse_reproduction(_ok(test_code=""), _IS_TEST) is None
 
 
 def test_parse_rejects_failure_claim_without_missing_info():
@@ -95,7 +103,7 @@ def test_parse_rejects_a_target_id_pointing_at_another_file():
     其实是别人的失败。
     """
     assert parse_reproduction(
-        _ok(target_test_id="tests/test_other.py::test_x"), _TEST_DIRS) is None
+        _ok(target_test_id="tests/test_other.py::test_x"), _IS_TEST) is None
 
 
 def test_parse_rejects_a_stem_that_only_looks_like_a_prefix():
@@ -108,7 +116,7 @@ def test_parse_rejects_a_stem_that_only_looks_like_a_prefix():
     assert parse_reproduction(json.dumps({
         "can_reproduce": True, "test_file": "tests/test_a.py",
         "test_code": "x", "target_test_id": "tests/test_ab.py::test_x",
-        "missing_info": []}), _TEST_DIRS) is None
+        "missing_info": []}), _IS_TEST) is None
 
 
 def test_parse_accepts_a_maven_style_selector():
@@ -120,7 +128,7 @@ def test_parse_accepts_a_maven_style_selector():
         "can_reproduce": True,
         "test_file": "src/test/java/com/example/FooTest.java",
         "test_code": "x", "target_test_id": "com.example.FooTest#testBar",
-        "missing_info": []}), ["src/test"])
+        "missing_info": []}), lambda p: under_dirs(p, ["src/test"]))
     assert r is not None
 
 
@@ -131,24 +139,24 @@ def test_parse_rejects_a_test_file_outside_the_test_dirs():
     """
     for bad in ("src/aifix/cli.py", "evil.py", "docs/x.py"):
         assert parse_reproduction(
-            _ok(test_file=bad, target_test_id=f"{bad}::t"), _TEST_DIRS) is None, bad
+            _ok(test_file=bad, target_test_id=f"{bad}::t"), _IS_TEST) is None, bad
 
 
 def test_parse_rejects_path_escapes():
     """`../` 与绝对路径 —— 与 resolve_in_workspace 同一条底线。"""
     for bad in ("../tests/evil.py", "/etc/passwd", "tests/../../evil.py"):
         assert parse_reproduction(
-            _ok(test_file=bad, target_test_id=f"{bad}::t"), _TEST_DIRS) is None, bad
+            _ok(test_file=bad, target_test_id=f"{bad}::t"), _IS_TEST) is None, bad
 
 
 def test_parse_returns_none_on_garbage():
     """解析失败是降级信号，不是异常 —— 上层据此走「写不出复现」那条通路。"""
-    assert parse_reproduction("这不是 JSON", _TEST_DIRS) is None
+    assert parse_reproduction("这不是 JSON", _IS_TEST) is None
 
 
 def test_parse_tolerates_a_fenced_json_object():
     """有些端点会在 JSON 外包一层围栏或解释文字。与 parse_diagnosis 同款容错。"""
-    r = parse_reproduction(f"好的，结果如下：\n```json\n{_ok()}\n```\n", _TEST_DIRS)
+    r = parse_reproduction(f"好的，结果如下：\n```json\n{_ok()}\n```\n", _IS_TEST)
     assert r is not None and r.can_reproduce is True
 
 
@@ -196,7 +204,7 @@ def test_the_answer_is_found_at_the_end_of_a_long_narration():
              "```python\ndef f(x):\n    return {'a': 1}\n```\n"
              "Now let me write the test:\n")
     raw = noise + "```json\n" + _ok() + "\n```\n"
-    r = parse_reproduction(raw, _TEST_DIRS)
+    r = parse_reproduction(raw, _IS_TEST)
     assert r is not None and r.can_reproduce is True
     assert r.target_test_id == "tests/test_issue_42.py::test_export_csv_columns"
 
@@ -206,5 +214,5 @@ def test_a_later_object_wins_over_an_earlier_one():
     取到它们等于用旁白覆盖了结论。"""
     raw = ('先看一个例子：{"can_reproduce": false, "missing_info": ["举例用"]}\n'
            "但实际上我能复现：\n" + _ok())
-    r = parse_reproduction(raw, _TEST_DIRS)
+    r = parse_reproduction(raw, _IS_TEST)
     assert r is not None and r.can_reproduce is True

@@ -3,10 +3,9 @@ from __future__ import annotations
 import json
 import re
 from pathlib import PurePosixPath
+from typing import Callable
 
 from pydantic import BaseModel, ValidationError
-
-from ..signals import under_dirs
 
 SYSTEM_PROMPT = """你是一个把缺陷报告翻译成可执行测试的工程师。
 
@@ -87,21 +86,26 @@ def build_prompt(issue_title: str, issue_body: str, test_dirs: list[str],
         f"<issue>\n{issue_body}\n</issue>\n")
 
 
-def _path_is_safe(p: str, test_dirs: list[str]) -> bool:
-    """路径必须是相对的、不含 `..`、且落在测试目录之下。
+def _path_is_safe(p: str, is_test: Callable[[str], bool]) -> bool:
+    """路径必须是相对的、不含 `..`、且**是一个测试文件**。
 
-    `..` 必须**单独查**，不能指望 under_dirs 兜住：它按分段比前缀，
+    `..` 必须**单独查**，不能指望判据兜住：`under_dirs` 按分段比前缀，
     `tests/../../evil.py` 的分段是 ("tests", "..", "..", "evil.py")，
     确实以 ("tests",) 开头 —— 逃逸路径会大摇大摆地通过。
+
+    最后那一问用的是**与写入守卫同一个谓词**（`ProjectAdapter.is_test_path`）。
+    这不只是复用：它保证「校验通过的复现测试」必然「fixer 改不动」。两处各用
+    各的判据就会有一条缝，落在缝里的文件校验说它是测试、守卫说它不是，于是
+    修复阶段的 agent 可以随手改掉自己的判卷标准。
     """
     if not p or p.startswith("/") or PurePosixPath(p).is_absolute():
         return False
     if ".." in PurePosixPath(p).parts:
         return False
-    return under_dirs(p, test_dirs)
+    return is_test(p)
 
 
-def _is_coherent(r: Reproduction, test_dirs: list[str]) -> bool:
+def _is_coherent(r: Reproduction, is_test: Callable[[str], bool]) -> bool:
     """字段之间自洽吗。不自洽一律当解析失败，走「写不出复现」那条通路。"""
     if not r.can_reproduce:
         # 说不出缺什么的放弃，回帖会是一句没有信息的废话，而那段说明是
@@ -115,7 +119,7 @@ def _is_coherent(r: Reproduction, test_dirs: list[str]) -> bool:
         # 被执行过的复现会被读成复现成功。
         return False
 
-    if not _path_is_safe(r.test_file, test_dirs):
+    if not _path_is_safe(r.test_file, is_test):
         return False
 
     # target_test_id 要能追溯到 test_file，否则写下去的是 A、跑起来的是 B，
@@ -134,7 +138,7 @@ def _is_coherent(r: Reproduction, test_dirs: list[str]) -> bool:
                      r.target_test_id) is not None
 
 
-def parse_reproduction(raw: str, test_dirs: list[str]) -> Reproduction | None:
+def parse_reproduction(raw: str, is_test: Callable[[str], bool]) -> Reproduction | None:
     """解析失败返回 None —— 这是降级信号，调用方据此走「写不出复现」通路。
 
     与 parse_diagnosis 同款的围栏容错：有些端点会在 JSON 外包一层解释文字。
@@ -146,7 +150,7 @@ def parse_reproduction(raw: str, test_dirs: list[str]) -> Reproduction | None:
             r = Reproduction.model_validate_json(text)
         except ValidationError:
             continue
-        return r if _is_coherent(r, test_dirs) else None
+        return r if _is_coherent(r, is_test) else None
     return None
 
 

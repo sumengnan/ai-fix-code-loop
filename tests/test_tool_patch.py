@@ -1,9 +1,23 @@
 import pytest
+
 from harness.sandbox.local import LocalSandbox
 from harness.tools.base import ToolExecutor, ToolRegistry
 from harness.types import ToolCall
 
+from aifix.signals import under_dirs
 from aifix.tools.patch import ApplyPatchTool
+
+
+def _dirs(dirs):
+    """目录列表 → `ProjectAdapter.is_test_path` 那种谓词。
+
+    守卫从「收目录列表」改成「收谓词」（为了 vitest 的同目录布局）之后，
+    这些用例各自在考的判断没有变。**逐个包、不统一换成
+    `PytestAdapter().is_test_path`**：那会把只给 `["tests"]` 的用例悄悄放宽
+    成 `["tests", "test"]`，考的东西被改掉了而测试照样绿。
+    """
+    return lambda p: under_dirs(p, dirs)
+
 
 _GOOD = """--- a/calc.py
 +++ b/calc.py
@@ -41,7 +55,7 @@ async def executor(buggy_repo):
     sb = LocalSandbox(workspace=str(buggy_repo))
     await sb.start()
     reg = ToolRegistry()
-    reg.register(ApplyPatchTool(sb, test_dirs=["tests"]))
+    reg.register(ApplyPatchTool(sb, is_test=_dirs(["tests"])))
     yield ToolExecutor(reg, max_chars=8000), buggy_repo
     await sb.close()
 
@@ -175,7 +189,7 @@ async def _maven_guard(buggy_repo, diff: str):
     try:
         reg = ToolRegistry()
         # Maven 标准布局：测试在 src/test/java 下，test_dirs 是 ["src/test"]
-        reg.register(ApplyPatchTool(sb, test_dirs=["src/test"]))
+        reg.register(ApplyPatchTool(sb, is_test=_dirs(["src/test"])))
         ex = ToolExecutor(reg, max_chars=8000)
         return await ex.execute(ToolCall(id="1", name="apply_patch",
                                          arguments={"diff": diff}))
@@ -215,7 +229,7 @@ async def test_records_touched_paths(buggy_repo):
     try:
         touched: set[str] = set()
         reg = ToolRegistry()
-        reg.register(ApplyPatchTool(sb, test_dirs=["tests"], touched=touched))
+        reg.register(ApplyPatchTool(sb, is_test=_dirs(["tests"]), touched=touched))
         ex = ToolExecutor(reg, max_chars=8000)
         r = await ex.execute(ToolCall(id="1", name="apply_patch",
                                       arguments={"diff": _GOOD}))
@@ -232,7 +246,7 @@ async def test_rejected_patch_records_nothing(buggy_repo):
     try:
         touched: set[str] = set()
         reg = ToolRegistry()
-        reg.register(ApplyPatchTool(sb, test_dirs=["tests"], touched=touched))
+        reg.register(ApplyPatchTool(sb, is_test=_dirs(["tests"]), touched=touched))
         ex = ToolExecutor(reg, max_chars=8000)
         await ex.execute(ToolCall(id="1", name="apply_patch",
                                   arguments={"diff": _TOUCHES_TEST}))
@@ -249,7 +263,7 @@ async def test_touched_is_optional(buggy_repo):
     await sb.start()
     try:
         reg = ToolRegistry()
-        reg.register(ApplyPatchTool(sb, test_dirs=["tests"]))
+        reg.register(ApplyPatchTool(sb, is_test=_dirs(["tests"])))
         ex = ToolExecutor(reg, max_chars=8000)
         r = await ex.execute(ToolCall(id="1", name="apply_patch",
                                       arguments={"diff": _GOOD}))
@@ -346,7 +360,7 @@ async def test_touched_records_the_path_git_actually_writes(buggy_repo):
     try:
         touched: set[str] = set()
         reg = ToolRegistry()
-        reg.register(ApplyPatchTool(sb, test_dirs=["tests"], touched=touched))
+        reg.register(ApplyPatchTool(sb, is_test=_dirs(["tests"]), touched=touched))
         ex = ToolExecutor(reg, max_chars=8000)
         r = await ex.execute(ToolCall(id="1", name="apply_patch",
                                       arguments={"diff": _NO_PREFIX_SOURCE}))

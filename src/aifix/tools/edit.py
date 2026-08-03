@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import difflib
 from pathlib import Path
+from typing import Callable
 
 from pydantic import BaseModel, Field
 
@@ -113,16 +114,18 @@ class EditFileTool(Tool):
         replace_all: bool = Field(
             default=False, description="原文出现多次时是否全部替换")
 
-    def __init__(self, sandbox: Sandbox, test_dirs: list[str],
+    def __init__(self, sandbox: Sandbox, is_test: Callable[[str], bool],
                  touched: set[str] | None = None) -> None:
         self._sandbox = sandbox
-        self._test_dirs = test_dirs
+        # 与 apply_patch 同一个谓词（`ProjectAdapter.is_test_path`）。两条写入
+        # 路径的判据必须是同一份 —— 各拿各的迟早漂移成一严一松。
+        self._is_test = is_test
         # 与 apply_patch 同一份记账：交付时 `git add -- <paths>` 的全部输入。
         # 漏记 = 改动不进交付分支，而报告照写「已修复」。
         self._touched = touched
 
     async def run(self, params: "EditFileTool.Params") -> str:
-        guard_write(self._sandbox, self._test_dirs, params.path)
+        guard_write(self._sandbox, self._is_test, params.path)
         # resolve_in_workspace 返回**字符串**，不是 Path —— 踩过一次
         p = Path(resolve_in_workspace(self._sandbox.workspace, params.path))
 

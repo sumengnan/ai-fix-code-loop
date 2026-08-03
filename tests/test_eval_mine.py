@@ -5,7 +5,11 @@ from aifix.adapters.maven_adapter import MavenAdapter
 from aifix.adapters.pytest_adapter import PytestAdapter
 from aifix.eval.mine import is_candidate, split_paths
 
-_DIRS = ["tests", "test"]
+from aifix.signals import under_dirs
+
+# 判据由目录列表变成谓词（见 ProjectAdapter.is_test_path），
+# 这里包的仍是原来那组目录 —— 用例考的东西一个字没改。
+_DIRS = lambda p: under_dirs(p, ["tests", "test"])
 _PY = (".py",)
 
 
@@ -43,7 +47,7 @@ def test_fixture_files_under_test_dirs_go_with_the_tests():
     tests, src = split_paths(
         ["tests/test_a.py", "tests/data/golden.json", "tests/fixtures/x.sql",
          "src/pkg/mod.py", "README.md", "assets/logo.png"],
-        ["tests", "test"], _PY)
+        lambda p: under_dirs(p, ["tests", "test"]), _PY)
     assert tests == ["tests/test_a.py", "tests/data/golden.json",
                      "tests/fixtures/x.sql"]
     # 非测试目录的非 .py 不进 gold_files：gold 是 locate_hit 的判定依据，
@@ -59,14 +63,14 @@ def test_test_prefix_outside_test_dirs_only_applies_to_python():
     本就占提交总数的六成，再掺进这类假候选，挖掘时间是白烧的。
     """
     tests, src = split_paths(["docs/test_plan.md", "src/pkg/mod.py"],
-                             ["tests"], _PY)
+                             lambda p: under_dirs(p, ["tests"]), _PY)
     assert tests == []
     assert src == ["src/pkg/mod.py"]
 
 
 def test_conftest_is_test_infrastructure_not_ground_truth():
     """根目录 conftest.py 既不在 test_dirs 里也不以 test_ 开头。"""
-    tests, src = split_paths(["conftest.py", "src/pkg/mod.py"], ["tests"], _PY)
+    tests, src = split_paths(["conftest.py", "src/pkg/mod.py"], lambda p: under_dirs(p, ["tests"]), _PY)
     assert tests == ["conftest.py"]
     assert src == ["src/pkg/mod.py"]
 
@@ -82,14 +86,14 @@ def test_test_dir_is_matched_as_a_path_prefix_not_just_the_first_segment():
     """
     tests, src = split_paths(
         ["src/test/java/demo/CalcTest.java", "src/main/java/demo/Calc.java"],
-        ["src/test"], _PY)
+        lambda p: under_dirs(p, ["src/test"]), _PY)
     assert tests == ["src/test/java/demo/CalcTest.java"]
     # .java 不是 .py，不进 gold_files —— 这一条由 MavenAdapter 自己的
     # 后缀判定接手，不在本函数的职责里
     assert src == []
     # 前缀必须按**分段**比，不能裸 startswith：`testdata/x.py` 不是
     # `test` 目录下的文件
-    tests, src = split_paths(["testdata/x.py"], ["test"], _PY)
+    tests, src = split_paths(["testdata/x.py"], lambda p: under_dirs(p, ["test"]), _PY)
     assert tests == [] and src == ["testdata/x.py"]
 
 
@@ -105,11 +109,11 @@ def test_source_suffix_comes_from_the_adapter_not_from_this_module():
     稀释 locate_hit 这个指标。
     """
     java = "src/main/java/demo/Calc.java"
-    tests, src = split_paths([java], ["src/test"],
+    tests, src = split_paths([java], lambda p: under_dirs(p, ["src/test"]),
                              MavenAdapter().source_suffixes())
     assert (tests, src) == ([], [java])
     # 反向：同一条路径在 pytest 的后缀集下不是源文件
-    tests, src = split_paths([java], ["src/test"],
+    tests, src = split_paths([java], lambda p: under_dirs(p, ["src/test"]),
                              PytestAdapter().source_suffixes())
     assert (tests, src) == ([], [])
 
@@ -123,7 +127,7 @@ def test_a_maven_red_to_green_commit_is_a_candidate():
     paths = ["src/test/java/demo/CalcTest.java",
              "src/main/java/demo/Calc.java", "pom.xml"]
     adapter = MavenAdapter()
-    tests, gold = split_paths(paths, adapter.test_dirs(),
+    tests, gold = split_paths(paths, adapter.is_test_path,
                               adapter.source_suffixes())
     assert tests == ["src/test/java/demo/CalcTest.java"]
     assert gold == ["src/main/java/demo/Calc.java"]
@@ -131,7 +135,7 @@ def test_a_maven_red_to_green_commit_is_a_candidate():
     assert is_candidate(tests, gold) is True
     # 反向：同一个 commit 在 pytest 的后缀集下不是候选 —— 这正是修复前
     # 每一个 Maven 提交的下场
-    py_side = split_paths(paths, adapter.test_dirs(),
+    py_side = split_paths(paths, adapter.is_test_path,
                           PytestAdapter().source_suffixes())
     assert is_candidate(*py_side) is False
 

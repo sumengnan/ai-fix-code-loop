@@ -16,10 +16,24 @@ edit_file 换一条路：给出原文、给出新文，剩下的由确定性代�
 apply_patch 保留不动 —— 新建文件、跨越大段的重排，diff 仍然是对的表达。
 """
 import pytest
+
 from harness.sandbox.local import LocalSandbox
 from harness.tools.base import ToolError
 
+from aifix.signals import under_dirs
 from aifix.tools.edit import EditFileTool
+
+
+def _dirs(dirs):
+    """目录列表 → `ProjectAdapter.is_test_path` 那种谓词。
+
+    守卫从「收目录列表」改成「收谓词」（为了 vitest 的同目录布局）之后，
+    这些用例各自在考的判断没有变。**逐个包、不统一换成
+    `PytestAdapter().is_test_path`**：那会把只给 `["tests"]` 的用例悄悄放宽
+    成 `["tests", "test"]`，考的东西被改掉了而测试照样绿。
+    """
+    return lambda p: under_dirs(p, dirs)
+
 
 _SRC = '''def most_expensive(items):
     """返回最贵的那件。"""
@@ -45,7 +59,7 @@ def repo(tmp_path):
 
 def _tool(root, touched=None):
     return EditFileTool(LocalSandbox(workspace=str(root)),
-                        test_dirs=["tests"], touched=touched)
+                        is_test=_dirs(["tests"]), touched=touched)
 
 
 async def _edit(root, touched=None, **kw):
