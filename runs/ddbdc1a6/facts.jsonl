@@ -1,0 +1,34 @@
+{"run_id": "ddbdc1a6", "key": "reproduce_kind", "value": "ok"}
+{"run_id": "ddbdc1a6", "key": "reproduce_tokens", "value": 44577}
+{"run_id": "ddbdc1a6", "key": "test_python", "value": "/home/runner/work/aifix-code/aifix-code/.venv/bin/python"}
+{"run_id": "ddbdc1a6", "key": "baseline_failures", "value": 1}
+{"run_id": "ddbdc1a6", "key": "baseline_failure_ids", "value": ["tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims"]}
+{"run_id": "ddbdc1a6", "key": "suspect_anchor", "value": "import", "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 1}
+{"run_id": "ddbdc1a6", "key": "suspect_in_traceback", "value": true, "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 1}
+{"run_id": "ddbdc1a6", "key": "suspect_file", "value": "tests/test_cli_args_aifix.py", "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 1}
+{"run_id": "ddbdc1a6", "key": "violation", "value": "test_edit", "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 1}
+{"run_id": "ddbdc1a6", "key": "violation", "value": "test_edit", "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 1}
+{"run_id": "ddbdc1a6", "key": "diff_lines", "value": 38, "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 1}
+{"run_id": "ddbdc1a6", "key": "touched", "value": ["aifix/__init__.py", "src/aifix/cli.py"], "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 1}
+{"run_id": "ddbdc1a6", "key": "verdict", "value": "worse", "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 1}
+{"run_id": "ddbdc1a6", "key": "confirmed_regressions", "value": ["tests/test_cli_args.py::test_cmd_mutate_reports_a_dirty_baseline_without_a_traceback", "tests/test_cli_args.py::test_cmd_mutate_salvages_tasks_and_fails_with_a_readable_message", "tests/test_preflight_exit_code.py::test_the_cli_really_exits_nonzero[missing]", "tests/test_preflight_exit_code.py::test_the_cli_really_exits_nonzero[not-a-git-repo]"], "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 1}
+{"run_id": "ddbdc1a6", "key": "rollback", "value": true, "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 1}
+{"run_id": "ddbdc1a6", "key": "signals_discarded", "value": {"removed_public_symbols": [], "new_module_state": [], "files_outside_suspect": ["aifix/__init__.py", "src/aifix/cli.py"]}, "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 1}
+{"run_id": "ddbdc1a6", "key": "suspect_anchor", "value": "import", "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 2}
+{"run_id": "ddbdc1a6", "key": "suspect_in_traceback", "value": true, "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 2}
+{"run_id": "ddbdc1a6", "key": "suspect_file", "value": "tests/test_cli_args_aifix.py", "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 2}
+{"run_id": "ddbdc1a6", "key": "violation", "value": "test_edit", "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 2}
+{"run_id": "ddbdc1a6", "key": "violation", "value": "test_edit", "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 2}
+{"run_id": "ddbdc1a6", "key": "diff_lines", "value": 8, "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 2}
+{"run_id": "ddbdc1a6", "key": "touched", "value": ["aifix/__init__.py"], "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 2}
+{"run_id": "ddbdc1a6", "key": "verdict", "value": "worse", "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 2}
+{"run_id": "ddbdc1a6", "key": "confirmed_regressions", "value": ["tests/test_preflight_exit_code.py::test_the_cli_really_exits_nonzero[missing]", "tests/test_preflight_exit_code.py::test_the_cli_really_exits_nonzero[not-a-git-repo]"], "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 2}
+{"run_id": "ddbdc1a6", "key": "rollback", "value": true, "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 2}
+{"run_id": "ddbdc1a6", "key": "signals_discarded", "value": {"removed_public_symbols": [], "new_module_state": [], "files_outside_suspect": ["aifix/__init__.py"]}, "failure": "tests/test_cli_args_aifix.py::test_cmd_mutate_refuses_a_repo_no_adapter_claims", "attempt": 2}
+{"run_id": "ddbdc1a6", "key": "abort", "value": "token 预算耗尽：468749 / 455423"}
+{"run_id": "ddbdc1a6", "key": "abort_kind", "value": "tokens"}
+{"run_id": "ddbdc1a6", "key": "adapter", "value": "pytest"}
+{"run_id": "ddbdc1a6", "key": "branch", "value": "aifix/ddbdc1a6"}
+{"run_id": "ddbdc1a6", "key": "fixed", "value": 0}
+{"run_id": "ddbdc1a6", "key": "spent_tokens", "value": 468749}
+{"run_id": "ddbdc1a6", "key": "spent_usd", "value": 1.4486012}
