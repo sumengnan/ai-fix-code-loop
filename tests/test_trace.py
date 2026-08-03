@@ -77,3 +77,50 @@ def test_creates_directory(tmp_path):
     t.fact("x", 1)
     t.close()
     assert (d / "facts.jsonl").is_file()
+
+
+# ---------------------------------------------------------------- 时间戳
+
+def test_events_carry_arrival_timestamps_when_given(tmp_path):
+    """事件带上到达时刻，replay 才算得出每步耗时。
+
+    **时刻必须由调用方给**（`consume` 在事件到达那一刻记的），不能在这里
+    取 `time.time()` —— record_events 是在整段 AgentLoop **跑完之后**批量
+    落盘的，那时打的戳全都挤在同一毫秒上，看起来精确、实际是假的。
+    """
+    t = RunTrace(tmp_path, run_id="r1")
+    t.record_events([RunStarted(run_id="r1"), TextDelta(text="x")],
+                    times=[1000.5, 1007.25])
+    t.close()
+    a, b = [json.loads(x) for x in
+            (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert a["ts"] == 1000.5
+    assert b["ts"] == 1007.25
+
+
+def test_no_timestamp_key_when_none_was_recorded(tmp_path):
+    """没有真实时刻就**一个字段都不写**，而不是填一个写盘时刻。
+
+    这个项目对「看着精确的假数字」一向零容忍（假的 $0.00 栽过三次）。
+    一个错的时间戳会让人据此判断「这一步花了 0 秒」，比没有更糟。
+    """
+    t = RunTrace(tmp_path, run_id="r1")
+    t.record_events([TextDelta(text="x")])
+    t.close()
+    rec = json.loads(
+        (tmp_path / "events.jsonl").read_text(encoding="utf-8").strip())
+    assert "ts" not in rec
+
+
+def test_a_short_times_list_does_not_drop_events(tmp_path):
+    """时刻列表比事件短时，事件照写、只是后面几条没有戳。
+
+    观测数据不该因为自己不完整就把被观测的东西弄丢。
+    """
+    t = RunTrace(tmp_path, run_id="r1")
+    t.record_events([TextDelta(text="a"), TextDelta(text="b")], times=[1.0])
+    t.close()
+    lines = (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["ts"] == 1.0
+    assert "ts" not in json.loads(lines[1])

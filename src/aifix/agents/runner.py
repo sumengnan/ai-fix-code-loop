@@ -1,6 +1,7 @@
 """把 AgentLoop 的异步事件流收敛成一个供 LangGraph 节点使用的结果对象。"""
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Callable
 
@@ -16,6 +17,14 @@ class AgentOutcome:
     cost_usd: float = 0.0
     error: str | None = None
     events: list[Event] = field(default_factory=list)
+    # 每条事件**到达时**的 epoch 秒，与 `events` 一一对应、同序同长。
+    #
+    # 为什么是两个平行列表而不是包一层带时刻的对象：`events` 会被
+    # `violations.count_violations` 与 `reproduce.classify_incomplete` 按
+    # `isinstance` / 类名消费 —— 包一层就要改那两处，而它们判的是**框架的
+    # 事件类型**，不该被一个观测需求侵入。代价是两个列表必须同序，所以全
+    # 项目只在 `consume` 的一个位置往里 append（见下面那处注释）。
+    event_times: list[float] = field(default_factory=list)
     # 成本上限触发，事件流被我们**主动**截断。刻意不复用 error：两者说的是
     # 两件事 —— error 来自 RunError，含义是「这次 run 自己跑坏了」；截断是
     # 我们从外面按预算掐的，被掐的那次 run 本身是健康的，它已经产出的东西
@@ -73,7 +82,11 @@ async def consume(
     # 发起过的调用，供结束事件按 id 认领自己的参数
     calls: dict[str, ToolCall] = {}
     async for ev in stream:
+        # **时刻在这里记，不在落盘那一侧。** record_events 是整段循环跑完之后
+        # 批量写的，在那里打戳会让全部事件挤在同一毫秒上 —— 看着精确，而据此
+        # 算出来的每步耗时全是 0。这两行必须挨着，它们的同序性没有别的保障。
         out.events.append(ev)
+        out.event_times.append(time.time())
         if isinstance(ev, ToolStarted):
             calls[ev.tool_call.id] = ev.tool_call
             if on_tool is not None:

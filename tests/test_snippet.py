@@ -119,6 +119,7 @@ def test_detect_node_actually_reads_the_files(repo, monkeypatch):
 
     class _Outcome:
         ok, text, events, tokens, cost_usd = False, "", [], 0, 0.0
+        event_times: list = []
 
     async def _consume(_gen, **kw):
         return _Outcome()

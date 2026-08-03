@@ -530,3 +530,44 @@ async def test_a_pr_creation_failure_is_reported_not_thrown(tmp_path):
     assert "aifix/deadbeef" in body
     # 而且要指出**具体那个设置**，不是一句「开 PR 失败了」
     assert "create and approve pull requests" in body
+
+
+async def test_the_core_loop_gets_a_progress_reporter(tmp_path):
+    """issue 那条路必须把进度接上 —— 否则 Actions 日志里是**几十分钟的空屏**。
+
+    实测（2026-08-03，issue #9）那一步的日志只有两行：
+
+        03:58:34  env 声明
+        04:27:01  通路：delivered · PR：…
+
+    中间 28 分半，**零行输出**。而命令行那条路（`aifix run`）一直有
+    TerminalProgress 的逐步心跳 —— 只有 issue 这条漏了，于是它卡住的时候
+    没有任何办法判断卡在哪。
+
+    钉的是「传了一个会出声的 progress」，不是具体措辞（措辞归 progress.py）。
+    """
+    import io
+
+    seen = {}
+
+    async def _run(*a, progress=None, **k):
+        seen["progress"] = progress
+        return _state()
+
+    res, gh, _ = await _handle(_payload(), tmp_path, state=None)
+    # 上面那次只是把夹具跑通；下面这次专门抓 progress
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    fakes, _ = _fakes()
+    fakes["run_fn"] = _run
+    await handle(_payload(), tmp_path, AifixConfig(), _Gh(), **fakes)
+
+    prog = seen.get("progress")
+    assert prog is not None, "run_once 拿到的 progress 是 None —— 又是空屏"
+
+    # 断言它**真的会出声**，而不是 `not isinstance(prog, NullProgress)`：
+    # TerminalProgress 继承自 NullProgress，那个判据恒为 False —— 一条永远
+    # 通不过的断言和一条永远通过的一样没用。直接让它说一句，看有没有字出来。
+    buf = io.StringIO()
+    prog._stream = buf
+    prog.note("测试心跳")
+    assert buf.getvalue().strip(), "传进去的 progress 一个字都不印"

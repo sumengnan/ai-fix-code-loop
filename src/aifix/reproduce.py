@@ -84,6 +84,10 @@ class ReproduceOutcome:
     tokens: int = 0
     cost_usd: float = 0.0
     events: list[Any] = field(default_factory=list)
+    # 与 `events` 一一对应的到达时刻（见 agents.runner.AgentOutcome）。
+    # **必须一路带过来**：复现是这条流水线里最长的几段之一（实测一次真跑
+    # 44,577 tokens、好几分钟），漏掉它 replay 就正好在最该计时的地方没有时间。
+    event_times: list[float] = field(default_factory=list)
 
 
 def classify_incomplete(events: list[Any]) -> bool:
@@ -280,7 +284,7 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
         await sandbox.close()
 
     common = dict(tokens=outcome.tokens, cost_usd=outcome.cost_usd,
-                  events=outcome.events)
+                  events=outcome.events, event_times=outcome.event_times)
     if not outcome.ok:
         # `outcome.ok is False` 意味着**循环自己没跑完**（步数耗尽、token 超限、
         # 崩了），它压根没产出最终文本 —— 所以这一支**不可能**是解析问题。

@@ -220,7 +220,7 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
                 cost_capped = True
             # 每一轮都记：守卫重试时，模型「一字未改」的那一轮恰恰
             # 是最该复盘的，只记最后一轮等于把它丢了。
-            trace.record_events(outcome.events)
+            trace.record_events(outcome.events, outcome.event_times)
             for kind, n in count_violations(outcome.events).items():
                 for _ in range(n):
                     trace.fact("violation", kind)

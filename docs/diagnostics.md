@@ -22,6 +22,7 @@ aifix/traces    让 CI 上的结论活过 runner       traces.py
 - [跑完之后：aifix replay](#跑完之后aifix-replay)
 - [跨 run：ingest 与 stats](#跨-runingest-与-stats)
 - [CI 上：aifix/traces 孤儿分支](#ci-上aifixtraces-孤儿分支)
+- [两个典型的排查流程](#两个典型的排查流程)
 - [fact 键速查](#fact-键速查)
 - [OpenTelemetry](#opentelemetry)
 
@@ -33,7 +34,7 @@ aifix/traces    让 CI 上的结论活过 runner       traces.py
 <repo>/.aifix/
 ├── runs/<run_id>/
 │   ├── tree/              worktree —— run 结束时被删掉
-│   ├── events.jsonl       模型每一步看到什么、决定做什么（原始素材，体积大）
+│   ├── events.jsonl       模型每一步看到什么、决定做什么、什么时刻（体积大）
 │   ├── facts.jsonl        领域判断的结论（数据契约）
 │   ├── report.md          给人看的报告
 │   ├── pending.json       待人回答的问题（只有停在提问上时才有）
@@ -49,7 +50,7 @@ aifix/traces    让 CI 上的结论活过 runner       traces.py
 
 | | `events.jsonl` | `facts.jsonl` |
 |---|---|---|
-| 是什么 | 模型每一步看到什么、决定做什么 | 领域判断的结论 |
+| 是什么 | 模型每一步看到什么、决定做什么、什么时刻 | 领域判断的结论 |
 | 谁消费 | `aifix replay`，出问题时人来读 | **评测直接取用**、`aifix stats` 灌库 |
 | 体积 | 大（模型 IO 原文），三份里唯一会失控的 | 小（几十行） |
 | 保留 | CI artifact（90 天） | 永久（推到 `aifix/traces` 分支） |
@@ -121,6 +122,24 @@ baseline：跑了 214 个，红 3 个（1:07）
   并行跑几十个任务，默认出声的话几十条进度会交织成一团。
 - `--quiet` 关掉。进度本来就走 stderr，只在你连 stderr 一起收进日志时才需要它。
 
+### issue 那条路也有（2026-08-03 补上的）
+
+`aifix issue handle` 在 Actions 上跑几十分钟，而它此前**一个字都不输出** —— 那个默认值
+是把双刃剑：谁不传 progress 谁就静默，而 issue 这条路一直没传。实测（issue #9）那一步的
+日志只有两行：
+
+```
+03:58:34  env 声明
+04:27:01  通路：delivered · PR：…
+```
+
+中间 28 分半，零行。**卡住的时候，日志是唯一能实时看到的东西** —— artifact 要 job 结束
+才下载得到，而那时已经不叫「卡住」了。
+
+现在核心循环那一段接了 `TerminalProgress`，它之外的几段（复现、红检、推分支、开 PR）
+也各报一句。非 TTY 下 `TerminalProgress` 自动退成逐行输出，不会往 Actions 日志里灌
+`\r` 残句。
+
 ---
 
 ## 跑完之后：`aifix replay`
@@ -131,7 +150,24 @@ aifix replay a1b2c3d4 --step 7 --full
 ```
 
 把 `events.jsonl` / `facts.jsonl` 渲染成可读的时间轴：每一步模型说了什么、调了什么工具、
-拿回什么，以及**领域事实插在它所属的那次尝试之后**。
+拿回什么、**花了多久**，以及领域事实插在它所属的那次尝试之后。
+
+```
+── 步骤 1 · tests/t.py::x · 第 1 次尝试  4.0s ──
+  [ToolStarted] 开始执行工具 read_symbol（id=c1）
+  [ToolFinished] 工具返回（成功，id=c1）：…
+
+── 步骤 2 · tests/t.py::x · 第 1 次尝试  1分33秒 ──     ← 一眼看出慢在哪
+  [ToolStarted] 开始执行工具 run_tests（id=c2）
+  [ToolFinished] 工具返回（成功，id=c2）：1 failed
+```
+
+每步耗时来自事件的 `ts` 字段 —— 它是**事件到达那一刻**记的（在 `consume` 里），不是落盘
+时补的。落盘是整段 AgentLoop 跑完之后批量做的，在那里打戳会让所有事件挤在同一毫秒上，
+算出来的耗时全是 0。
+
+> **老产物没有 `ts`。** 这个字段是 2026-08-03 加的，之前落下的 run 回放时不显示耗时 ——
+> 而不是显示 `0s`。没有真实时刻就什么都不说，编一个出来会被读成「这一步是瞬间完成的」。
 
 输出是**一次性文本**：可 grep、可重定向、可整段贴给别人。不做交互式 TUI —— 最常见的用法
 是「跑一遍、翻到出问题那一步、把那几行贴出去」，一次性输出正好满足它，交互式反而挡在中间。
@@ -365,9 +401,26 @@ OpenTelemetry 的 span 是天然嵌套的，所以框架那几层会自动挂在
 
 ---
 
-## 一个典型的排查流程
+## 两个典型的排查流程
 
-**「报告说修好了 2 个，但我看分支上不对劲」**
+### 「它是不是卡住了」（跑到一半，实时）
+
+看 Actions 日志。核心循环的每一步、以及复现/红检/推分支/开 PR 各段都会实时出声：
+
+```
+── 读 issue #9，让模型写一条复现测试……
+── 复现测试已写下：tests/test_x.py —— 跑一遍确认它真的红了
+── 开始修复：tests/test_x.py::test_y
+run 1c586c4 · pytest · aifix/1c586c4
+baseline：跑了 956 个，红 1 个（3:58）
+[1/1] tests/test_x.py::test_y
+  第 1 轮 / 共 3 轮
+   1 ▸ read_symbol  …
+```
+
+**跑完之后**才能拿到 artifact，所以卡住的当下只有日志。日志停在哪一句，就是卡在哪一步。
+
+### 「报告说修好了 2 个，但我看分支上不对劲」（跑完，事后）
 
 ```bash
 # 1. 先看结论

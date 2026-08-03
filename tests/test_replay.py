@@ -432,3 +432,43 @@ def test_usage_does_not_blame_a_price_map_it_knows_nothing_about():
     assert "AIFIX_PRICE_MAP" not in text, text
     # 区分度：真有成本时照常给数字，别把这一支也说成未知
     assert "$0.5000" in _fmt_usage({"cost_usd": 0.5})
+
+
+def test_step_headers_show_how_long_each_step_took(tmp_path):
+    """**「卡在哪」问的是时间，所以时间必须印出来。**
+
+    此前 events.jsonl 里没有时间戳，replay 只能给出顺序 —— 而一次 run 里
+    真正值得查的是「哪一步花了 7 分钟」，顺序答不了这个问题。
+    """
+    d = tmp_path / "r1"
+    d.mkdir()
+    (d / "events.jsonl").write_text("\n".join(json.dumps(e) for e in [
+        {"type": "StepStarted", "data": {"step": 1}, "ts": 1000.0},
+        {"type": "TextDelta", "data": {"text": "想想"}, "ts": 1002.5},
+        {"type": "StepFinished", "data": {"step": 1}, "ts": 1012.0},
+        {"type": "StepStarted", "data": {"step": 2}, "ts": 1012.5},
+        {"type": "StepFinished", "data": {"step": 2}, "ts": 1015.0},
+    ]) + "\n", encoding="utf-8")
+    (d / "facts.jsonl").write_text("", encoding="utf-8")
+
+    out = render(d)
+    # 第一步跨了 12 秒，第二步 2.5 秒 —— 两个数都要能在输出里找到
+    assert "12" in out, out
+    assert "2.5" in out or "3s" in out or "2s" in out, out
+
+
+def test_a_run_without_timestamps_still_renders(tmp_path):
+    """老产物（本次改动之前落的）没有 ts —— 不能因此崩，也不能编一个时长。
+
+    诊断工具在数据比自己旧的时候要退化，不是崩溃。
+    """
+    d = tmp_path / "r2"
+    d.mkdir()
+    (d / "events.jsonl").write_text(
+        json.dumps({"type": "StepStarted", "data": {"step": 1}}) + "\n",
+        encoding="utf-8")
+    (d / "facts.jsonl").write_text("", encoding="utf-8")
+
+    out = render(d)
+    assert "步骤 1" in out
+    assert "0s" not in out, "没有时刻就别编一个 0 秒出来"

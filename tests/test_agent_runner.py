@@ -145,3 +145,31 @@ async def test_cost_cap_keeps_text_already_received():
     out = await consume(stream(), cost_cap=0.5)
     assert out.text == '{"suspect_file": "a.py"}'
     assert out.error is None, "主动截断不是运行出错，不能污染 error"
+
+
+async def test_events_are_stamped_as_they_arrive_not_at_the_end():
+    """时刻要在**事件到达那一刻**记，不是整段跑完之后补。
+
+    record_events 是批量落盘的 —— 在那里打戳，全部事件会挤在同一毫秒上，
+    算出来的「每步耗时」全是 0。这条测试用一个会真的停顿的流来钉住：
+    两条事件之间隔了实打实的时间，戳就必须差出来。
+    """
+    import asyncio
+
+    async def slow():
+        yield TextDelta(text="a")
+        await asyncio.sleep(0.05)
+        yield TextDelta(text="b")
+
+    out = await consume(slow())
+    assert len(out.event_times) == len(out.events) == 2
+    assert out.event_times[1] - out.event_times[0] >= 0.04, out.event_times
+
+
+async def test_every_event_gets_exactly_one_timestamp():
+    """两个列表必须一一对应 —— 错位一格，replay 会把某一步的耗时算到
+    另一步头上，而那种错是看不出来的。"""
+    out = await consume(_stream([
+        RunStarted(run_id="r"), TextDelta(text="x"), TextDelta(text="y"),
+    ]))
+    assert len(out.event_times) == len(out.events) == 3

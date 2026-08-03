@@ -68,7 +68,7 @@ async def detect_node(state: AifixState, client: Any = None) -> dict[str, Any]:
 
     diagnosis = parse_diagnosis(outcome.text) if outcome.ok else None
     trace = trace_of(state)
-    trace.record_events(outcome.events)
+    trace.record_events(outcome.events, outcome.event_times)
     if anchor is not None:
         trace.fact("suspect_anchor", anchor)
     else:

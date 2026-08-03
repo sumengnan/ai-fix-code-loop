@@ -392,3 +392,21 @@ async def test_hitting_our_own_dollar_gate_says_so(buggy_repo):
     assert "AIFIX_BUDGET_USD" in out.reason
     assert "AIFIX_REPRODUCER_BUDGET_SHARE" in out.reason
     assert "查端点" not in out.reason and "重试" not in out.reason
+
+
+async def test_the_reproduce_step_carries_its_event_timestamps(buggy_repo):
+    """复现这一步的时刻也要一路带到 ReproduceOutcome 上。
+
+    **这条是被一次真实的缺口逼出来的**：`event_times` 加进 AgentOutcome 之后，
+    ReproduceOutcome 上忘了加，而 handle 那边写的是 `getattr(out, ..., None)`
+    —— 于是它「跑通了」，只是复现那一段一个时间戳都没有。而复现恰恰是这条
+    流水线里最该计时的几段之一（实测一次真跑 44,577 tokens、好几分钟）。
+
+    防御性的 getattr 正好掩盖了这个缺口，所以那一处也一并改成了直接访问。
+    """
+    out = await reproduce(buggy_repo, PytestAdapter(), AifixConfig(),
+                          "add 算错了", "add(2,3) 返回 -1",
+                          client=_Scripted([_text(_OK_JSON)]))
+    assert out.event_times, "复现这一步一个时间戳都没有"
+    assert len(out.event_times) == len(out.events), \
+        "时刻与事件必须一一对应 —— 错位一格，replay 会把耗时算到别的步上"

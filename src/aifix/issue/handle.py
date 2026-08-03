@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from ..graph import (COLLECTION_ABORT_KIND, MODEL_ABORT_KIND,
 from ..delivery import COMMIT_EMAIL, COMMIT_NAME
 from ..traces import TRACES_BRANCH
 from ..nodes.report import count_fixed
+from ..progress import TerminalProgress
 from ..reproduce import (KIND_COST_CAPPED, KIND_EMPTY_ANSWER,
                          KIND_MISSING_INFO, KIND_NO_CONVERGENCE,
                          KIND_TRUNCATED, KIND_UNPARSEABLE, ReproduceOutcome)
@@ -86,6 +88,20 @@ def _repro_failure_comment(out: Any) -> str:
     return f"{head}\n\n{out.reason}"
 
 
+def _say(line: str) -> None:
+    """往 stderr 报一句阶段进展。
+
+    这条流水线在 Actions 上跑几十分钟，而它此前**一个字都不输出** —— 卡住时
+    没有任何办法判断卡在哪（artifact 要 job 结束才下载得到，那时已经不叫卡住）。
+    核心循环内部的心跳由 `TerminalProgress` 负责，这里补的是它之外那几段：
+    复现、红检、推分支、开 PR。
+
+    走 stderr 与 progress 同一条流，两者在 Actions 日志里按时间自然交织；
+    stdout 留给 `_cmd_issue` 最后那行结论。
+    """
+    print(line, file=sys.stderr, flush=True)
+
+
 def _trace_reproduce(repo: Path, run_id: str, out: Any) -> None:
     """把复现这一步的事件与结论落进 `.aifix/runs/<run_id>/`。
 
@@ -99,7 +115,7 @@ def _trace_reproduce(repo: Path, run_id: str, out: Any) -> None:
             t.fact("reproduce_kind", getattr(out, "kind", "") or "unknown")
             t.fact("reproduce_tokens", int(getattr(out, "tokens", 0) or 0))
             if getattr(out, "events", None):
-                t.record_events(out.events)
+                t.record_events(out.events, out.event_times)
         finally:
             t.close()
     except Exception:                           # noqa: BLE001 —— 见上
@@ -237,6 +253,7 @@ async def handle(
         # ------------------------------------------------------ 复现
         # 从这里开始计时，一直算到 run_once 之前 —— 红检跑的是真测试，耗时
         # 不是可以忽略的量，只掐模型调用那一段等于漏掉一大半。
+        _say(f"── 读 issue #{ev.number}，让模型写一条复现测试……")
         out = await reproduce_fn(repo, adapter, config, ev.title, ev.body)
 
     # **复现这一步也要落 trace**，哪怕后面根本走不到 run_once。
@@ -255,6 +272,7 @@ async def handle(
         return HandleResult(0, "no_repro")
 
     written = write_reproduction(repo, r)
+    _say(f"── 复现测试已写下：{r.test_file} —— 跑一遍确认它真的红了")
     ok, why = await red_check_fn(repo, adapter, r.target_test_id,
                                  timeout=config.scoped_test_timeout_seconds)
     if not ok:
@@ -304,8 +322,20 @@ async def handle(
         "budget_wall_seconds": max(
             0.0, config.budget_wall_seconds - (time.monotonic() - t0))})
 
+    # **进度必须接上。** 不接的话 Actions 日志里是几十分钟的空屏 —— 实测
+    # （2026-08-03，issue #9）那一步只有两行：开头的 env 声明，和 28 分半之后
+    # 的一行结果。而命令行那条路一直有心跳，只有这条漏了：`run_once` 的
+    # progress 默认是 NullProgress，谁不传谁就静默。
+    #
+    # 卡住的时候，日志是唯一能实时看到的东西 —— artifact 要 job 结束才下载得
+    # 到，而那时已经不叫「卡住」了。
+    #
+    # 非 TTY 下 TerminalProgress 自动退成逐行输出（见 progress._tty），
+    # 不会往 Actions 日志里灌一堆 `\r` 残句。
+    _say(f"── 开始修复：{r.target_test_id}")
     state = await run_fn(repo, run_config, run_id=run_id,
-                         only_test=r.target_test_id, answer=answer_text)
+                         only_test=r.target_test_id, answer=answer_text,
+                         progress=TerminalProgress())
 
     # ------------------------------------------------- 停在「等人回答」上
     #
@@ -357,6 +387,7 @@ async def handle(
     # 失联 —— 异常穿出去就没有 PR、没有说明，issue 里最后一条还停在那个 👀。
     # 区别只在这次**确实是个失败**，所以退非 0 而不是照常收场。
     try:
+        _say(f"── 推分支 {branch}")
         git(repo, "push", "origin", branch)
     except Exception as e:                      # noqa: BLE001 —— 见上
         gh.comment(ev.number,
@@ -370,6 +401,7 @@ async def handle(
     title = (f"fix: {ev.title} (#{ev.number})" if fixed
              else f"[复现已就位，未修复] {ev.title} (#{ev.number})")
     try:
+        _say("── 开 PR")
         url = gh.create_pr(head=branch, title=title, body=body)
     except Exception as e:                      # noqa: BLE001
         # 分支**已经推上去了**，成果还在 —— 裸抛的话人连它叫什么都不知道。

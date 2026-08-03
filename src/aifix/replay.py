@@ -310,9 +310,25 @@ def _fmt_usage(data: dict) -> str:
     return " · ".join(parts)
 
 
+def _elapsed(events: list[dict]) -> str:
+    """这一步跨了多久。没有时刻就返回空串 —— **不编一个 0 秒出来**。
+
+    老产物（时间戳这个字段引入之前落下的）里没有 `ts`，那时唯一诚实的输出
+    是什么都不说。印一个「0s」会被读成「这一步是瞬间完成的」，而真相是我们
+    不知道 —— 这个项目对「看着精确的假数字」一向零容忍。
+
+    只有一条事件时也返回空串：一个点算不出跨度。
+    """
+    ts = [e["ts"] for e in events if isinstance(e.get("ts"), (int, float))]
+    if len(ts) < 2:
+        return ""
+    d = max(ts) - min(ts)
+    return f"  {d:.1f}s" if d < 60 else f"  {int(d) // 60}分{int(d) % 60:02d}秒"
+
+
 def _render_step(index: int, events: list[dict], full: bool, max_chars: int,
                  key: tuple = (None, None)) -> str:
-    lines = [f"{_HR} 步骤 {index}{_attr_suffix(key)} {_HR}"]
+    lines = [f"{_HR} 步骤 {index}{_attr_suffix(key)}{_elapsed(events)} {_HR}"]
     # 同一个 tool_call 的参数在 ToolCallRequested 与 ToolStarted 里各有一份。
     # 一个几千字的补丁印两遍只是把输出撑长，所以第二次只报名字；但万一某条
     # 路径只发 ToolStarted，参数不能就这么丢了，于是按 id 记一下印过没有。
