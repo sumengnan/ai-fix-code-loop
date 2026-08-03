@@ -166,7 +166,7 @@ async def handle(
     red_check_fn = red_check_fn or red_check
     run_fn = run_fn or run_once
 
-    decision = authorize(payload)
+    decision = authorize(payload, allowed_users=config.allowed_users)
     if not decision.allowed:
         if decision.notify:
             # 有人在等一个回应。静默丢弃会让他以为它已经在跑了 —— 「不报错、
@@ -177,7 +177,11 @@ async def handle(
         return HandleResult(0, "ignored")
 
     ev = decision.event
-    gh.react(ev.comment_id)
+    # 回执打在触发的那条评论上。issue 正文触发时没有那条评论（comment_id 为 0），
+    # 这一步跳过 —— 打在 0 号评论上是往别人的帖子上加表情。状态评论随后照发，
+    # 「命令被听见了」这件事不会因此丢掉，只是晚几十秒。
+    if ev.comment_id:
+        gh.react(ev.comment_id)
 
     adapter = detect_adapter(
         repo, python=resolve_test_python(repo, config.test_python))

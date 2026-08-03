@@ -1,14 +1,14 @@
-# issue 驱动：一条评论换一个 PR
+# issue 驱动：一个 issue 换一个 PR
 
-在 GitHub 上给一个 issue 评论 `/aifix`，aifix 会读懂这段缺陷描述、写一条复现测试、
-跑核心循环去修，最后开一个 PR。
+在 GitHub 上开一个正文以 `/aifix` 开头的 issue（或在已有 issue 下评论 `/aifix`），
+aifix 会读懂这段缺陷描述、写一条复现测试、跑核心循环去修，最后开一个 PR。
 
 **这一层里的每一个判定都是零 LLM 的。** 谁有权触发、命令怎么解析、走哪条交付通路，全部
 由确定性代码决定 —— 模型只负责写复现测试。理由与「只有 verify 有资格说修好了」同源：
 **一个能被说服的判定者等于没有判定者。**
 
 > **想把它接到自己的项目上？** 这份文档讲的是**流水线内部怎么走**，以及 aifix 这个仓库
-> 自己的四个 workflow。要一步步的接入步骤（含可直接复制的 workflow、组织仓库那堵墙、
+> 自己的四个 workflow。要一步步的接入步骤（含可直接复制的 workflow、怎么给别人开权限、
 > 成本估算、七个常见坑），去 [integration.md](integration.md)。
 
 ---
@@ -29,18 +29,19 @@
 ## 整条流水线
 
 ```
-issue_comment 事件（有人评论了 /aifix）
-        │
+issues / opened            issue_comment / created
+（正文第一行 /aifix）        （评论第一行 /aifix 或 /aifix <编号>）
+        └───────────┬───────────┘
+                    ▼
+  workflow 的 if: 前置过滤          没带命令前缀的在这里就被挡掉，一秒 runner 都不花
+        │                          **它不判权限** —— 见下方「授权判定」
         ▼
-  workflow 的 if: 前置过滤          绝大多数评论在这里就被挡掉，一秒 runner 都不花
-        │
-        ▼
-  authorize()                       零 LLM，六条判据全部成立才放行
+  authorize()                       零 LLM，按入口分两条判据链
         │   拒绝且「有人在等」→ 回帖说明，退 0
         │   拒绝且「没人在等」→ 静默，退 0
         ▼
   给触发的那条评论加 👀              Actions 从排队到开跑有几十秒空窗
-        │
+        │                          （issue 正文触发时没有那条评论，跳过）
         ▼
   reproduce()                       模型读 issue 正文 → 写一条测试（只读工具面）
         │   写不出 → 回帖列出缺什么，退 0
@@ -116,26 +117,103 @@ create and approve pull requests」**。所以那条回帖直接指到那一格�
 
 `src/aifix/issue/event.py`。**零 LLM，只有字符串比较和字典取值。**
 
-六条判据，全部成立才放行：
+两条入口，各自一条判据链。**共同的前置**（不满足一律静默，一个字都不回）：
+
+```python
+"pull_request" not in payload["issue"]           # 不是 PR
+```
+
+### 入口一：issue 正文触发（主入口）
+
+```python
+payload["action"] == "opened"                    # 只认新开的 issue
+issue["user"]["type"] != "Bot"
+first_line(issue["body"]) == "/aifix"            # 第一行恰好是命令
+is_trusted(issue.author_association, issue.user.login)   # 作者有权限
+```
+
+这条路上**触发的动作与被读的文本是同一个人写的同一个对象** —— 一条判据同时管住
+「谁按的按钮」和「谁写的文本」。注入面是**结构上**归零的，不靠两条判据凑。
+
+命令那一行会被去掉再交给模型（`_strip_command`）：`/aifix` 是给机器看的标记，不是缺陷
+描述的一部分。原样喂进去的话，模型上下文的第一句是一个它不认识的命令词。
+
+### 入口二：评论触发（再跑一次 / 回答问题）
 
 ```python
 payload["action"] == "created"                   # 只认新建的评论
-"pull_request" not in payload["issue"]           # 不是 PR
-comment["user"]["type"] != "Bot"                 # 不是机器人发的
-first_line(comment["body"]) == "/aifix"          # 第一行恰好是命令
-comment["author_association"] == "OWNER"         # 仓库所有者
-issue["user"]["login"] == repo_owner             # 且 issue 是他自己提的
+comment["user"]["type"] != "Bot"                 # 自己回的帖不能把自己再唤醒
+first_line(comment["body"]) in ("/aifix", "/aifix <数字>")
+is_trusted(comment.author_association, comment.user.login)   # 按按钮的人
+is_trusted(issue.author_association,  issue.user.login)      # 写正文的人
 ```
 
-顺序是刻意的：先把「没人在等」的几类静静滤掉，再判权限 —— 反过来的话，仓库里每一条普通
-评论都会收到一句权限说明。
+**比入口一多一条判据**，因为这条路上两者不是同一个人：模型读的是 issue 正文，而按按钮的
+是评论者。
 
-每一条挡的具体是什么，见 [safety.md 的「提示注入面」](safety.md#8-提示注入面)。这里只
-强调最后一条：
+> **只限制触发者挡不住提示注入。** 攻击路径是「外人提一个藏了指令的 issue，等有权限的人
+> 觉得该修、顺手打上 `/aifix`」—— 而那个人本来就想修 bug，那一步门槛低得可怜。所以两边
+> 都要查。
 
-> **只限制触发者挡不住提示注入。** 攻击路径是「外人提一个藏了指令的 issue，等仓库主觉得
-> 该修、顺手打上 `/aifix`」—— 而仓库主本来就想修 bug，那一步门槛低得可怜。模型读到的每
-> 个字都得是仓库主自己写的，注入面才归零。
+### `is_trusted`：谁能驱动 aifix
+
+一条原则：**触发权 = 已经能改这个仓库的人。**
+
+因为 issue 正文会驱动模型改代码、开 PR。一个本来就能直接推代码的人驱动它，不增加任何新
+风险；反过来，一个没有写入权限的人能驱动它，等于给了他一条**间接的写路径**（PR 的内容由
+他的文字决定）。
+
+四条判据，任一成立即放行（零 IO，只看载荷里已有的字段）：
+
+| 判据 | 说明 |
+|---|---|
+| 登录名 == 仓库账号本身 | 比 `author_association` 更确定的一条信号，防御性保留 —— 万一某种载荷里那个字段缺失，仓库主不至于被自己的工具锁在门外 |
+| 登录名在 `AIFIX_ALLOWED_USERS` 里 | 显式白名单，见下 |
+| `author_association` 是 `OWNER` / `COLLABORATOR` | 按定义**有写入权限** |
+| `author_association` 是 `MEMBER` **且仓库属于组织** | 组织成员 |
+
+被明确排除的：
+
+- **`CONTRIBUTOR` 不是信任信号。** 它的含义只是「有 commit 进过这个仓库」—— 一年前合过一
+  个改错别字的 PR 就永久是 CONTRIBUTOR，而他今天对这个仓库没有任何权限。
+- **个人仓库上的 `MEMBER`。** GitHub 不该在个人仓库发这个值，真收到了说明载荷不是我们理解
+  的那样 —— 守卫宁可多拦不可漏放。
+
+一条已知的宽松处要写明：**即便在组织仓库上，`MEMBER` 也不保证对这一个仓库有写入权限。**
+要精确到写入权限得调 `/repos/{owner}/{repo}/collaborators/{user}/permission`，那是一次网络
+调用，会让这个纯函数变成有 IO 的东西 —— 而它是全项目最要紧的一道判定，保持纯函数才能被
+脱网穷举。需要更严就把人加成 COLLABORATOR，或反过来用白名单点名。
+
+### 白名单：`AIFIX_ALLOWED_USERS`
+
+```bash
+gh variable set AIFIX_ALLOWED_USERS --body "alice,bob"
+```
+
+它是**加法不是替换** —— 上面那几条照旧生效，这里只把按 `author_association` 认不出来的人
+点名放进来。**大小写不敏感**（GitHub 的登录名本身就不区分），**整名匹配**（`alice` 不会
+放行 `alicexyz` —— 裸子串匹配会把白名单变成前缀通行证）。
+
+用 variable 不用 secret：它不是机密，而 secret 在日志里会被遮成 `***`，出问题时你看不出到
+底谁被放行了。
+
+它在代码里是 `authorize(payload, allowed_users=...)` 的**参数，不是环境变量** —— 这个函数
+是全项目最要紧的一道判定，保持纯函数才能被脱网穷举；读环境会让它的行为取决于测试跑在谁的
+机器上。由 `AifixConfig` 读环境、`handle()` 传进去。
+
+### 前置过滤为什么不判权限
+
+workflow 的 `if:` 只判「事件类型 + 有没有命令前缀」，**刻意不判权限**，尽管加一条
+`author_association` 会更省 runner 分钟数。两个理由：
+
+1. 没权限的人打了 `/aifix`，产品要求是**回帖告诉他**。而 job 的 `if:` 拦下来的事件根本不会
+   起 job，也就没有任何东西能发出那条回帖。
+2. `AIFIX_ALLOWED_USERS` 里的人 `author_association` 可能是 `NONE` —— 在那里判权限会让这份
+   白名单彻底失效。
+
+代价要说清楚：**任何人开一个 `/aifix` 开头的 issue 都会起一次 job**（约 1~2 分钟 runner，
+零模型调用，随即以一条权限说明收场）。公开仓库上这是一个可被刷的面 —— 真被刷了，就把权限
+判据加回那个 `if:`，代价是那些人不再收到解释。
 
 ### 一个字符级的坑
 
@@ -326,7 +404,8 @@ schema** —— 各存各的话，「选项编号从 0 还是从 1 数」这种�
 
 ### 1. 把 `.github/workflows/aifix.yml` 放到**默认分支**上
 
-**这个文件必须待在默认分支上**：GitHub 只从默认分支加载 `issue_comment` 的 workflow。
+**这个文件必须待在默认分支上**：GitHub 只从默认分支加载 `issues` / `issue_comment` 的
+workflow。
 在特性分支上改它是调不通的 —— **而且不报错，只是永远不触发**。
 
 （这也是为什么逻辑全在 Python 里、YAML 只是个壳：改 YAML 要合进默认分支才能测，改 Python
@@ -350,6 +429,9 @@ gh variable set AIFIX_FIXER__MODEL    --body qwen3-coder-flash
 gh variable set AIFIX_DETECTOR__MODEL --body qwen3-coder-flash
 gh variable set AIFIX_PRICE_MAP       --body '{"qwen3-coder-flash": [0.0003, 0.0012]}'
 gh variable set AIFIX_BUDGET_USD      --body 2.0
+
+# 可选：额外获准触发的人（默认已放行所有者/协作者/组织成员）
+gh variable set AIFIX_ALLOWED_USERS   --body "alice,bob"
 ```
 
 **模型名和价格表要用 variable 不用 secret**：它们不是机密，而 secret 在日志里会被遮成
@@ -503,7 +585,8 @@ ground truth 自带 —— 与 `aifix mine` 同一个思路，只是量的是复
 
 | 症状 | 多半是 |
 |---|---|
-| 评论了 `/aifix`，什么都没发生 | workflow 文件不在**默认分支**上；或者第一行不是恰好 `/aifix`；或者 issue 不是仓库主自己提的 |
+| 打了 `/aifix`，什么都没发生 | workflow 文件不在**默认分支**上；或者 `/aifix` 不在第一行；或者你改的是已有 issue 的正文（只认新开的 issue） |
+| 被拒，说没有触发权限 | 触发权 = 对这个仓库有写入权限的人。加成协作者，或加进 `AIFIX_ALLOWED_USERS` |
 | 「模型端点不可达」 | 先跑 `aifix-connectivity.yml`。最常见的是端点有 IP 白名单 |
 | 一整批 collection error | 没配 `AIFIX_TEST_PYTHON`，或者目标项目的测试环境步骤没填 |
 | PR 没开成，报 *not permitted to create and approve pull requests* | Settings → Actions → General → Workflow permissions 那一格没勾 |

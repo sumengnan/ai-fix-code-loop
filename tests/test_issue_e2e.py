@@ -98,6 +98,20 @@ def _payload(title, body):
     return p
 
 
+def _issue_payload(title, body):
+    """issue 正文触发的载荷 —— 没有 comment 键，action 是 opened。"""
+    p = json.loads(json.dumps(_RAW["payload"]))
+    p.pop("comment", None)
+    p["action"] = "opened"
+    owner = p["repository"]["owner"]["login"]
+    p["issue"]["user"]["login"] = owner
+    p["issue"]["author_association"] = "OWNER"
+    p["issue"]["number"] = 42
+    p["issue"]["title"] = title
+    p["issue"]["body"] = body
+    return p
+
+
 def _git(repo, *a):
     return subprocess.run(["git", *a], cwd=repo, check=True,
                           capture_output=True, text=True).stdout
@@ -187,3 +201,119 @@ async def test_an_unreproducible_issue_stops_before_spending_on_the_fixer(
     assert dirty == ["?? .aifix/"], dirty
     assert (buggy_repo / ".aifix").is_dir()
     assert not list((buggy_repo / "tests").glob("test_issue_*.py"))
+
+
+async def test_an_issue_body_becomes_a_pr_without_any_comment(
+        buggy_repo, tmp_path):
+    """**主入口的端到端**：开一个 /aifix 开头的 issue，不评论任何东西。
+
+    单测钉住了 authorize() 认这条路，但认得出不等于走得通 —— handle() 里有一处
+    `gh.react(ev.comment_id)`，而这条路上根本没有那条评论。钉住三件事：
+      1. 整条流水线走到底，PR 真的开出来了
+      2. **不往 0 号评论加 reaction** —— 那会打到别人的帖子上
+      3. 交给模型的正文里**没有那行 `/aifix`**
+    """
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+    _git(buggy_repo, "remote", "add", "origin", str(bare))
+    _git(buggy_repo, "push", "-q", "origin", "main")
+
+    gh = _Gh()
+    seen_body = []
+    fixer = _Scripted([_tool("apply_patch", json.dumps({"diff": _PATCH})),
+                       _text("改好了")])
+
+    async def _reproduce(repo, adapter, config, title, body, client=None):
+        seen_body.append(body)
+        from aifix.reproduce import reproduce
+        return await reproduce(repo, adapter, config, title, body,
+                               client=_Scripted([_text(_REPRO_JSON)]))
+
+    async def _run(repo, config, run_id, only_test=None, **k):
+        from aifix.cli import run_once
+        return await run_once(repo, config, run_id=run_id, only_test=only_test,
+                              detector_client=_Scripted([_text(_DIAG)]),
+                              fixer_client=fixer)
+
+    res = await handle(
+        _issue_payload("add 算错了", "/aifix\nadd(2, 3) 返回 -1，期望 5。"),
+        buggy_repo, AifixConfig(budget_tokens=100_000), gh,
+        reproduce_fn=_reproduce, run_fn=_run,
+        publish=lambda repo, run_id, **k: False)
+
+    assert res.exit_code == 0 and res.path == "delivered", res
+    # 没有评论可加回执 —— 加到 0 号上就是往别人的帖子上打表情
+    assert gh.reactions == []
+    # 命令那行不该进模型的上下文
+    assert seen_body == ["add(2, 3) 返回 -1，期望 5。"], seen_body
+
+    branch = gh.prs[0]["head"]
+    blob = _git(bare, "show", f"{branch}:calc.py")
+    assert "a + b" in blob and "a - b" not in blob
+
+
+async def test_an_outsider_issue_is_refused_with_an_explanation(buggy_repo):
+    """你要的那条：没权限的人打了 /aifix，**要收到一条说明**，而不是静默丢弃。
+
+    并且一分钱都不能花 —— 拒绝发生在 reproduce 之前。
+    """
+    gh = _Gh()
+    spent = []
+
+    async def _reproduce(*a, **k):
+        spent.append(1)
+        raise AssertionError("拒绝之后不该再调用模型")
+
+    p = _issue_payload("add 算错了", "/aifix\nadd(2, 3) 返回 -1。")
+    p["issue"]["user"]["login"] = "someone-else"
+    p["issue"]["author_association"] = "NONE"
+
+    res = await handle(p, buggy_repo, AifixConfig(), gh,
+                       reproduce_fn=_reproduce,
+                       run_fn=lambda *a, **k: None)
+
+    assert res.path == "refused" and res.exit_code == 0, res
+    assert not spent, "拒绝路径上不该有任何模型调用"
+    assert gh.comments, "必须回帖 —— 静默丢弃会让人以为它已经在跑了"
+    assert "权限" in gh.comments[-1]
+    assert not gh.prs
+
+
+async def test_the_allowlist_lets_an_outsider_through(buggy_repo, tmp_path):
+    """`AIFIX_ALLOWED_USERS` 里的人能触发，哪怕 author_association 是 NONE。
+
+    这条钉的是**整条线接没接上** —— 配置读得到、handle 传得进去、authorize 用得上。
+    断在任何一环，表现都是「名单一声不吭地不起作用」。
+    """
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+    _git(buggy_repo, "remote", "add", "origin", str(bare))
+    _git(buggy_repo, "push", "-q", "origin", "main")
+
+    gh = _Gh()
+    fixer = _Scripted([_tool("apply_patch", json.dumps({"diff": _PATCH})),
+                       _text("改好了")])
+
+    async def _reproduce(repo, adapter, config, title, body, client=None):
+        from aifix.reproduce import reproduce
+        return await reproduce(repo, adapter, config, title, body,
+                               client=_Scripted([_text(_REPRO_JSON)]))
+
+    async def _run(repo, config, run_id, only_test=None, **k):
+        from aifix.cli import run_once
+        return await run_once(repo, config, run_id=run_id, only_test=only_test,
+                              detector_client=_Scripted([_text(_DIAG)]),
+                              fixer_client=fixer)
+
+    p = _issue_payload("add 算错了", "/aifix\nadd(2, 3) 返回 -1，期望 5。")
+    p["issue"]["user"]["login"] = "Alice"       # 大小写与名单里的不一致
+    p["issue"]["author_association"] = "NONE"
+
+    res = await handle(
+        p, buggy_repo,
+        AifixConfig(budget_tokens=100_000, allowed_users=["alice"]), gh,
+        reproduce_fn=_reproduce, run_fn=_run,
+        publish=lambda repo, run_id, **k: False)
+
+    assert res.exit_code == 0 and res.path == "delivered", res
+    assert gh.prs

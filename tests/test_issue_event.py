@@ -17,16 +17,37 @@ _RAW = json.loads(_FIXTURE.read_text(encoding="utf-8"))
 
 
 def _payload():
-    """一份**会被放行**的载荷；每个否定用例用 _set 只偏离一个字段。
+    """一份**会被放行**的评论触发载荷；每个否定用例用 _set 只偏离一个字段。
 
     夹具里的真实 author_association 是 CONTRIBUTOR、作者也不是仓库主 ——
     先把它调成放行态，否则每个否定用例都分不清是被哪一条挡下的。
+
+    **两个 author_association 都要设**，它们答的是不同的问题：
+      comment.author_association —— 谁按的按钮
+      issue.author_association   —— 谁写的那段要喂给模型的文本
+    评论触发这条路上模型读的是 issue 正文，所以两边都必须可信。
     """
     p = copy.deepcopy(_RAW["payload"])
     owner = p["repository"]["owner"]["login"]
     p["issue"]["user"]["login"] = owner
+    p["issue"]["author_association"] = "OWNER"
     p["comment"]["author_association"] = "OWNER"
     p["comment"]["body"] = "/aifix"
+    return p
+
+
+def _issue_payload(body="/aifix\n购物车为空时 total() 抛 KeyError"):
+    """issue 正文触发的载荷。
+
+    夹具是一份真实的 `issue_comment` 事件，这里去掉 comment 键、把 action 换成
+    opened 来当 `issues` 事件用 —— issue 与 repository 两个对象仍是 gh api 拉
+    下来的真货，而这条路径读的正是它们。
+    """
+    p = copy.deepcopy(_RAW["payload"])
+    p.pop("comment", None)
+    p["action"] = "opened"
+    p["issue"]["author_association"] = "OWNER"
+    p["issue"]["body"] = body
     return p
 
 
@@ -111,11 +132,11 @@ def test_bot_comments_are_ignored():
 
 # ---------------------------------------------------------------- 授权面
 
-def test_non_owner_commenter_is_refused_and_told_why():
+def test_untrusted_commenter_is_refused_and_told_why():
     """看起来是命令但没权限 —— 必须回帖。静默丢弃会让人以为它在跑了，
     而这正是本项目栽过十次以上的那种失败：不报错，只有承诺是假的。
     """
-    for assoc in ("CONTRIBUTOR", "COLLABORATOR", "MEMBER", "NONE"):
+    for assoc in ("CONTRIBUTOR", "NONE", "FIRST_TIME_CONTRIBUTOR", "MANNEQUIN"):
         d = authorize(_set(_payload(), "comment.author_association", assoc))
         assert d.allowed is False, assoc
         assert d.notify is True, assoc
@@ -124,22 +145,172 @@ def test_non_owner_commenter_is_refused_and_told_why():
 
 def test_contributor_is_not_a_trust_signal():
     """CONTRIBUTOR 只意味着「有 commit 进过这个仓库」—— 一年前合过一个改
-    错别字的 PR，就永久是 CONTRIBUTOR。上一条已经覆盖，这里单列是因为把
-    它误当可信身份是最常见的写法。"""
+    错别字的 PR，就永久是 CONTRIBUTOR。它**没有 write 权限**，所以不该能
+    驱动一个会改代码开 PR 的东西。"""
     d = authorize(_set(_payload(), "comment.author_association", "CONTRIBUTOR"))
     assert d.allowed is False
 
 
-def test_outsider_issue_is_refused_even_when_owner_comments():
-    """只限制触发者挡不住注入。
-
-    攻击路径是：外人提一个藏了指令的 issue，等仓库主觉得该修、顺手打上
-    /aifix —— 而仓库主本来就想修 bug，那一步门槛低得可怜。模型读到的每个字
-    必须都是仓库主自己写的，注入面才真的归零。
+def test_collaborator_is_trusted():
+    """COLLABORATOR 按定义就有 write 权限 —— 他本来就能直接推代码，
+    让他驱动 aifix 不增加任何新风险。这是「触发权 = 已经能改这个仓库的人」
+    这条原则的落点。
     """
-    d = authorize(_set(_payload(), "issue.user.login", "someone-else"))
+    p = _payload()
+    _set(p, "comment.author_association", "COLLABORATOR")
+    _set(p, "issue.author_association", "COLLABORATOR")
+    assert authorize(p).allowed is True
+
+
+def test_member_counts_only_on_organization_repos():
+    """MEMBER 是「组织成员」。个人仓库上不该出现这个值，真出现了也不放行 ——
+    守卫宁可多拦不可漏放。
+    """
+    org = _payload()
+    _set(org, "repository.owner.type", "Organization")
+    _set(org, "comment.author_association", "MEMBER")
+    _set(org, "issue.author_association", "MEMBER")
+    assert authorize(org).allowed is True
+
+    personal = _payload()
+    _set(personal, "repository.owner.type", "User")
+    _set(personal, "comment.author_association", "MEMBER")
+    _set(personal, "issue.author_association", "MEMBER")
+    assert authorize(personal).allowed is False
+
+
+def test_untrusted_issue_author_is_refused_even_when_a_trusted_user_comments():
+    """**只限制触发者挡不住注入。**
+
+    评论触发这条路上，模型读的是 issue 正文 —— 那段文本的作者是提 issue 的
+    人，不是按按钮的人。攻击路径是：外人提一个藏了指令的 issue，等有权限的
+    人觉得该修、顺手打上 /aifix。
+
+    所以这条路要两边都可信：按按钮的人**和**写正文的人。
+    """
+    p = _payload()
+    # 两个字段一起改才是一份**真实**的外人 issue：只改 author_association、
+    # 而作者仍是仓库账号本身，GitHub 不会发出这种载荷。
+    _set(p, "issue.author_association", "NONE")
+    _set(p, "issue.user.login", "someone-else")
+    d = authorize(p)
     assert d.allowed is False and d.notify is True
     assert "issue" in d.reason
+
+
+def test_the_repo_owners_own_issue_is_trusted_without_an_association():
+    """登录名等于仓库账号本身，是比 author_association 更确定的一条信号。
+
+    留着它是防御性的：万一某种事件形状里 author_association 缺失或换了取值，
+    仓库主不至于被自己的工具锁在门外。
+    """
+    p = _payload()
+    _set(p, "issue.author_association", "")
+    assert authorize(p).allowed is True
+
+
+# ---------------------------------------------------------- 白名单（乙档）
+
+def test_allowlist_admits_someone_with_no_association():
+    """按 author_association 认不出来的人，可以用显式白名单放进来。"""
+    p = _payload()
+    _set(p, "comment.author_association", "NONE")
+    _set(p, "issue.author_association", "NONE")
+    login = p["comment"]["user"]["login"]
+    _set(p, "issue.user.login", login)
+    assert authorize(p).allowed is False, "没有白名单时应当被拒"
+    assert authorize(p, allowed_users=frozenset({login.casefold()})).allowed is True
+
+
+def test_allowlist_is_case_insensitive():
+    """GitHub 的登录名大小写不敏感 —— Alice 与 alice 是同一个人。
+    区分大小写的话，名单里写错一个字母就是静默失效。
+    """
+    p = _payload()
+    _set(p, "comment.author_association", "NONE")
+    _set(p, "issue.author_association", "NONE")
+    _set(p, "comment.user.login", "Alice")
+    _set(p, "issue.user.login", "Alice")
+    assert authorize(p, allowed_users=frozenset({"alice"})).allowed is True
+
+
+def test_allowlist_matches_whole_logins_not_substrings():
+    """`alice` 不能放行 `alicexyz`。裸子串匹配会把白名单变成前缀通行证。"""
+    p = _payload()
+    _set(p, "comment.author_association", "NONE")
+    _set(p, "issue.author_association", "NONE")
+    _set(p, "comment.user.login", "alicexyz")
+    _set(p, "issue.user.login", "alicexyz")
+    assert authorize(p, allowed_users=frozenset({"alice"})).allowed is False
+
+
+def test_allowlist_still_requires_both_sides_on_the_comment_path():
+    """白名单放行的是「这个人」，不是「这次触发」——评论触发仍然两边都要查。"""
+    p = _payload()
+    _set(p, "comment.author_association", "NONE")
+    _set(p, "comment.user.login", "alice")
+    _set(p, "issue.author_association", "NONE")
+    _set(p, "issue.user.login", "outsider")
+    d = authorize(p, allowed_users=frozenset({"alice"}))
+    assert d.allowed is False and d.notify is True
+
+
+# ------------------------------------------------- issue 正文触发（新入口）
+
+def test_issue_body_starting_with_the_command_triggers():
+    """开 issue 就能触发，不用再补一条评论。
+
+    这条路上**触发的动作与被读的文本是同一个人写的同一个对象** —— 一条判据
+    同时管住「谁按的按钮」和「谁写的文本」，注入面是结构上归零的。
+    """
+    d = authorize(_issue_payload())
+    assert d.allowed is True, d.reason
+    assert d.event.answer_choice is None
+
+
+def test_the_command_line_is_stripped_from_the_body_given_to_the_model():
+    """`/aifix` 是给机器看的标记，不是缺陷描述的一部分。
+    原样喂进去的话，模型的第一句上下文是一个它不认识的命令词。
+    """
+    d = authorize(_issue_payload("/aifix\n购物车为空时 total() 抛 KeyError"))
+    assert d.event.body == "购物车为空时 total() 抛 KeyError"
+
+
+def test_an_issue_without_the_command_is_ignored_silently():
+    """绝大多数 issue 都不是命令。这一类一个字都不能回。"""
+    d = authorize(_issue_payload("购物车为空时崩溃了，帮我看看"))
+    assert d.allowed is False and d.notify is False
+
+
+def test_an_untrusted_issue_author_is_refused_and_told_why():
+    """你要的那条：不是有权限的人但以 /aifix 开头 → 明确告诉他不能触发。"""
+    p = _issue_payload()
+    _set(p, "issue.author_association", "NONE")
+    d = authorize(p)
+    assert d.allowed is False and d.notify is True
+    assert d.reason
+
+
+def test_edited_issue_bodies_do_not_trigger():
+    """只认 opened。改自己的 issue 正文是**完全静默**的 —— 一条半年前的
+    issue 被编辑成 /aifix 开头就能触发，而没有任何人会收到通知。
+    """
+    p = _issue_payload()
+    p["action"] = "edited"
+    assert authorize(p).allowed is False
+
+
+def test_bot_issues_do_not_trigger():
+    p = _set(_issue_payload(), "issue.user.type", "Bot")
+    d = authorize(p)
+    assert d.allowed is False and d.notify is False
+
+
+def test_pull_requests_are_ignored_on_the_issue_path_too():
+    p = _issue_payload()
+    p["issue"]["pull_request"] = _RAW["pull_request_issue"]["pull_request"]
+    d = authorize(p)
+    assert d.allowed is False and d.notify is False
 
 
 # ---------------------------------------------------------------- 载入

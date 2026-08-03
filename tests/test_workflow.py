@@ -29,18 +29,44 @@ def test_only_created_comments_trigger():
     assert _on()["issue_comment"]["types"] == ["created"]
 
 
-def test_the_guard_requires_the_owner_to_comment():
-    assert "author_association == 'OWNER'" in _job()["if"]
+def test_only_newly_opened_issues_trigger():
+    """同一条理由，而 issue 正文更甚：改自己的 issue 正文是**完全静默**的 ——
+    连一个 edited 通知都不会发出去。"""
+    assert _on()["issues"]["types"] == ["opened"]
 
 
-def test_the_guard_requires_the_issue_to_be_the_owners_own():
-    """**这一条是注入面归零的唯一依据。**
+def test_both_entrances_require_the_command_prefix():
+    """前置过滤只做一件事：把不带命令前缀的事件挡在起 job 之前。
+    两条入口都要判，漏一条那一侧就会对每个 issue / 每条评论起一次 job。"""
+    cond = _job()["if"]
+    assert "startsWith(github.event.issue.body, '/aifix')" in cond
+    assert "startsWith(github.event.comment.body, '/aifix')" in cond
 
-    只限制触发者挡不住注入：外人提一个藏了指令的 issue，等仓库主觉得该修、
-    顺手打上 /aifix —— 而仓库主本来就想修 bug，那一步门槛低得可怜。
-    模型读到的每个字都得是仓库主自己写的。
+
+def test_the_prefilter_does_not_decide_permissions():
+    """**这一条是有意的，不是遗漏。**
+
+    没权限的人打了 /aifix，产品要求是回帖告诉他 —— 而 job 的 `if:` 拦下来的
+    事件根本不会起 job，也就没有任何东西能发出那条回帖。附带的第二个理由：
+    `AIFIX_ALLOWED_USERS` 里的人 author_association 可能是 NONE，在这里判权限
+    会让那份白名单彻底失效。
+
+    权限判定的**唯一**去处是 aifix.issue.event.authorize（零 LLM，可脱网穷举）。
+    这条测试防的是「顺手加一条 association 判据省点 runner 分钟数」——
+    那会静默掐掉上面两件事。
     """
-    assert "github.event.issue.user.login == github.repository_owner" in _job()["if"]
+    cond = _job()["if"]
+    assert "author_association" not in cond
+    assert "repository_owner" not in cond
+
+
+def test_the_allowlist_reaches_the_job_as_a_variable():
+    """白名单在代码里是 `authorize(allowed_users=...)` 的参数，而参数由
+    AifixConfig 从环境读。这条线断在 YAML 这一段的话，配了 variable 的人
+    会发现名单**一声不吭地不起作用**。
+    """
+    env = _job()["steps"][-2]["env"]
+    assert env["AIFIX_ALLOWED_USERS"] == "${{ vars.AIFIX_ALLOWED_USERS }}"
 
 
 def test_permissions_are_written_out_explicitly():

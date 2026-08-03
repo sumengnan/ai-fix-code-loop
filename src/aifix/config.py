@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from typing import Annotated
+
 from harness.config import HarnessConfig
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class AifixConfig(BaseSettings):
@@ -35,6 +37,37 @@ class AifixConfig(BaseSettings):
     # （[[上限, 输入, 输出], ...]），两者不通用。不配就算不出成本 ——
     # 报告里会明写"未配置价格表"，而不是显示一个假的 $0.00。
     price_map: dict[str, list[float]] = Field(default_factory=dict)
+
+    # 额外获准触发 aifix 的 GitHub 登录名（`AIFIX_ALLOWED_USERS`，逗号分隔）。
+    #
+    # 它是**加法**，不是替换：默认判据（仓库所有者 / 有写入权限的协作者 /
+    # 组织仓库的成员，见 issue/event._is_trusted）照旧生效，这里只把按
+    # `author_association` 认不出来的人点名放进来。
+    #
+    # 为什么需要它：`author_association` 只有 GitHub 预定义的那几档，而
+    # `MEMBER` 对某个具体仓库未必有写入权限、`CONTRIBUTOR` 更不是信任信号。
+    # 想精确到某几个人时，点名是唯一不引入网络调用的办法。
+    #
+    # **大小写不敏感**：GitHub 的登录名本身不区分大小写，Alice 与 alice 是同
+    # 一个人。区分的话，名单里大小写差一个字母就是静默失效，而那道闸失效的
+    # 表现是「他说他有权限，机器人却一直说他没有」。
+    # `NoDecode` **不能省**（实测逼出来的）：pydantic-settings 对集合类型会先
+    # 把环境变量按 JSON 解一遍，而那发生在 `mode="before"` 的验证器**之前**。
+    # 不加它的话 `AIFIX_ALLOWED_USERS=alice,bob` 在读配置的那一刻就抛
+    # JSONDecodeError，下面那个验证器一次都轮不到 —— 而没有人会在 repo
+    # variable 里写 `["alice","bob"]`。
+    allowed_users: Annotated[frozenset[str], NoDecode] = Field(
+        default_factory=frozenset)
+
+    @field_validator("allowed_users", mode="before")
+    @classmethod
+    def _split_logins(cls, v):
+        """接受 `alice,bob` 这种写法，并统一 casefold。"""
+        if isinstance(v, str):
+            return {u.strip().casefold() for u in v.split(",") if u.strip()}
+        if isinstance(v, (list, tuple, set, frozenset)):
+            return {str(u).strip().casefold() for u in v if str(u).strip()}
+        return v
 
     # mode="before"：抢在 pydantic 的类型强制之前跑，否则用户看到的是
     # "Input should be a valid number" 这类晦涩报错，而不是下面这句人话。

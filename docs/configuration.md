@@ -24,6 +24,7 @@ export AIFIX_BUDGET_USD="2.0"                   # 扁平：budget_usd
 - [预算](#预算)
 - [迭代与守卫](#迭代与守卫)
 - [复现那一步](#复现那一步)
+- [issue 驱动](#issue-驱动)
 - [其他](#其他)
 - [已删除的旋钮](#已删除的旋钮)
 
@@ -277,6 +278,44 @@ JSON，不是需要长链推理的题。而实测有一轮的事件流是 **Reas
 
 ---
 
+## issue 驱动
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `AIFIX_ALLOWED_USERS` | 空 | 额外获准触发 aifix 的 GitHub 登录名，逗号分隔 |
+
+### `AIFIX_ALLOWED_USERS`
+
+```bash
+export AIFIX_ALLOWED_USERS="alice,bob"
+# GitHub Actions 上：gh variable set AIFIX_ALLOWED_USERS --body "alice,bob"
+```
+
+它是**加法不是替换**。默认已经放行这几类人（见
+[safety.md](safety.md#is_trusted触发权--已经能改这个仓库的人)）：
+
+- 仓库账号本身
+- `author_association` 为 `OWNER` / `COLLABORATOR`
+- 组织仓库上的 `MEMBER`
+
+这份名单只把按 `author_association` 认不出来的人**点名**放进来。
+
+几处要知道的：
+
+- **大小写不敏感** —— GitHub 的登录名本身就不区分，`Alice` 与 `alice` 是同一个人。
+  区分的话，名单里差一个字母就是静默失效，而那道闸失效的表现是「他说他有权限，机器人却
+  一直说他没有」。
+- **整名匹配** —— `alice` 不会放行 `alicexyz`。裸子串匹配会把白名单变成前缀通行证。
+- **它和仓库的真实权限会漂移** —— 人离职了、协作者移除了，名单还留着。长期授权应该走
+  GitHub 自己的协作者机制，这份名单适合「某个具体的人，暂时」。
+- 在 Actions 上用 **variable 不用 secret**：它不是机密，而 secret 在日志里会被遮成
+  `***`，出问题时你看不出到底谁被放行了。
+
+> 实现上它是 `authorize(payload, allowed_users=...)` 的**参数**，由 `AifixConfig` 读环境
+> 后传进去 —— 那个函数是全项目最要紧的一道判定，保持纯函数才能被脱网穷举。
+
+---
+
 ## 其他
 
 | 变量 | 默认 | 说明 |
@@ -310,6 +349,7 @@ JSON，不是需要长链推理的题。而实测有一轮的事件流是 **Reas
 ```python
 detector / fixer               HarnessConfig()  # 框架默认，必须自己配
 price_map                      {}
+allowed_users                  frozenset()      # AIFIX_ALLOWED_USERS
 test_python                    None             # 自动探测
 allow_collection_errors        False
 test_timeout_seconds           1800.0
