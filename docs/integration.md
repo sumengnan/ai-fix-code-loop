@@ -44,6 +44,11 @@ issue，让它读懂描述、写复现测试、修、开 PR。
 第 5 条不满足也不是完全没戏 —— 调大 `AIFIX_TEST_TIMEOUT_SECONDS` 和 job 的
 `timeout-minutes` 能跑，只是慢且贵。
 
+**第 5 条也是最容易改善的一条**：目标项目装上 `pytest-xdist`，aifix 会自动并行跑全量
+（实测本仓库 956 个用例：7 分 12 秒 → 3 分 58 秒，一次 run 省 9 分钟）。前提是你的套件
+xdist-安全 —— 不安全就设 `AIFIX_TEST_PARALLEL=off`，详见
+[configuration.md](configuration.md#aifix_test_parallel)。
+
 ---
 
 ## 第 1 步：连通性自检

@@ -16,6 +16,7 @@ from aifix.adapters.maven_adapter import MavenAdapter
 from aifix.adapters.pytest_adapter import (PytestAdapter,
                                            discover_test_python,
                                            imports_outside_worktree,
+                                           resolve_test_parallel,
                                            resolve_test_python)
 from aifix.config import AifixConfig
 
@@ -369,3 +370,116 @@ async def test_baseline_really_runs_with_the_discovered_venv(buggy_repo,
         out = await baseline_node(st)
     assert out["baseline_ids"] == ["tests/test_calc.py::test_add"], out
     assert str(exe).startswith(str(buggy_repo))
+
+
+# ---------------------------------------------------------------- 并行全量
+
+def test_parallel_is_off_by_default_so_the_command_is_unchanged():
+    """不传 parallel 时，两条命令与并行化之前**逐字节相同**。
+
+    这一条是回归闸：并行是个可选项，默认路径上一个字都不该多。
+    """
+    a = PytestAdapter(python="/p/py")
+    assert a.full_test_command() == [
+        "/p/py", *_BASE, "--junitxml=.aifix-report.xml"]
+
+
+def test_parallel_only_affects_the_full_run_not_the_scoped_one():
+    """**只并行全量。**
+
+    scoped 一次就跑一两个用例，起 N 个 worker 是纯开销 —— xdist 要 fork 进程、
+    收集、分发、汇总，而被分发的只有一个用例。flaky 确认那一跑尤其怕这个：
+    它本来只花几秒。
+    """
+    a = PytestAdapter(python="/p/py", parallel="auto")
+    assert "-n" in a.full_test_command()
+    assert "-n" not in a.scoped_test_command(["t::x"])
+
+
+def test_parallel_takes_the_worker_count_verbatim():
+    """给数字就原样发下去 —— 「auto」在 CPU 多的机器上会开满，而 runner 上
+    多数时候两个 worker 就够，再多是抢 CPU。"""
+    cmd = PytestAdapter(python="/p/py", parallel="4").full_test_command()
+    assert cmd[cmd.index("-n") + 1] == "4"
+
+
+def test_the_junitxml_flag_survives_parallelism():
+    """报告是判定的唯一取证 —— 并行参数插进去不能把它挤掉。"""
+    cmd = PytestAdapter(python="/p/py", parallel="auto").full_test_command()
+    assert "--junitxml=.aifix-report.xml" in cmd
+    for item in _BASE:
+        assert item in cmd, item
+
+
+def test_an_unusable_parallel_value_falls_back_to_serial():
+    """空串与 off 一律当没设。
+
+    空串这条不能省：GitHub Actions 里 `env: X: ${{ vars.Y }}` 在 Y 未设置时
+    给的是**空串**而不是不设 —— 不接这一手，`-n ''` 会被发给 pytest，而它
+    以「argument -n: invalid int value」当场退出，表现成整个 baseline 跑不起来。
+    """
+    for bad in ("", "off", "0", "  "):
+        cmd = PytestAdapter(python="/p/py", parallel=bad).full_test_command()
+        assert "-n" not in cmd, repr(bad)
+
+
+def test_resolve_parallel_prefers_the_explicit_value_over_probing():
+    """给了具体数字就直接用，不去探 —— 那是用户明确的要求，
+    不该被一次探测推翻（而探测本身要起一个子进程，不是免费的）。"""
+    assert resolve_test_parallel("/nonexistent/python", "4") == "4"
+
+
+def test_resolve_parallel_falls_back_to_serial_when_xdist_is_missing():
+    """探不到 xdist 就串行 —— 而不是发一条 `-n auto` 让 pytest 以
+    「unrecognized arguments: -n」当场退出，那会把整个 baseline 变成
+    「测试进程没能正常跑完」。"""
+    assert resolve_test_parallel("/definitely/not/a/python", "auto") is None
+
+
+def test_resolve_parallel_finds_xdist_in_this_very_interpreter():
+    """正向那一半：本仓库的 dev 依赖里就有 pytest-xdist，探得到。
+
+    只断言 not-None，不断言等于 "auto" 之外的东西 —— 这一条要钉的是
+    「探测真的会返回真」，而不是取值本身。
+    """
+    assert resolve_test_parallel(sys.executable, "auto") == "auto"
+
+
+def test_resolve_parallel_is_off_unless_asked():
+    """没配就串行。并行是可选项，默认路径一个字都不多。"""
+    assert resolve_test_parallel(sys.executable, None) is None
+    assert resolve_test_parallel(sys.executable, "") is None
+
+
+def test_the_parallel_setting_reaches_the_actual_command(tmp_path):
+    """**整条线**：config → adapter_from_state → 真正发出去的命令。
+
+    断在任何一环，表现都是「并行一声不吭地没生效」—— 而这个功能唯一的
+    观测方式就是「跑得快不快」，没人会因为慢就去查它是不是没接上。
+    """
+    from aifix.nodes.baseline import adapter_from_state
+
+    state = {"adapter_name": "pytest", "repo": str(tmp_path),
+             "config": AifixConfig(test_python=sys.executable,
+                                   test_parallel="3")}
+    cmd = adapter_from_state(state).full_test_command()
+    assert cmd[cmd.index("-n") + 1] == "3"
+
+
+def test_turning_it_off_in_config_really_turns_it_off(tmp_path):
+    """撞上 xdist-不安全的套件时，这个开关是唯一的出路 —— 它必须真的管用。"""
+    from aifix.nodes.baseline import adapter_from_state
+
+    state = {"adapter_name": "pytest", "repo": str(tmp_path),
+             "config": AifixConfig(test_python=sys.executable,
+                                   test_parallel="off")}
+    assert "-n" not in adapter_from_state(state).full_test_command()
+
+
+def test_maven_takes_the_parallel_argument_without_choking(tmp_path):
+    """`adapter_for` 对两个实现用同一行构造 —— Maven 不收这个参数的话，
+    任何 Maven 工程都会在取适配器时 TypeError，而那发生在 baseline 之前。"""
+    from aifix.nodes.baseline import adapter_for
+
+    assert adapter_for("maven", python="/p/py", parallel="auto"
+                       ).full_test_command() == MavenAdapter().full_test_command()

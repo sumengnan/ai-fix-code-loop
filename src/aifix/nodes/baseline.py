@@ -9,7 +9,9 @@ from harness.sandbox.local import LocalSandbox
 from ..adapters.base import ProjectAdapter
 from ..adapters.junit import parse_junit
 from ..adapters.maven_adapter import MavenAdapter
-from ..adapters.pytest_adapter import (PytestAdapter, imports_outside_worktree,
+from ..adapters.pytest_adapter import (PytestAdapter,
+                                       imports_outside_worktree,
+                                       resolve_test_parallel,
                                        resolve_test_python)
 from ..graph import COLLECTION_ABORT_KIND, AifixState, trace_of
 from ..testenv import sanitized_command
@@ -33,15 +35,19 @@ ADAPTERS: dict[str, type[ProjectAdapter]] = {
 
 # 返回类型是协议而不是某个具体适配器：注册表里现在有两个实现，写死其中
 # 一个会让另一个在类型上「碰巧也能用」。
-def adapter_for(name: str, python: str | None = None) -> ProjectAdapter:
+def adapter_for(name: str, python: str | None = None,
+                parallel: str | None = None) -> ProjectAdapter:
     """按名字取适配器。python 是跑测试用的解释器，None 表示各实现自己的默认。
 
     注入走构造参数而不是改协议：`full_test_command()` 不接参数是协议里写死
     的（报告写到哪、用什么命令都是构建体系自己的事），而 MavenAdapter 根本
     不需要解释器。加一个方法参数要让两个实现和五个调用点一起跟上，加一个
     构造参数只要注册表这一行。
+
+    parallel 同理 —— 它是 pytest-xdist 的 worker 数，Maven 侧收下但不用
+    （surefire 的并行是 pom 里配的，不是命令行参数）。
     """
-    return ADAPTERS[name](python=python)
+    return ADAPTERS[name](python=python, parallel=parallel)
 
 
 def adapter_from_state(state: AifixState) -> ProjectAdapter:
@@ -56,10 +62,16 @@ def adapter_from_state(state: AifixState) -> ProjectAdapter:
     解释器复跑 —— 模型看到的证据和 verify 的判定依据不是同一套环境，而两边
     都不会报错。tests/test_interpreter.py 有一条对着源码的断言钉这件事。
     """
+    python = resolve_test_python(Path(state["repo"]),
+                                 state["config"].test_python)
     return adapter_for(
-        state["adapter_name"],
-        python=resolve_test_python(Path(state["repo"]),
-                                   state["config"].test_python))
+        state["adapter_name"], python=python,
+        # 并行度也在这里解析，理由与解释器同一条：探测要问**目标解释器**
+        # 有没有 xdist，而只有 state 同时握着配置与源仓库。
+        # 探测带缓存（见 pytest_adapter.has_xdist），四个节点各调一次不会
+        # 各起一个子进程。
+        parallel=resolve_test_parallel(python,
+                                       state["config"].test_parallel))
 
 
 def warn_if_patch_may_be_invisible(state: AifixState,

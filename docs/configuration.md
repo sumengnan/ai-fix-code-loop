@@ -111,7 +111,50 @@ export AIFIX_PRICE_MAP='{"qwen3-coder-flash": [0.0003, 0.0012]}'
 | `AIFIX_TEST_PYTHON` | 自动探测 | 跑**目标项目**测试用的解释器 |
 | `AIFIX_TEST_TIMEOUT_SECONDS` | 1800 | 全量测试的超时 |
 | `AIFIX_SCOPED_TEST_TIMEOUT_SECONDS` | 600 | 只跑几个用例时的超时 |
+| `AIFIX_TEST_PARALLEL` | `auto` | 全量测试并行跑几个 worker（走 pytest-xdist） |
 | `AIFIX_ALLOW_COLLECTION_ERRORS` | false | 允许「baseline 里收集错误占比过高」的仓库照常排队开修 |
+
+### `AIFIX_TEST_PARALLEL`
+
+**这是整个系统里最值钱的一处提速。** 一次 run 要跑好几遍全量（1 次 baseline + 每轮
+verify 各 1 次），而它们此前是串行的。
+
+实测（2026-08-03，本仓库 956 个用例，同一份代码跑两遍）：
+
+```
+串行   432s   (7分12秒)
+-n auto 238s  (3分58秒)
+```
+
+一次 run 三遍全量：**21 分钟 → 12 分钟**。那次 28 分半的真跑（issue #9）里，绝大部分
+就是这三遍。
+
+取值：
+
+| 值 | 含义 |
+|---|---|
+| `auto`（默认） | 目标解释器里探得到 pytest-xdist 就用 `-n auto`，探不到**静默串行** |
+| 一个数字（`4`） | 原样发下去，不去探测。runner 上通常两三个就够，再多是抢 CPU |
+| `off` / `0` / `1` / 空串 | 串行 |
+
+`1` 也算串行：`-n 1` 会起一个 worker 进程，比不起还慢。空串必须当没设 —— Actions 里
+`env: X: ${{ vars.Y }}` 在 Y 未设置时给的是空串，而 `-n ''` 会让 pytest 以
+「argument -n: invalid int value」当场退出，表现成整个 baseline 跑不起来。
+
+**只作用于全量，不作用于复跑。** 抖动确认那一跑就一两个用例，起 N 个 worker 是纯开销
+—— xdist 要 fork 进程、收集、分发、汇总，而被分发的只有一个用例。
+
+#### 代价：你的套件必须是 xdist-安全的
+
+**xdist 会改变测试的执行顺序与进程隔离。** 目标项目的套件若依赖执行顺序、共享临时文件、
+抢同一个端口，baseline 会多出一批本来不存在的红 —— 而那些红会进队列、**真花钱去修**。
+表现不是崩溃，是「这个仓库怎么这么多失败」。撞上了就设 `AIFIX_TEST_PARALLEL=off`。
+
+判定本身不受影响：baseline 与 verify 用的是同一条命令、同一个并行度，三态比较仍然是
+**同一把尺量两次**。
+
+> 默认设成 `auto` 是有依据的，不是想当然：本仓库 956 个用例上做过串行/并行对照，
+> **「跑过的用例集」与「失败集」逐个相同**。但那只证明这一个仓库，证明不了你的。
 
 ### `AIFIX_TEST_PYTHON`
 
@@ -351,6 +394,7 @@ detector / fixer               HarnessConfig()  # 框架默认，必须自己配
 price_map                      {}
 allowed_users                  frozenset()      # AIFIX_ALLOWED_USERS
 test_python                    None             # 自动探测
+test_parallel                  "auto"           # 全量测试并行度
 allow_collection_errors        False
 test_timeout_seconds           1800.0
 scoped_test_timeout_seconds    600.0

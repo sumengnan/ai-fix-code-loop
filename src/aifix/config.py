@@ -128,6 +128,29 @@ class AifixConfig(BaseSettings):
     # 直接打不开，用户唯一的出路是去改 aifix 的源码。
     allow_collection_errors: bool = False
 
+    # 全量测试并行跑几个 worker（`AIFIX_TEST_PARALLEL`）。走 pytest-xdist。
+    #
+    # **这是整个系统里最值钱的一处提速**：一次 run 要跑好几遍全量（1 次
+    # baseline + 每轮 verify 各 1 次），而它们是串行的。实测（2026-08-03，
+    # issue #9 的真跑）：本仓库 944 个用例串行一遍 7 分 07 秒，一次 run 跑了
+    # 28 分半，绝大部分就是那三遍。
+    #
+    # 取值：`"auto"`（xdist 探得到就用，探不到静默串行）/ 一个数字 / 空串或
+    # `"off"`（串行）。默认 `"auto"`。
+    #
+    # **只作用于全量，不作用于复跑**：scoped 一次就跑一两个用例，起 N 个
+    # worker 是纯开销（见 PytestAdapter.full_test_command）。
+    #
+    # 代价必须写明：**xdist 会改变测试的执行顺序与进程隔离**。目标项目的套件
+    # 若不是 xdist-安全的（用例之间靠顺序、共享临时文件、抢同一个端口），
+    # baseline 会多出一批本来不存在的红 —— 而那些红会进队列、真花钱去修。
+    # 表现不是崩溃，是「这个仓库怎么这么多失败」。撞上了就设
+    # `AIFIX_TEST_PARALLEL=off`。
+    #
+    # 判定本身不受影响：baseline 与 verify 用的是同一条命令、同一个并行度，
+    # 三态比较仍然是同一把尺量两次。
+    test_parallel: str | None = "auto"
+
     # 跑目标项目测试的超时。**实测逼出来的**（2026-07-30，轮 9）：拿 aifix 自己
     # 当目标跑 `--dry-run`，套件在 worktree 里跑满 900 秒被杀，而这个数此前是
     # 写死在 `run_full_suite` 签名里的默认值，config 里没有任何旋钮 ——

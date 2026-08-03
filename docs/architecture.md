@@ -142,6 +142,12 @@ JUnit 报告」，用户看到的消息是「测试进程没能正常跑完」�
 在 worktree 里跑一次全量测试，解析 JUnit XML，得到失败集合。**全量测试很贵，
 所以只在这里跑一次**，之后每轮 verify 各跑一次。
 
+> **这几遍全量是一次 run 里最大的时间开销。** 实测（2026-08-03，本仓库 956 个用例）：
+> 串行一遍 7 分 12 秒，三遍就是 21 分钟。所以全量默认走 pytest-xdist 并行
+> （`AIFIX_TEST_PARALLEL=auto`，探不到 xdist 就静默串行），实测降到 3 分 58 秒。
+> 复跑那一跑**不并行** —— 一两个用例起 N 个 worker 是纯开销。见
+> [configuration.md](configuration.md#aifix_test_parallel)。
+
 这个节点有三道相当细的闸：
 
 **1. 报告必须存在，而且里面真的跑了用例**（`require_report=True`）

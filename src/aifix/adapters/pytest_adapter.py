@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import configparser
+import functools
 import json
 import os
 import re
@@ -94,6 +95,67 @@ def resolve_test_python(repo: Path, configured: str | None = None) -> str | None
     if configured:
         return os.path.expanduser(configured)
     return discover_test_python(repo)
+
+
+# 「不并行」的几种写法。`"0"` 与 `"off"` 是人会写的，空串是 Actions 给的
+# （`env: X: ${{ vars.Y }}` 在 Y 未设置时给空串而不是不设）。
+_SERIAL = frozenset({"", "off", "no", "false", "0", "none", "null", "1"})
+
+
+def _clean_parallel(value: str | None) -> str | None:
+    """把 `parallel` 洗成能直接跟在 `-n` 后面的值；不并行时返回 None。
+
+    `"1"` 也归进串行：`-n 1` 会起一个 worker 进程，比不起还慢（多一层 fork
+    与结果汇总），而写这个值的人想表达的就是「别并行」。
+    """
+    if value is None:
+        return None
+    v = str(value).strip().lower()
+    return None if v in _SERIAL else v
+
+
+# 探测目标解释器里有没有 pytest-xdist。用 find_spec 而不是 import：不执行包体，
+# 快，而且一个包的 import 副作用不会影响后面。
+_XDIST_PROBE = (
+    "import importlib.util as u, sys; "
+    "sys.exit(0 if u.find_spec('xdist') else 1)")
+
+
+@functools.lru_cache(maxsize=8)
+def has_xdist(python: str, timeout: float = 20.0) -> bool:
+    """目标解释器里能不能用 pytest-xdist。探不动一律当没有。
+
+    带缓存：`adapter_from_state` 被四个节点各调一次、每轮 attempt 各一遍，
+    而这个答案在一次 run 内不会变。缓存键是解释器路径，所以换解释器仍会重探。
+
+    **在目标解释器里探，不在 aifix 自己的解释器里探** —— 跑测试的是前者，
+    而这个项目已经为「拿 aifix 的解释器去代表目标项目」栽过一次（那次是
+    11 个 collection error）。
+
+    任何异常都当成没有：探测失败时退回串行，那是并行化之前的行为，不会更糟。
+    """
+    try:
+        return subprocess.run(
+            [python, "-c", _XDIST_PROBE],
+            capture_output=True, timeout=timeout).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def resolve_test_parallel(python: str | None,
+                          configured: str | None = None) -> str | None:
+    """全量测试用几个 worker：显式配置 > 探测 > None（串行）。
+
+    `configured` 为 `"auto"` 时才去探；给了具体数字就直接用（那是用户明确的
+    要求，不该被一次探测推翻）。探不到 xdist 就返回 None —— 静默退回串行，
+    而不是发一条 `-n auto` 让 pytest 以「unrecognized arguments」当场退出。
+    """
+    cleaned = _clean_parallel(configured)
+    if cleaned is None:
+        return None
+    if cleaned != "auto":
+        return cleaned
+    return "auto" if python and has_xdist(python) else None
 
 
 # 探测目标包时跳过的目录名。`tests` 是测试自己的包，不是被验证的产品代码；
@@ -395,7 +457,8 @@ def _anchor_for(repo_real: str, rel: str, names: list[str],
 class PytestAdapter:
     name = "pytest"
 
-    def __init__(self, python: str | None = None) -> None:
+    def __init__(self, python: str | None = None,
+                 parallel: str | None = None) -> None:
         """python：跑测试用的解释器；None 表示退回 `sys.executable`。
 
         做成构造参数而不是 `full_test_command(python=...)` 那样的方法参数，
@@ -403,8 +466,18 @@ class PytestAdapter:
         改协议要连 MavenAdapter 和每一个调用点一起改，而 Maven 压根不需要它
         （`mvn` 是外部命令，不走 Python 解释器）。注入点因此收在
         `nodes.baseline.adapter_from_state` 一处。
+
+        parallel：全量测试的 pytest-xdist worker 数（`"auto"` 或一个数字）。
+        None / 空串 / `"off"` / `"0"` 一律串行，**只作用于全量**（见
+        `full_test_command`）。
+
+        空串必须当没设：GitHub Actions 里 `env: X: ${{ vars.Y }}` 在 Y 未设置
+        时给的是**空串**而不是不设 —— 不接这一手，`-n ''` 会被发给 pytest，而
+        它以「argument -n: invalid int value」当场退出，表现成整个 baseline
+        跑不起来（与 `reproducer_thinking` 那处是同一个坑）。
         """
         self.python = python or sys.executable
+        self.parallel = _clean_parallel(parallel)
 
     @staticmethod
     def detect(repo: Path) -> bool:
@@ -441,7 +514,20 @@ class PytestAdapter:
     SCOPED_REPORT_NAME = ".aifix-recheck.xml"
 
     def full_test_command(self) -> list[str]:
-        return [self.python, *self._BASE, f"--junitxml={self.REPORT_NAME}"]
+        """全量。配了 `parallel` 就交给 pytest-xdist 并行跑。
+
+        **一次 run 要跑好几遍全量**（1 次 baseline + 每轮 verify 各 1 次），
+        所以这一条是整个系统里最值钱的一处提速。实测（2026-08-03，issue #9 的
+        真跑）：串行跑本仓库的 944 个用例，一次 run 花了 28 分半，而其中绝大
+        部分是那三遍全量。
+
+        **只在这里并行，scoped 不并行**：复跑一次就一两个用例，起 N 个 worker
+        是纯开销 —— xdist 要 fork 进程、收集、分发、汇总，而被分发的只有一个
+        用例。flaky 确认那一跑尤其怕这个，它本来只花几秒。
+        """
+        par = ["-n", self.parallel] if self.parallel else []
+        return [self.python, *self._BASE, *par,
+                f"--junitxml={self.REPORT_NAME}"]
 
     def scoped_test_command(self, test_ids: list[str]) -> list[str]:
         return [self.python, *self._BASE,
