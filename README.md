@@ -56,7 +56,10 @@ aifix 是一个测试失败驱动的自我修复循环：它跑一遍你的测�
 **全程不碰你的主工作区。** 所有改动发生在一个 `git worktree` 里，交付物是一条
 新分支（`aifix/<run_id>`），要不要合并完全是你的事。
 
-支持两种项目：**pytest**（Python）和 **Maven**（Java）。
+支持三种项目：**pytest**（Python）、**Maven**（Java）和 **vitest**（JS/TS 前端）。
+
+> 一次 run 只会选中**一个**适配器。前后端同仓的工程今天只跑到其中一侧，另一侧的用例
+> 一条都不执行 —— 那不是「通过」，是不存在。
 
 ---
 
@@ -367,7 +370,7 @@ aifix 自带一套评测：从 git history 里挖出**真实的「红转绿」�
 
 | 症状 | 多半是 |
 |---|---|
-| 「没有适配器认领这个项目」 | 目录里既没有 `pom.xml`，也没有 `pyproject.toml` / `tests/` |
+| 「没有适配器认领这个项目」 | 目录里既没有 `pom.xml`、没有依赖 `vitest` 的 `package.json`，也没有 `pyproject.toml` / `tests/` |
 | 「工作区不干净，请先提交或 stash」 | 已跟踪文件有未提交的改动（未跟踪文件不算） |
 | 「模型端点不可达」 | key / base_url 配错，或这台机器出不了网。GitHub runner 上还要确认端点**没有 IP 白名单** |
 | 「本次 baseline 的 N 个失败里有 M 个是整个测试文件没能跑起来」 | 测试解释器里没装目标项目的依赖 —— 配 `AIFIX_TEST_PYTHON` |
@@ -395,7 +398,7 @@ aifix replay <run_id> --step 7 --full   # 只看第 7 步，不截断
 | [docs/cli.md](https://github.com/sumengnan/aifix-code/blob/main/docs/cli.md) | 全部命令的参数与退出码语义 |
 | [docs/configuration.md](https://github.com/sumengnan/aifix-code/blob/main/docs/configuration.md) | 所有环境变量、默认值、以及每个旋钮的取舍 |
 | [docs/safety.md](https://github.com/sumengnan/aifix-code/blob/main/docs/safety.md) | 守卫、四层围栏、三层预算、不可逆动作清单 |
-| [docs/adapters.md](https://github.com/sumengnan/aifix-code/blob/main/docs/adapters.md) | 适配器协议、pytest / Maven 两个实现、怎么加第三个 |
+| [docs/adapters.md](https://github.com/sumengnan/aifix-code/blob/main/docs/adapters.md) | 适配器协议、pytest / Maven / vitest 三个实现、怎么加下一个 |
 | [docs/evaluation.md](https://github.com/sumengnan/aifix-code/blob/main/docs/evaluation.md) | 评测方法、怎么读那张对比表、已知的口径偏差 |
 | [docs/issue-driven.md](https://github.com/sumengnan/aifix-code/blob/main/docs/issue-driven.md) | issue → PR 流水线、GitHub Actions 配置、四个 workflow |
 | [docs/diagnostics.md](https://github.com/sumengnan/aifix-code/blob/main/docs/diagnostics.md) | trace / replay / ingest / stats，以及事实的数据契约 |
@@ -418,7 +421,7 @@ src/aifix/
 ├── nodes/            五个节点：preflight / baseline / detect / fix / verify / report
 ├── agents/           三个 agent 的提示词与输出解析：detector / fixer / reproducer
 ├── tools/            8 个工具 + 共用的写入守卫
-├── adapters/         项目适配器：pytest / maven / JUnit XML 解析
+├── adapters/         项目适配器：pytest / maven / vitest / JUnit XML 解析
 ├── eval/             评测：挖任务 / 变异 / 跑批 / 打分 / 区间估计
 ├── issue/            issue 驱动：授权判定 / GitHub 客户端 / 流水线编排
 ├── reproduce.py      缺陷报告 → 复现测试 → 红检
@@ -451,11 +454,13 @@ src/aifix/
 git clone https://github.com/sumengnan/aifix-code.git
 cd aifix-code
 uv sync
-uv run pytest -q -n auto      # 925 个用例，并行约 3 分钟
+uv run pytest -q -n auto      # 993 个用例，并行约 8 分钟
 ```
 
 `main` 与 PR 上会自动跑 Python 3.11 / 3.12 / 3.13 三个版本
 （[tests.yml](https://github.com/sumengnan/aifix-code/actions/workflows/tests.yml)）。
+vitest 真跑那条同理，判据是 `npm install --offline` 装不装得上 vitest。
+
 Maven 那几条用例在没有可用 `mvn` 的机器上会自己跳过 —— 判据是「`mvn -o` 跑不跑得
 起来」，不是「`mvn` 在不在」。
 

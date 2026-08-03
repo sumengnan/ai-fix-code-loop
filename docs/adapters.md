@@ -2,23 +2,23 @@
 
 核心循环本身不认识 pytest，也不认识 Maven。它只问适配器几个问题，然后照答案办事。
 
-现在有两个实现：**pytest**（Python）和 **Maven**（Java）。
+现在有三个实现：**pytest**（Python）、**Maven**（Java）和 **vitest**（JS/TS 前端）。
 
 ---
 
 ## 目录
 
-- [为什么必须写两个实现](#为什么必须写两个实现)
+- [为什么必须写多个实现](#为什么必须写多个实现)
 - [JUnit XML 是公分母，但只解决一半](#junit-xml-是公分母但只解决一半)
 - [协议：ProjectAdapter](#协议projectadapter)
-- [两个实现的对照表](#两个实现的对照表)
+- [三个实现的对照表](#三个实现的对照表)
 - [locate_source：形状相同，做法不同](#locate_source形状相同做法不同)
 - [探测顺序就是探测语义](#探测顺序就是探测语义)
-- [怎么加第三个适配器](#怎么加第三个适配器)
+- [怎么加下一个适配器](#怎么加下一个适配器)
 
 ---
 
-## 为什么必须写两个实现
+## 为什么必须写多个实现
 
 **单实现的抽象不是抽象。** 只写 pytest 的话，那层「适配器」会不知不觉长满 pytest 的
 假设，而且没有任何东西会提醒你。
@@ -108,6 +108,9 @@ class ProjectAdapter(Protocol):
 
     def locate_source(self, failure: Failure, repo: Path) -> list[SourceCandidate]: ...
     # 从失败信息推出嫌疑源码位置，按可疑度排序
+
+    def is_test_path(self, path: str) -> bool: ...
+    # 这个路径是不是测试文件。「不许改测试文件」那道守卫的唯一判据
 ```
 
 ### 几个「看起来多余」的方法为什么必须存在
@@ -129,25 +132,50 @@ class ProjectAdapter(Protocol):
 判据必须由适配器给。`eval/mine` 曾写死 `"::" not in id` —— Maven 的 id 一个都没有
 `::`，于是每一个都被判成文件级，候选集在复跑那一步被整批清空。
 
+**`is_test_path` 为什么不能是 `test_dirs()`**：目录列表等于断言「测试都住在某个目录
+下」，而这个前提对 vitest 不成立 —— JS 生态的主流约定是测试与源码**同目录**
+（`src/components/ChatView.test.tsx` 与 `src/components/ChatView.tsx` 并排），靠后缀
+区分。
+
+拿目录表达它只能二选一地错：
+
+| 返回 | 后果 |
+|---|---|
+| `[]` | 守卫**静默放行**，修复阶段的 agent 可以直接改掉自己的判卷标准 |
+| `["src"]` | 整个源码树被判成测试，fixer 什么都改不了 |
+
+所以判据必须由适配器给，而且必须是**谓词**。pytest 与 Maven 的实现就是
+`under_dirs(path, self.test_dirs())`，与改造前逐字节相同。
+
+`test_dirs()` 保留但用途收窄成两件事：写进 reproducer 的提示词（新测试放哪），以及挖
+任务时拆分改动路径。**判断「是不是测试」一律走谓词。**
+
+同一个谓词还用在 `reproducer._path_is_safe`（校验模型给的测试路径）。这不只是复用 ——
+它保证「校验通过的复现测试」必然「fixer 改不动」。两处各用各的判据就会有一条缝，落在
+缝里的文件校验说它是测试、守卫说它不是。
+
+这道守卫**已经静默失效过一次**：Maven 的 `["src/test"]` 遇上当时只比首段的实现，首段
+是 `src`，每一次改测试都被放行，且不报错、报告照样显示绿。
+
 **`scoped` 参数**：pytest 侧全量和复跑必须写成**不同文件**，否则复跑会覆盖掉还要继续
 用的全量报告；Maven 侧同一个目录，忽略这个参数即可（命令里的 `clean` 保证目录里只有
 本次跑出来的）。
 
 ---
 
-## 两个实现的对照表
+## 三个实现的对照表
 
-| | pytest | maven |
-|---|---|---|
-| `detect` | 有 `pytest.ini` / `tox.ini` / `setup.cfg` / `pyproject.toml` / `conftest.py` 之一，或有 `tests/` 目录 | 根目录有 `pom.xml` |
-| 全量命令 | `<python> -B -m pytest -q -p no:cacheprovider -o junit_family=xunit1 --junitxml=.aifix-report.xml` | `mvn -B -q -o clean test -Dmaven.test.failure.ignore=true` |
-| 局部命令 | 同上 + `--junitxml=.aifix-recheck.xml <ids...>` | 同上 + `-Dtest=<类>,<类#方法>... -DfailIfNoSpecifiedTests=false` |
-| 报告位置 | worktree 根目录下两个固定文件名 | `target/surefire-reports/TEST-*.xml`（每个类一份） |
-| `test_dirs` | `["tests", "test"]` | `["src/test"]` |
-| `source_suffixes` | `(".py",)` | `(".java",)` |
-| 用例 id | `tests/test_x.py::TestC::test_y` | `demo.CalcTest#testY` |
-| 文件级 id | `tests/test_x.py`（无 `::`） | `demo.CalcTest`（无 `#`） |
-| 跑测试用什么 | 目标项目自己的解释器（见配置） | `mvn`（不走 Python 解释器） |
+| | pytest | maven | vitest |
+|---|---|---|---|
+| `detect` | 有 `pytest.ini` / `tox.ini` / `setup.cfg` / `pyproject.toml` / `conftest.py` 之一，或有 `tests/` 目录 | 根目录有 `pom.xml` | 根目录 `package.json` 的依赖里直接列了 `vitest` |
+| 全量命令 | `<python> -B -m pytest -q -p no:cacheprovider -o junit_family=xunit1 --junitxml=.aifix-report.xml` | `mvn -B -q -o clean test -Dmaven.test.failure.ignore=true` | `node_modules/.bin/vitest run --reporter=junit --outputFile=.aifix-report.xml` |
+| 局部命令 | 同上 + `--junitxml=.aifix-recheck.xml <ids...>` | 同上 + `-Dtest=<类>,<类#方法>... -DfailIfNoSpecifiedTests=false` | 同上 + `<文件...> -t "^名字$\|^名字$"`（见下） |
+| 报告位置 | worktree 根目录下两个固定文件名 | `target/surefire-reports/TEST-*.xml`（每个类一份） | `--outputFile` 指定，**相对 `--root` 解析**（不是相对 cwd） |
+| `test_dirs` | `["tests", "test"]` | `["src/test"]` | `["src"]`（只用于提示词与挖任务，**判定走 `is_test_path`**） |
+| `source_suffixes` | `(".py",)` | `(".java",)` | `.ts` / `.tsx` / `.js` / `.jsx` / `.vue` / `.svelte`（不含 `.d.ts`） |
+| 用例 id | `tests/test_x.py::TestC::test_y` | `demo.CalcTest#testY` | `src/lib/calc.test.ts::calc > 断言失败` |
+| 文件级 id | `tests/test_x.py`（无 `::`） | `demo.CalcTest`（无 `#`） | `src/broken.test.ts`（无 `::`） |
+| 跑测试用什么 | 目标项目自己的解释器（见配置） | `mvn`（不走 Python 解释器） | 工程自己的 `node_modules/.bin/vitest`（不走 Python 解释器） |
 
 ### 几个命令参数的理由
 
@@ -191,6 +219,43 @@ A、B、C，再跑只测 A 的复跑时目录里仍躺着上一轮的 B、C —�
 
 已实测：`-Dtest=demo.CalcTest#` 被 surefire 读成**没有过滤条件**，整个套件跑一遍，
 复跑的报告里躺着无关类的失败。裸类名才是合法选择器。
+
+### vitest 侧：报告里的 id 有四处不能直接拿去用
+
+每一处错了都**不报错** —— vitest 只是安静地跑 0 条，或者多跑几条。
+
+**1. 分隔符不是同一个。** 报告的 `<testcase name>` 用 ` > ` 连接 describe 层级，而
+`-t` 匹配的是**空格**连接的那份。实测：
+
+```
+-t "外层 > 内层 > 用例"   → 跑了 0 条
+-t "外层 内层 用例"       → 命中
+```
+
+**2. `-t` 收的是正则，不是字面量。** 名字里带 `(括号)` 不转义就匹配不到（被当成捕获
+组）。转义**不能用 Python 的 `re.escape`** —— 它把空格也转成 `\ `，而 JS 正则在 `u`
+标志下把那当作非法的身份转义。只转 JS 真正认的那些元字符。
+
+**3. 必须加 `^...$` 锚点。** 实测 `-t "外层 前缀"` 同时跑了 `外层 > 前缀` 和
+`外层 > 前缀加长` —— 复跑多跑用例会污染 flaky 确认与红检的判定集合。
+
+**4. 文件级失败的形状是 `classname == name == 文件路径`。** 整个文件没能加载时 vitest
+就发这么一条，`name` 被填成文件路径本身。拼成 `文件::文件` 会得到一个跑不起来的 id。
+
+另外，**有文件级 id 时整个不发 `-t`**：那种 id 名下没有用例名可写进选择分支，而发一个
+匹配不到它的 `-t` 会让它被跳过 —— 于是「这个文件整体加载失败」在复跑结果里消失。多跑
+几条用例是可承受的，把一整类失败跑丢不是。
+
+### vitest 的命令为什么不走 `npx`、也不走项目的 `test` 脚本
+
+`npm run test` 的内容是项目自己定的。写成 `vitest`（不带 `run`）就是 **watch 模式** ——
+进程永远不退出，整个 run 挂到墙钟闸响。而 `vitest` 与 `vitest run` 只差一个词，前者
+恰恰是 vitest 文档里最常出现的写法。
+
+不走 `npx` 是因为包不在时它会尝试联网安装，在沙箱里那是一次几十秒的超时，而不是一条
+清楚的错误。
+
+直接调 `node_modules/.bin/vitest`。相对路径的可执行文件在沙箱里可用 —— 已实测。
 
 ---
 
@@ -265,6 +330,19 @@ gold_files 也对不上。跳数封顶且带 `seen` 集合，互相转发的两�
 Java 断言失败的堆栈里往往一条产品代码的帧都没有（被测方法正常返回了，抛异常的是
 `assertEquals`），这时候**候选为空是诚实的答案，不是缺陷**。
 
+### vitest 侧：解 JS 栈
+
+帧长成 ` ❯ inner src/lib/calc.ts:2:20`，函数名那一段可缺（入口帧就没有）。
+
+**由深入浅**，与 Java 一致、与 Python 相反 —— 所以和 Maven 一样**不 reverse**。弄反的
+后果是「最可疑的位置」指向测试文件里那行调用，而不是真正抛异常的产品代码。
+
+正则锚定到行尾的 `:行:列`，不按空格切：路径里可以有空格，而函数名与路径之间也是空格，
+只按空格切会在两种情况下各切错一次。
+
+`node_modules` 里的帧要丢掉 —— 加载失败时栈顶就是 vite 自己的 `loadAndTransform`。
+把框架内部文件递给模型，只会让它去读一个与缺陷无关的几万行文件。
+
 ### 候选之后还有一步：读真实源码
 
 `snippet.around()` 把前三个候选周围各 25 行的**真实源码**读出来，带真实行号，
@@ -282,7 +360,8 @@ traceback 指的那一行用 `>` 标出来，一起喂给诊断模型。零 LLM�
 
 ```python
 # nodes/baseline.py —— 全项目唯一的适配器注册表
-ADAPTERS = {"maven": MavenAdapter, "pytest": PytestAdapter}
+ADAPTERS = {"maven": MavenAdapter, "vitest": VitestAdapter,
+            "pytest": PytestAdapter}
 ```
 
 **dict 的插入顺序就是探测顺序，改动顺序等于改变探测语义。**
@@ -294,18 +373,36 @@ Java 工程的工具链里带 Python 脚本（发版、代码生成、CI 胶水�
 反过来排的后果不是报错而是静默：Maven 工程被判成 pytest 工程，baseline 跑 pytest 命令
 收不到任何用例，报告写「0 个失败」。
 
+vitest 排在 pytest 之前同理，而且更要紧：它要求根目录 `package.json` 的依赖里**直接**
+列了 vitest，同样具体。前后端同仓的工程根目录往往两样都有（`pyproject.toml` +
+`package.json`），反过来排的话前端工程会被判成 pytest 工程，然后 baseline 收不到任何
+用例、报告写「0 个失败」。
+
 **通则：detect 越具体的排越前，兜底式的排最后。**
+
+### 一个 run 只选一个适配器
+
+注册表是**按顺序探测、选中第一个**，不是「把认领的都跑一遍」。前后端同仓的工程今天
+只会跑到其中一侧，另一侧的用例**一条都不执行** —— 注意那不是「通过」，是不存在：
+baseline 看不见它们，verify 的三态比较也就永远不会因为它们变红而判 WORSE。
+
+让两个适配器并存要动 `AifixState.adapter_name` 这个字段本身（它是单数），以及
+`run_full_suite` 那两个调用点。三态判定本身不用改 —— `verify.compare()` 是纯集合
+运算，把两份 `FailureSet` 并起来喂进去就成立。
 
 ---
 
-## 怎么加第三个适配器
+## 怎么加下一个适配器
 
-1. **写一个类**实现上面那九个方法，构造函数收一个 `python: str | None = None` 参数
+1. **写一个类**实现上面那十二个方法，构造函数收一个 `python: str | None = None` 参数
    （即使用不上也要收 —— `adapter_for` 对注册表里每个实现用的是同一行
    `ADAPTERS[name](python=...)`，不收的话会在**取适配器**时 TypeError，而那发生在
    baseline 之前，表现成一次没有测试输出的崩溃）。
 
-2. **登记进 `ADAPTERS`**，位置按「detect 越具体越靠前」放。
+2. **登记进 `ADAPTERS`**，位置按「detect 越具体越靠前」放。登记之后
+   `test_adapter_matches_the_protocol_member_for_member` 会自动把它算进去 ——
+   那条测试的参数化是跟着注册表走的。**它一度写死成名单**，于是 VitestAdapter
+   加进去之后整整一轮没被检查到，而那不报错。
 
 3. **检查这几处是不是还成立**（它们是历史上出过裂缝的地方）：
 
@@ -316,6 +413,11 @@ Java 工程的工具链里带 Python 脚本（发版、代码生成、CI 胶水�
          数据文件会稀释它）
    - [ ] 报告写完之后会被清掉吗（陈旧报告被下一跑当成自己的结果 —— 这条在两个现有实现
          里的解法不同：pytest 靠 `_rm_reports`，Maven 靠命令里的 `clean`）
+   - [ ] `is_test_path` 用的是**你这个体系真正的判据**吗 —— vitest 靠后缀而不是
+         目录，照抄 `under_dirs(path, test_dirs())` 会让守卫静默失效
+   - [ ] 报告里的 id **能直接当选择器**吗（多半不能）。vitest 的 ` > ` 与 `-t` 认的
+         空格不是同一个字符串，surefire 的 `-Dtest=` 只认全限定类名 —— 两处都是
+         「不报错，安静地跑个空」
    - [ ] `nodes/baseline._collection_hint` 里要不要为你这个体系加一条「下一步该干什么」
          的提示（现在只有 pytest 那条谈解释器，Maven 走的是通用文案 —— 劝一个 Java
          项目换 Python 解释器是一句假话）

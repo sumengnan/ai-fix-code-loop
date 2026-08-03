@@ -116,7 +116,7 @@
 三条检查，任一不满足就中止整个 run：
 
 1. **显式配置的测试解释器可用吗**（`AIFIX_TEST_PYTHON` 指向的文件存在且可执行）
-2. **有适配器认领这个仓库吗**（按注册表顺序探测：Maven → pytest）
+2. **有适配器认领这个仓库吗**（按注册表顺序探测：Maven → vitest → pytest）
 3. **主工作区干净吗**（已跟踪文件不得有未提交改动）
 
 **为什么第一条要在这里拦**：到了 baseline 那一步，解释器不可用的表现是「没写出
@@ -475,7 +475,8 @@ src/aifix/
 │  ├─ adapters/base.py       协议：四个问题 + 一个真活
 │  ├─ adapters/junit.py      JUnit XML → FailureSet（公分母）
 │  ├─ adapters/pytest_adapter.py
-│  └─ adapters/maven_adapter.py
+│  ├─ adapters/maven_adapter.py
+│  └─ adapters/vitest_adapter.py
 │
 ├─ 可观测
 │  ├─ trace.py         三层嵌套 span，事实与事件分开落盘
@@ -520,7 +521,7 @@ src/aifix/
 ## 延伸阅读
 
 - [safety.md](safety.md) —— 守卫、四层围栏、三层预算、不可逆动作清单
-- [adapters.md](adapters.md) —— 适配器协议与两个实现
+- [adapters.md](adapters.md) —— 适配器协议与三个实现
 - [diagnostics.md](diagnostics.md) —— trace / replay / stats
 - [superpowers/specs/2026-07-27-aifix-code-design.md](superpowers/specs/2026-07-27-aifix-code-design.md)
   —— 原始设计规格，含被否决方案的记录
