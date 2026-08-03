@@ -115,6 +115,94 @@ async def test_red_check_rejects_an_id_that_matches_nothing(buggy_repo):
     assert reason
 
 
+# ------------------------------------------- 红检：红在模型自己的笔误上
+
+async def test_red_check_rejects_a_nameerror_from_the_models_own_typo(
+        buggy_repo):
+    """**这是 issue #9 真跑里漏过去的那一条。**
+
+    模型用了 `pytest.raises` 却没 `import pytest`。前三道闸全部放行——模块
+    import 得好好的（不是收集错误）、用例跑了、用例也确实红了——于是一条为
+    模型自己的笔误而红的测试被当成了合法复现，fixer 对着假靶子烧掉
+    $1.45 / 468k tokens，两轮都引入回归。
+    """
+    (buggy_repo / "tests" / "test_repro.py").write_text(
+        "from calc import add\n\n\n"
+        "def test_x():\n"
+        "    with pytest.raises(ValueError):\n"
+        "        add(1, 2)\n",
+        encoding="utf-8")
+    ok, reason = await red_check(buggy_repo, PytestAdapter(),
+                                 "tests/test_repro.py::test_x")
+    assert ok is False, "红在自己的 NameError 上，不是复现"
+    assert "NameError" in reason
+    assert "import pytest" in reason
+    # 反向对照：这三句都会把人指向完全错误的方向
+    assert "没有失败" not in reason
+    assert "收集" not in reason
+    assert "没有跑出任何结果" not in reason
+
+
+async def test_red_check_accepts_a_nameerror_raised_by_product_code(
+        buggy_repo):
+    """判据是**异常抛在哪**，不是异常是什么类型。
+
+    产品代码里真的引用了未定义的名字，那是货真价实的缺陷，NameError 正是它
+    该有的样子。按类型一刀切会把这种真缺陷连同笔误一起打回——而它恰恰是最
+    需要被修的那种。
+    """
+    (buggy_repo / "calc.py").write_text(
+        "def add(a, b):\n    return a - b\n\n\n"
+        "def boom():\n    return undefined_thing\n",
+        encoding="utf-8")
+    (buggy_repo / "tests" / "test_repro.py").write_text(
+        "import calc\n\n\ndef test_x():\n    calc.boom()\n",
+        encoding="utf-8")
+    ok, reason = await red_check(buggy_repo, PytestAdapter(),
+                                 "tests/test_repro.py::test_x")
+    assert ok is True, reason
+
+
+async def test_red_check_still_accepts_a_plain_assertion_failure(buggy_repo):
+    """这道闸最要紧的边界：**真断言失败的栈同样只到测试文件**。
+
+    被调函数正常返回了，栈上没有它——所以「栈没穿进产品代码」这一条单独用
+    会把每一条正常的复现测试都打回去。类型判定因此不能省。
+
+    与上面那条 `accepts_a_genuine_assertion_failure` 不重复：那条钉的是
+    「断言失败算复现」，这条钉的是「第 4 道闸不误伤它」，删掉任何一条都会有
+    一整类回归无人看守。
+    """
+    (buggy_repo / "tests" / "test_repro.py").write_text(
+        "from calc import add\n\n\ndef test_x():\n    assert add(2, 3) == 5\n",
+        encoding="utf-8")
+    ok, reason = await red_check(buggy_repo, PytestAdapter(),
+                                 "tests/test_repro.py::test_x")
+    assert ok is True, reason
+
+
+def test_typo_guard_passes_when_it_cannot_see_any_frame():
+    """没有栈帧时**放行**——「没有证据」不能当成「有罪的证据」。
+
+    否则这道闸会在自己瞎掉的时候变得最严厉，而那正是最不该拦人的时候。
+    直接调 `_typo_reason` 而不真跑 pytest：要构造的正是「解析不出帧」这个
+    异常态，真跑造不出来。
+    """
+    from pathlib import Path
+
+    from aifix.adapters.base import Failure
+    from aifix.reproduce import _typo_reason
+
+    class _Blind:
+        def locate_source(self, failure, repo):
+            return []
+
+    f = Failure(test_id="t.py::x", classname="t", name="x",
+                message="NameError: name 'pytest' is not defined",
+                trace="", file="t.py")
+    assert _typo_reason(f, Path("."), _Blind()) == ""
+
+
 # ---------------------------------------------------------------- 落盘
 
 def test_write_reproduction_creates_missing_parent_dirs(tmp_path, ):

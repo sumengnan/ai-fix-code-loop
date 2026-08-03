@@ -84,3 +84,65 @@ def test_missing_file_is_ignored(tmp_path):
     fs = parse_junit([tmp_path / "nope.xml"], lambda c, n, f: f"{c}::{n}")
     assert fs.ids == set()
     assert fs.ran == set()
+
+
+# ------------------------------------------------------------ 色码
+
+# pytest 的 junitxml 把 XML 1.0 不允许的控制字符转义成**字面文本**：`\x1b`
+# 落到报告里是七个可见字符 `#x1B`。下面这段是从真报告里原样抄来的（2026-08-03
+# 实跑，FORCE_COLOR 打开时），不是手写的猜想。
+_XML_COLOR = '''<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testsuite name="pytest" tests="1" failures="1" errors="0" skipped="0">
+    <testcase classname="tests.test_probe" name="test_x" file="tests/test_probe.py" line="9" time="0.01">
+      <failure message="NameError: name 'undefined_thing' is not defined">#x1B[1m#x1B[31mtests/test_probe.py#x1B[0m:12: 
+#x1B[1m#x1B[31mcalc.py#x1B[0m:5: NameError</failure>
+    </testcase>
+  </testsuite>
+</testsuites>
+'''
+
+
+def test_pytests_escaped_color_codes_are_stripped(tmp_path):
+    """色码必须在解析入口去掉，否则栈帧解析会**静默**失效。
+
+    `_PYTEST_FRAME` 会把 `#x1B[1m#x1B[31mcalc.py#x1B[0m:5:` 的路径截成
+    `#x1B[1m#x1B[31mcalc.py#x1B[0m`，`_resolve` 做 is_file() 落空，于是整条
+    traceback 一帧都定位不到 —— Detector 收到「未能从栈帧定位」然后盲猜路径。
+    不报错、不崩溃，只有定位悄悄变成了瞎猜。
+
+    断言的是**字面量 `#x1B` 不再出现**，而不是「去掉了 ANSI」：匹配 `\\x1b`
+    的正则对这串字面文本完全无效，而它看起来又像是已经处理过了。
+    """
+    p = tmp_path / "color.xml"
+    p.write_text(_XML_COLOR, encoding="utf-8")
+    fs = parse_junit([p], lambda c, n, f: f"{c}::{n}")
+    fail = fs.failures["tests.test_probe::test_x"]
+    assert "#x1B" not in fail.trace
+    assert "\x1b" not in fail.trace
+    # 路径必须完好地留下来 —— 只去色，不吃内容
+    assert "calc.py:5: NameError" in fail.trace
+    assert "tests/test_probe.py:12:" in fail.trace
+
+
+def test_stripping_color_keeps_frames_locatable(tmp_path):
+    """端到端：带色的报告要能定位到产品文件那一帧。
+
+    上一条钉的是「字符没了」，这条钉的是「**因此**定位回来了」——两者分开，
+    因为去色的正则可以在把 `#x1B` 删干净的同时把路径也吃掉一截，那样第一条
+    仍然全绿。
+    """
+    from aifix.adapters.pytest_adapter import PytestAdapter
+
+    (tmp_path / "calc.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_probe.py").write_text("y = 1\n", encoding="utf-8")
+    p = tmp_path / "color.xml"
+    p.write_text(_XML_COLOR, encoding="utf-8")
+
+    a = PytestAdapter()
+    fs = parse_junit([p], a.make_test_id)
+    fail = next(iter(fs.failures.values()))
+    frames = [(c.path, c.line) for c in a.locate_source(fail, tmp_path)
+              if c.origin == "traceback"]
+    assert ("calc.py", 5) in frames, frames

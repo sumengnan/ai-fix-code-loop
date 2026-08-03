@@ -23,7 +23,7 @@ from harness.sandbox.local import LocalSandbox
 from harness.tools.base import ToolRegistry
 from harness.tools.builtins.fs_tools import ListFilesTool
 
-from .adapters.base import ProjectAdapter
+from .adapters.base import Failure, ProjectAdapter
 from .agents.reproducer import (SYSTEM_PROMPT, Reproduction, build_prompt,
                                 parse_reproduction)
 from .agents.runner import consume
@@ -196,20 +196,86 @@ def write_reproduction(worktree: Path, r: Reproduction) -> Path:
     return p
 
 
+# 「这个名字/模块根本不存在」这一类异常。第 1 条闸已经挡掉了它在**收集阶段**
+# 的形态（模块级 import 失败 → 文件级 id），这里挡的是同一类错误发生在**运行
+# 时**：模块 import 得好好的，名字错在测试函数体里，于是前三道闸全部放行——
+# 文件收集正常、用例跑了、用例也确实红了。
+#
+# 真实代价（2026-08-02，issue #9 的真跑）：模型写的复现用了 `pytest.raises`
+# 却没有 `import pytest`，测试红在自己的 NameError 上。红检放行，fixer 对着
+# 这个假靶子改了两轮、$1.45 / 468k tokens，两轮都引入回归、都被三态判决回滚。
+# 最后给人的报告是「没修好」，而真正的原因是复现测试从一开始就是错的——
+# 报告里没有任何一句话指向这一点。
+#
+# 只收「名字/模块不存在」，**刻意不收 AttributeError**：`app.foo()` 没有这个
+# 属性既可能是模型猜错了 API，也可能正是 issue 要报的缺陷本身，分不开的信号
+# 不该拿来拦人。
+_MISSING_NAME = frozenset({"NameError", "ModuleNotFoundError", "ImportError"})
+
+
+def _typo_reason(failure: Failure | None, worktree: Path,
+                 adapter: ProjectAdapter) -> str:
+    """这条测试是不是红在模型自己写的那一行上。是就给理由，不是就返回空串。
+
+    判据是**异常抛在哪，不是异常是什么类型**。产品代码里真的引用了未定义的
+    名字，那是货真价实的缺陷，NameError 正是它该有的样子——按类型一刀切会把
+    这种真缺陷一并打回。区别在栈帧：笔误的栈只到复现测试文件里（那段代码整个
+    是模型写的，产品代码没有办法让它抛 NameError），真缺陷的栈会**穿进产品
+    文件**。实测三种形态（2026-08-03）：
+
+        笔误 `pytest.raises` 没 import  → [(测试文件, 6)]
+        产品代码里的 NameError          → [(calc.py, 5), (测试文件, 12)]
+        真断言失败                      → [(测试文件, 16)]
+
+    第三行是这道闸最要紧的边界：**真断言失败的栈同样只到测试文件**（被调函数
+    正常返回了，栈上没有它），而那是最常见的合法复现。所以类型判定不能省——
+    单看栈帧会把每一条正常的复现测试都打回去。
+
+    **拿不到栈帧时一律放行。** 解析不出帧的原因有好几种（报告形状变了、路径
+    不在 repo 内、适配器换了），把「没有证据」当成「有罪的证据」会让这道闸在
+    自己瞎掉的时候变得最严厉，而那正是最不该拦人的时候。
+    """
+    if failure is None:
+        return ""
+    # message 形如 `NameError: name 'pytest' is not defined`。用它而不是 trace：
+    # 它是异常的 repr，天生不带色码，也不含被回显的源码。
+    exc = failure.message.split(":", 1)[0].strip()
+    if exc not in _MISSING_NAME:
+        return ""
+    frames = [c for c in adapter.locate_source(failure, worktree)
+              if c.origin == "traceback"]
+    # origin 必须筛：import 那一档是「测试文件 import 了它」，不是「失败穿过
+    # 了它」——拿它当「栈穿进了产品代码」会让这道闸永远不触发。
+    if not frames:
+        return ""
+    test_file = failure.file or ""
+    if any(c.path != test_file for c in frames):
+        return ""                       # 栈穿出了测试文件 → 当作真缺陷
+    return (
+        f"复现测试红在**它自己**的 {exc} 上（`{failure.message.strip()}`）。\n"
+        f"  栈帧只到 `{test_file}`，没有穿进任何产品代码——这条测试是因为它"
+        "自己写错了名字才红的，不是因为缺陷。放过它，fixer 会对着一个假靶子"
+        "改代码。\n"
+        "  最常见的成因：用了 `pytest.raises` 却没有 `import pytest`。")
+
+
 async def red_check(worktree: Path, adapter: ProjectAdapter,
                     target_id: str, timeout: float = 600.0) -> tuple[bool, str]:
     """复现测试必须**红**，而且要红得有信息量。零 LLM。
 
-    三种「不算复现」分开报，因为它们指向完全不同的下一步：
+    四种「不算复现」分开报，因为它们指向完全不同的下一步：
 
     1. **收集错误**——import 不到东西也是红，但它复现的是模型自己的笔误。
        新功能的测试红在 ImportError 上是常态（函数还不存在）；修 bug 不是，
        产品代码就在那儿。放过这一类，fixer 会被派去修一个不存在的模块。
     2. **用例没跑出结果**——node id 不存在、被跳过、收集没走到它。
     3. **跑了但没失败**——这条测试在当前代码上就是绿的，约束力为零。
+    4. **红在自己的笔误上**——第 1 条的运行时版本，见 `_typo_reason`。
 
     判定顺序不能换：收集失败时 target 必然也「没跑出结果」，先判后者会给出
     一句指错方向的话（本项目最贵的失败一向不是崩溃，是指错方向的诊断）。
+    第 4 条只能排在最后——它要读那次失败的栈帧，而前三条成立时压根没有失败
+    对象可读。
     """
     fs = await run_scoped(worktree, adapter, [target_id],
                           timeout=timeout)
@@ -231,6 +297,10 @@ async def red_check(worktree: Path, adapter: ProjectAdapter,
             f"`{target_id}` 在当前代码上**没有失败**。\n"
             "  一条现在就绿的测试对修复没有任何约束力——它要么没抓住报告里"
             "描述的行为，要么那个缺陷已经被修过了。")
+
+    typo = _typo_reason(fs.failures.get(target_id), worktree, adapter)
+    if typo:
+        return False, typo
 
     return True, ""
 
