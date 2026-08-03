@@ -113,6 +113,37 @@ export AIFIX_PRICE_MAP='{"qwen3-coder-flash": [0.0003, 0.0012]}'
 | `AIFIX_SCOPED_TEST_TIMEOUT_SECONDS` | 600 | 只跑几个用例时的超时 |
 | `AIFIX_TEST_PARALLEL` | `auto` | 全量测试并行跑几个 worker（走 pytest-xdist） |
 | `AIFIX_ALLOW_COLLECTION_ERRORS` | false | 允许「baseline 里收集错误占比过高」的仓库照常排队开修 |
+| `AIFIX_ADAPTERS` | 自动探测第一个 | 显式指定跑哪几套测试，逗号分隔（如 `pytest,vitest`） |
+
+### `AIFIX_ADAPTERS`
+
+前后端同仓的工程（Python 后端 + vitest 前端）**一次 run 跑两套**：
+
+```bash
+export AIFIX_ADAPTERS=pytest,vitest
+```
+
+不设的话只用探测到的第一个 —— 与加这个开关之前完全相同的行为。
+
+**为什么要人显式说一句，而不是探测到几个就跑几个**：`PytestAdapter.detect`
+极宽松（有 `tests/` 或 `pyproject.toml` 就认领），而 Java 工程的工具链里带
+Python 脚本（发版、代码生成、CI 胶水）是常事。自动全跑的话，那类仓库会凭空
+多跑一套 pytest、收不到任何用例，然后被「测试没跑成」当场中止 —— 一个原本
+工作正常的仓库在升级之后打不开。
+
+而「该不该两套都跑」没有可靠的自动判据：前后端同仓与 Java 带 Python 胶水，
+在探测那一层长得一模一样。分不清就不猜。
+
+**只跑一套时另一侧的用例一条都不执行** —— 那不是「通过」，是不存在：baseline
+看不见它们，verify 的三态比较也就永远不会因为它们变红而判 WORSE。
+
+写错的名字在 preflight 就被拒（可选值见 `nodes/baseline.ADAPTERS`：`pytest` /
+`maven` / `vitest`），不会等到 baseline 才炸 —— 那时的报错读起来像目标项目的
+测试挂了。
+
+两套测试**串行跑**，不并发：它们可能抢同一批端口、同一个测试数据库、同一个
+临时目录。
+
 
 ### `AIFIX_TEST_PARALLEL`
 

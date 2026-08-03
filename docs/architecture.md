@@ -116,7 +116,7 @@
 三条检查，任一不满足就中止整个 run：
 
 1. **显式配置的测试解释器可用吗**（`AIFIX_TEST_PYTHON` 指向的文件存在且可执行）
-2. **有适配器认领这个仓库吗**（按注册表顺序探测：Maven → vitest → pytest）
+2. **有适配器认领这个仓库吗**（按注册表顺序探测：Maven → vitest → pytest；`AIFIX_ADAPTERS` 可显式指定跑哪几套）
 3. **主工作区干净吗**（已跟踪文件不得有未提交改动）
 
 **为什么第一条要在这里拦**：到了 baseline 那一步，解释器不可用的表现是「没写出
@@ -373,6 +373,7 @@ reproducer 拿到的是一段人话，要把整套测试脚手架逆推出来。
 
 | 字段 | 含义 |
 |---|---|
+| `adapter_names` | 认领了这个仓库的适配器名（**复数**，见 AIFIX_ADAPTERS） |
 | `baseline_ids` / `queue` / `current` / `attempt` | 跨 failure 的进度 |
 | `verdict` | 本轮判定：`better` / `same` / `worse` |
 | `ask` | 模型停下来问的那个问题（`{test_id, question, options}`） |
@@ -381,6 +382,7 @@ reproducer 拿到的是一段人话，要把整套测试脚手架逆推出来。
 | `signals` | 补丁合理性的静态信号列表（**不参与任何判定**，只展示给人看） |
 | `failure_token_budget` / `failure_usd_budget` | 本轮 failure 分到的额度 |
 | `abort` / `abort_kind` | 中止的**消息**（给人看）与**种类**（给程序判） |
+| `_owners` | test_id → 适配器名。哪条 id 是哪套体系跑出来的 |
 | `_failures` / `_trace` / `_progress` | 下划线前缀 = 不参与路由，只是数据源或侧信道 |
 
 `failure_usd_budget` 有一处必须用 `is None` 判定的地方：`None` 表示「不设美元闸」，

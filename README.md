@@ -58,8 +58,15 @@ aifix 是一个测试失败驱动的自我修复循环：它跑一遍你的测�
 
 支持三种项目：**pytest**（Python）、**Maven**（Java）和 **vitest**（JS/TS 前端）。
 
-> 一次 run 只会选中**一个**适配器。前后端同仓的工程今天只跑到其中一侧，另一侧的用例
-> 一条都不执行 —— 那不是「通过」，是不存在。
+前后端同仓的工程（Python 后端 + vitest 前端）**一次 run 可以跑两套**，设一个变量即可：
+
+```bash
+export AIFIX_ADAPTERS=pytest,vitest
+```
+
+> 不设的话只用探测到的第一个，另一侧的用例**一条都不执行** —— 那不是「通过」，是不
+> 存在。为什么要人显式说一句而不是自动全跑，见
+> [configuration.md](https://github.com/sumengnan/aifix-code/blob/main/docs/configuration.md#aifix_adapters)。
 
 ---
 
