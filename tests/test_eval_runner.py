@@ -587,7 +587,8 @@ async def test_eval_turns_the_necessity_check_off(history_repo, tmp_path):
     障**。与 ask_user 那条同一个形状：评测环境的账不该记到模型头上。
     """
     t = _task(history_repo)
-    r = await run_task(t, AifixConfig(necessity_check=True), "假模型",
+    r = await run_task(t, AifixConfig(necessity_check=True,
+                                      reviewer_check=True), "假模型",
                        tmp_path / "w",
                        detector_client=_Scripted([_text(_DIAG)]),
                        fixer_client=_two_unit_fixer())
@@ -597,6 +598,12 @@ async def test_eval_turns_the_necessity_check_off(history_repo, tmp_path):
     keys = _fact_keys(tmp_path / "w", t)
     assert not [k for k in keys if k.startswith("necessity")], keys
     assert "unnecessary_hunk" not in keys
+    # 裁判同理，理由更硬：它花的 token 和钱正是评测的两列指标，而裁判是同一
+    # 个、被测模型不是 —— 开着就等于把两个模型的开销记成一个的。
+    # 这里没给 reviewer_client，真开起来会去连一个不存在的端点，
+    # 一条 reviewer_failed 都没有正说明它压根没被调起来。
+    assert "reviewer_suspicious" not in keys
+    assert "reviewer_failed" not in keys
 
 
 async def test_the_off_switch_is_not_what_makes_the_task_pass(buggy_repo):

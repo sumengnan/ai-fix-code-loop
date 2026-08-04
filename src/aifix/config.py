@@ -32,6 +32,26 @@ class AifixConfig(BaseSettings):
 
     detector: HarnessConfig = Field(default_factory=HarnessConfig)
     fixer: HarnessConfig = Field(default_factory=HarnessConfig)
+    # 第三条路由：裁判模型（agents/reviewer.py）。只在 `reviewer_check=True`
+    # 时才会被用到。
+    #
+    # **默认 None 而不是 `default_factory=HarnessConfig`**，与上面两条不同 ——
+    # 这不是风格差异，default_factory 有一个副作用：它会**无条件构造一个
+    # HarnessConfig**，而 HarnessConfig 自己的 env_prefix 是 `HARNESS_`，于是
+    # 环境里任何一个格式不对的 `HARNESS_*` 变量都会让 `AifixConfig()` 当场抛
+    # SettingsError —— **哪怕 detector / fixer 两条路由都配全了、哪怕裁判这一层
+    # 根本没打开**。detector / fixer 撞不上是因为实际使用中 `AIFIX_DETECTOR__*`
+    # 总是配着的，那条路走的是环境值而不是 default_factory。
+    #
+    # 而「进程环境不归它管」正是这个类选 `extra="ignore"` 的理由（见上面那段）：
+    # 让别人多设的一个变量把所有人挡在门外，与那条取舍直接冲突。
+    #
+    # 代价是打开 `reviewer_check` 却没配路由时它是 None —— 那种情况在启动时
+    # 硬拒绝（`cli.require_reviewer_route`），**不退回 fixer 那条路由**：写补丁
+    # 的和验补丁的是同一个模型时，两边的盲区、被 prompt 说服的方式、对「这算不算
+    # 重构」的判断全都一样，那等于没验。悄悄回退到 fixer 会让这一层看起来在
+    # 工作，实际上什么都没验 —— 比直接不开更糟。
+    reviewer: HarnessConfig | None = None
 
     # 扁平价表：{模型名: [输入价/1k, 输出价/1k]}。注意**不是**分档表
     # （[[上限, 输入, 输出], ...]），两者不通用。不配就算不出成本 ——
@@ -310,6 +330,19 @@ class AifixConfig(BaseSettings):
     # `thinking={"type": "disabled"}`；Qwen/百炼那边原样发 enable_thinking。
     reproducer_thinking: bool | None = False
     detector_max_tokens: int = 20_000
+
+    # 交付前让裁判模型复审一遍补丁（agents/reviewer.py）。**只出信号，不改判
+    # 定、不挡交付。**
+    #
+    # 默认**关**，与必要性反查相反。三条理由：
+    # 1. 它要发一次真实的模型调用，花的是钱不是墙钟，而这个项目的其它信号层
+    #    全是零成本的 —— 默认给所有人加一笔开销不合适。
+    # 2. 它的产出是这几层里唯一**不可复现**的：同一个补丁两次跑可能给不同的
+    #    判断。默认开着会让「报告为什么这次多了一节」变成一个没法回答的问题。
+    # 3. 它只在配了独立的 `reviewer` 路由（最好是与 fixer 不同的模型）时才有
+    #    意义，而那是一个需要人显式做的决定。
+    reviewer_check: bool = False
+    reviewer_max_tokens: int = 20_000
     loop_detect_window: int = 3
     tool_result_max_chars: int = 8000
 

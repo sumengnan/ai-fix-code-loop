@@ -175,7 +175,19 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
         # `abort_kind == "wall"` 那一段），整个任务从比率分母里被摘掉。于是多
         # 出来的这点开销不只是慢，它会**把本来能出成绩的任务变成故障**，样本
         # 白跑 —— 与 ask_user 那条同一个形状：评测环境的账，记到了模型头上。
-        "necessity_check": False})
+        "necessity_check": False,
+        # **裁判模型在评测里必须关掉，而且理由比上面那条更硬。**
+        #
+        # 它花的是 token 和钱，而这两样正是评测的两列指标（`avg_tokens` /
+        # `avg_cost_usd`）。开着的话，那两列量到的是「被测模型 + 裁判模型」的
+        # 合计开销 —— 而裁判是同一个，被测模型不是，于是这两列不再是被测模型
+        # 的属性。更糟的是裁判的开销与「补丁有多大」相关，改动大的模型被多扣
+        # 一笔，跨模型对比直接失真。
+        #
+        # 显式写在这里而不是靠默认值（`reviewer_check` 本来就是 False）：
+        # 环境里设一个 AIFIX_REVIEWER_CHECK=true 就能把整批评测数据悄悄污染，
+        # 而那种污染在表里看不出来 —— 只是每个模型都贵了一点。
+        "reviewer_check": False})
     state = await run_once(dest, task_config, run_id=run_id,
                            only_test=task.target_test,
                            detector_client=detector_client,

@@ -97,6 +97,7 @@ def _backfill_in_flight_result(state: AifixState) -> None:
 async def run_once(repo: Path, config: AifixConfig, run_id: str,
                    detector_client: Any = None,
                    fixer_client: Any = None,
+                   reviewer_client: Any = None,
                    only_test: str | None = None,
                    dry_run: bool = False,
                    progress: Any = None,
@@ -262,7 +263,8 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                     budget.charge(state["spent_tokens"] - mid[0],
                                   state["spent_usd"] - mid[1])
                     t_verify = time.monotonic()
-                    state.update(await verify_node(state))
+                    state.update(await verify_node(
+                        state, reviewer_client=reviewer_client))
                     prog.verified(verdict=state.get("verdict") or "same",
                                   seconds=time.monotonic() - t_verify)
                 tripped = check_circuit_breaker(state)
@@ -364,6 +366,30 @@ def require_price_map_for_usd_budget(config: AifixConfig,
         "  修法一：配置价格表（每千 token 的 [输入价, 输出价]）\n"
         "    export AIFIX_PRICE_MAP='{\"deepseek-v4-pro\": [0.003, 0.006]}'\n"
         "  修法二：去掉美元上限，改用 AIFIX_BUDGET_TOKENS 限制 token")
+
+
+def require_reviewer_route(config: AifixConfig) -> None:
+    """打开了裁判层却没配它的路由 —— 当场拒绝，不悄悄回退到 fixer。
+
+    回退到 fixer 那条路由是最省事的做法，也是最坏的：写补丁的和验补丁的成了
+    同一个模型，两边的盲区、被 prompt 说服的方式、对「这算不算重构」的判断
+    全都一样。那样这一层看起来在工作，实际什么都没验 —— 比直接不开更糟，
+    因为报告里那句「裁判没说什么」会被当成一次真的复审。
+
+    与「设了美元上限却没配价格表」同一个形状：与其给一个假的保证，不如现在
+    就停。
+    """
+    if not config.reviewer_check or config.reviewer is not None:
+        return
+    raise SystemExit(
+        "拒绝启动：打开了 AIFIX_REVIEWER_CHECK，但没有配置裁判模型的路由。\n"
+        "  不会自动退回 fixer 那条路由 —— 写补丁的和验补丁的是同一个模型时，"
+        "两边的盲区一样，那等于没验。\n"
+        "  修法一：配上这条路由（**建议用一个和 fixer 不同的模型**）\n"
+        "    export AIFIX_REVIEWER__BASE_URL=\"https://your-endpoint/v1\"\n"
+        "    export AIFIX_REVIEWER__API_KEY=\"sk-...\"\n"
+        "    export AIFIX_REVIEWER__MODEL=\"...\"\n"
+        "  修法二：关掉它（AIFIX_REVIEWER_CHECK=false，这也是默认值）")
 
 
 # run / mine / mutate 三个子命令都在目标项目里真跑测试，都吃这一段。
@@ -569,6 +595,7 @@ def _cmd_run(args) -> None:
     if args.budget is not None:
         config = config.model_copy(update={"budget_usd": args.budget})
     require_price_map_for_usd_budget(config)
+    require_reviewer_route(config)
     state = asyncio.run(run_once(
         Path(args.repo).resolve(), config, run_id=uuid.uuid4().hex[:8],
         only_test=args.test, dry_run=args.dry_run,
@@ -616,6 +643,7 @@ def _cmd_answer(args) -> None:
     if args.budget is not None:
         config = config.model_copy(update={"budget_usd": args.budget})
     require_price_map_for_usd_budget(config)
+    require_reviewer_route(config)
     state = asyncio.run(run_once(
         repo, config, run_id=uuid.uuid4().hex[:8],
         # 只跑当初卡住的那个用例：其余的要么上一轮已经修好并进了交付分支，
@@ -724,6 +752,7 @@ def _cmd_issue(args) -> None:
     # 价格表时成本恒为 0、美元闸永远不触发 —— 用户设了上限，系统欣然接受，
     # 然后一分钱不拦。在 Actions 上这个假保证尤其贵：没人盯着终端。
     require_price_map_for_usd_budget(config)
+    require_reviewer_route(config)
 
     payload = load_payload(args.event)
     repo = Path(args.repo).resolve()
@@ -830,6 +859,7 @@ def _cmd_eval(args) -> None:
     if args.budget_per_task is not None:
         config = config.model_copy(
             update={"budget_usd": args.budget_per_task})
+    require_reviewer_route(config)
     require_price_map_for_usd_budget(
         config, also_explicit=args.budget_total is not None)
     label = args.label or config.fixer.model or "未命名"

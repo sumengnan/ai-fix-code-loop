@@ -36,7 +36,7 @@ DB_RELPATH = Path(".aifix") / "trajectory.db"
 # 一条）。这里不 import 那一份：eval.runner 顶部 `from ..cli import run_once`，
 # 而 cli 反过来要挂上本模块的子命令，import 就成环了。
 SIGNAL_KEYS = frozenset({"removed_public_symbol", "new_module_state",
-                         "files_outside_suspect"})
+                         "files_outside_suspect", "hardcoded_literal"})
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (

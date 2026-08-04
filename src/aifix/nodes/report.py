@@ -35,6 +35,14 @@ _NECESSITY_NOTE = (
 _NECESSITY_PARTIAL_NOTE = (
     "反查这一层**没有查完**：没被报出来不等于都必要。")
 
+# 裁判那一条的注脚。它和上面两条不是一个性质：前面几类的判据是确定性的（AST、
+# 路径、真跑一遍测试），这一条是一个模型的看法 —— 会看错，也不可复现。写出来
+# 是因为「可疑」两个字读起来的分量和「删除了公开符号」一样重，而它们的证据强度
+# 差着一整档。
+_REVIEWER_NOTE = (
+    "裁判那一条是**一个模型的看法**，不是确定性判据 —— 它会看错，"
+    "同一个补丁两次跑也可能给不同的判断。它同样**不改变判定**。")
+
 
 def _unnecessary_lines(entry: dict[str, Any], label: str) -> list[str]:
     """必要性反查那一条：定位 + 那几行改了什么。
@@ -67,6 +75,18 @@ def _unnecessary_lines(entry: dict[str, Any], label: str) -> list[str]:
     return lines
 
 
+def _reviewer_line(entry: dict[str, Any]) -> str | None:
+    """裁判模型那一条。
+
+    单独一行而不是塞进 `_SIGNAL_CN`：它的值是一句话不是一串名字。而且它得带上
+    出处 —— 前面几类都是确定性判据，这一条是**一个模型的看法**，人读到「可疑」
+    两个字时必须知道说这话的是谁，否则会把它当成和「删除了公开符号」同等强度
+    的事实。
+    """
+    note = entry.get("reviewer_note")
+    return f"- 裁判模型认为这个补丁可疑：{note}" if note else None
+
+
 def _over_cap_line(entry: dict[str, Any]) -> str | None:
     """补丁大到整层没跑时的那一行。
 
@@ -96,8 +116,9 @@ def _signal_section(signals: list[dict[str, Any]]) -> list[str]:
         # 用户拿到的是一个「全都做完了却在最后一步炸掉」的 run。
         if not isinstance(entry, dict):
             continue
-        if not any(entry.get(k) for k, _ in _SIGNAL_CN) and not _over_cap_line(
-                entry):
+        if (not any(entry.get(k) for k, _ in _SIGNAL_CN)
+                and not _over_cap_line(entry)
+                and not _reviewer_line(entry)):
             continue
         test_id = entry.get("test_id") or "—"
         if groups and groups[-1][0] == test_id:
@@ -123,6 +144,9 @@ def _signal_section(signals: list[dict[str, Any]]) -> list[str]:
             over_cap = _over_cap_line(entry)
             if over_cap:
                 lines.append(over_cap)
+            reviewer = _reviewer_line(entry)
+            if reviewer:
+                lines.append(reviewer)
         lines.append("")
     tail = ["这些是信号，**不改变判定** —— 测试确实转绿了。"
             "它们只是说：合并之前值得亲眼看一遍这个 diff。"]
@@ -134,6 +158,8 @@ def _signal_section(signals: list[dict[str, Any]]) -> list[str]:
     if any(e.get("necessity_skipped") or _over_cap_line(e)
            for e in entries_all):
         tail += ["", _NECESSITY_PARTIAL_NOTE]
+    if any(e.get("reviewer_note") for e in entries_all):
+        tail += ["", _REVIEWER_NOTE]
     return lines + tail
 
 

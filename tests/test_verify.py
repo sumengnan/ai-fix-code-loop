@@ -424,7 +424,11 @@ async def test_an_unexpected_crash_still_produces_a_report(
     """
     from aifix import cli as cli_mod
 
-    async def _boom(state):
+    # `**_` 不能省：`verify_node` 现在还收一个 `reviewer_client`（测试注入口，
+    # 与 detect / fix 两个节点同款）。签名对不上的话炸出来的是 TypeError 而不是
+    # 这里要模拟的那个 RuntimeError —— 报告照样产出，于是这条测试**看起来**还是
+    # 绿的，实际钉的已经不是它要钉的东西了。
+    async def _boom(state, **_):
         raise RuntimeError("模拟节点崩溃")
 
     monkeypatch.setattr(cli_mod, "verify_node", _boom)

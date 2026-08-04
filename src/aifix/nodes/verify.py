@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Any
 
 from ..adapters.base import FailureSet, Verdict
+from ..agents.reviewer import SYSTEM_PROMPT as REVIEWER_PROMPT
+from ..agents.reviewer import Review
+from ..agents.reviewer import build_prompt as build_review_prompt
+from ..agents.reviewer import parse_review
 from ..delivery import Worktree
 from ..graph import AifixState, trace_of
 from ..necessity import Necessity, unnecessary_changes
@@ -21,6 +25,65 @@ def _worktree(state: AifixState) -> Worktree:
     worktree 删掉。
     """
     return Worktree(Path(state["repo"]), run_id=state["run_id"])
+
+
+def new_files_of(wt: Worktree, worktree_path: Path,
+                 touched: list[str]) -> list[str]:
+    """touched 里**这次新建**的那些文件（HEAD 里没有、工作区里有）。
+
+    `git diff` 看不见未跟踪文件，而新建一个源文件是完全合法的修复 —— 同一条
+    理由记在 `Worktree.commit` 的 docstring 里。必要性反查要拿它当单独的单位，
+    裁判要拿它补全眼前的改动，两处必须用同一份判据。
+    """
+    return [p for p in touched
+            if wt.file_at_head(p) is None and (worktree_path / p).is_file()]
+
+
+async def review_patch(state: AifixState, diff: str,
+                       client: Any = None) -> tuple[Review | None, int, float]:
+    """让裁判模型看一眼补丁。返回 (结论, 花掉的 token, 花掉的钱)。
+
+    无工具、单步、强制 JSON —— 与 `detect_node` 同一个形状，理由也一样：给它
+    工具就等于给它一条能烧掉整轮预算的岔路，而它要回答的是一个只需要读一遍
+    diff 的问题。
+
+    结论为 None 有两种来路（调用失败 / JSON 不合规），两种都让这一层**整个不
+    发声**。退回某个默认判断是在无中生有：退 suspicious 会让一个 JSON 输出不
+    合规的模型把每个补丁都标红，退 plausible 则是拿一次失败的调用给补丁背书。
+
+    token 与钱照常回报给调用方累加 —— 这是真花出去的钱，不记账的话
+    `budget_usd` 那道闸就漏了一个口子。
+    """
+    from harness.context.manager import ContextManager
+    from harness.llm.openai_compat import OpenAICompatibleClient, json_output
+    from harness.loop.agent_loop import AgentLoop
+    from harness.reliability.budget import BudgetTracker
+    from harness.tools.base import ToolRegistry
+
+    from ..agents.runner import consume
+
+    cfg = state["config"]
+    failure = state["_failures"][state["current"]]
+    # 路由缺席时**不建客户端**。cli 那道闸（require_reviewer_route）已经在启动
+    # 时拦下了这个组合，这里是第二道 —— 绕过 CLI 直接调 run_once 的路径（评测、
+    # 测试夹具、别人的脚本）不吃那道闸，而退回 fixer 的路由是这里唯一「顺手」
+    # 的选择，也恰恰是最坏的：同一个模型自己验自己。
+    if client is None and cfg.reviewer is None:
+        return None, 0, 0.0
+    loop = AgentLoop(
+        client=client or OpenAICompatibleClient(cfg.reviewer),
+        registry=ToolRegistry(),
+        context=ContextManager(REVIEWER_PROMPT),
+        max_steps=1,
+        budget=BudgetTracker(max_tokens=cfg.reviewer_max_tokens),
+        model_name=cfg.reviewer.model if cfg.reviewer else "",
+        price_map=cfg.price_map,
+    )
+    with json_output():
+        outcome = await consume(loop.run(
+            build_review_prompt(failure, diff, state.get("diagnosis"))))
+    review = parse_review(outcome.text) if outcome.ok else None
+    return review, outcome.tokens, outcome.cost_usd
 
 
 async def filter_flaky(baseline: FailureSet, current: FailureSet,
@@ -42,7 +105,8 @@ async def filter_flaky(baseline: FailureSet, current: FailureSet,
     return confirmed, new - confirmed
 
 
-async def verify_node(state: AifixState) -> dict[str, Any]:
+async def verify_node(state: AifixState,
+                      reviewer_client: Any = None) -> dict[str, Any]:
     """跑全量、过滤抖动、三态判定、按判定 commit 或 rollback。零 LLM。"""
     cfg = state["config"]
     target = state["current"]
@@ -145,13 +209,33 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
         try:
             nec = await unnecessary_changes(
                 worktree_path, wt.diff(),
-                new_files=[p for p in touched
-                           if wt.file_at_head(p) is None and (
-                               worktree_path / p).is_file()],
+                new_files=new_files_of(wt, worktree_path, touched),
                 target=target, rerun=_rerun,
                 max_units=cfg.necessity_max_units)
         except Exception as e:      # noqa: BLE001 —— 信号不能挡交付
             trace.fact("necessity_check_failed", str(e))
+
+    # 裁判模型：这几层里唯一一层由 LLM 产出的信号，也是唯一一层要花钱的。
+    # 门禁与必要性反查完全一样（只在判 BETTER 时、只对要交付的补丁），另外多
+    # 一道 `reviewer_check`（默认关，见 config 里那段）。
+    #
+    # **它没有否决权**：下面没有任何一条分支会因为它的结论去改 verdict。
+    # 理由写在 agents/reviewer.py 的模块 docstring 里 —— 一句话是「一个能被
+    # 说服的判定者等于没有判定者」，而它判错的两个方向代价不对称。
+    #
+    # 新增文件的内容要拼进去：`git diff` 看不见未跟踪文件，而只给裁判看一半
+    # 的改动，它对「改动是否超出所需范围」这一条就只能瞎猜。
+    review: Review | None = None
+    review_tokens, review_usd = 0, 0.0
+    if verdict is Verdict.BETTER and cfg.reviewer_check:
+        try:
+            review_diff = wt.diff()
+            for p in new_files_of(wt, worktree_path, touched):
+                review_diff += f"\n--- 新增文件 {p} ---\n{_now(p) or ''}"
+            review, review_tokens, review_usd = await review_patch(
+                state, review_diff, client=reviewer_client)
+        except Exception as e:      # noqa: BLE001 —— 同上，信号不能挡交付
+            trace.fact("reviewer_failed", str(e))
 
     # commit 提到这里（而不是留在下面的 BETTER 分支里）：**它的返回值参与判
     # 定**，所以必须发生在写 verdict / 信号那几条 fact 之前，否则 facts.jsonl
@@ -237,7 +321,16 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
             trace.fact("necessity_unit_skipped", nec.skipped)
         if nec.over_cap:
             trace.fact("necessity_over_cap", nec.over_cap)
-        if not sig.is_empty() or nec.unnecessary or nec.skipped or nec.over_cap:
+        # 裁判**判 plausible 时一个字都不写**。一条「裁判认为没问题」的 fact 会
+        # 被当成背书，而这一层没有资格背书任何东西 —— 它只在看出问题时开口。
+        # 同样不进 `_SIGNAL_KEYS`：那一列的口径是零模型调用的静态信号，掺进一
+        # 个不可复现的模型判断，跨模型对比就没法做了（用 A 当裁判量 B，和用 B
+        # 当裁判量 A，得到的根本不是同一把尺）。
+        if review is not None and review.is_suspicious:
+            trace.fact("reviewer_suspicious", review.reason)
+        if (not sig.is_empty() or nec.unnecessary or nec.skipped
+                or nec.over_cap
+                or (review is not None and review.is_suspicious)):
             # 带上 test_id：多 failure 的 run 里，报告只给一份并集的话，人分
             # 不清是哪一次改动删的符号。这个 key 是**追加**不是替换 ——
             # 核心循环对每个 failure 各跑一轮 verify，替换只会剩最后一轮。
@@ -245,7 +338,9 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
                             "unnecessary_hunks": [asdict(f)
                                                   for f in nec.unnecessary],
                             "necessity_skipped": nec.skipped,
-                            "necessity_over_cap": nec.over_cap})
+                            "necessity_over_cap": nec.over_cap,
+                            "reviewer_note": (review.reason if review is not None
+                                              and review.is_suspicious else "")})
     elif not sig.is_empty():
         # 换一个**不被 eval 计数**的 key（见 eval/runner._SIGNAL_KEYS）：被丢
         # 弃的尝试仍有诊断价值（模型试过什么是复盘的素材），但它不该出现在任
@@ -257,6 +352,12 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
         # 两个数比大小都会得出错的结论；而且名字全丢了 —— 复盘时不知道它删的
         # 是 mul 还是 add，「模型试过什么」正是这条 fact 存在的理由。
         trace.fact("signals_discarded", asdict(sig))
+
+    # 裁判花掉的钱要记账，三条返回分支一条都不能漏 —— 漏了的话
+    # `budget_usd` 那道闸就有一个口子：钱真花出去了，闸上看不见。
+    # 单独一个 dict 而不是往每条分支里手抄两行，理由就是「一条都不能漏」。
+    spent = {"spent_tokens": state["spent_tokens"] + review_tokens,
+             "spent_usd": state["spent_usd"] + review_usd}
 
     results = list(state["results"])
     common = {"flaky_filtered": sorted(flaky),
@@ -272,7 +373,7 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
                         "attempts": state["attempt"], "abort_reason": None})
         return {"verdict": verdict.value, "current": None, "attempt": 0,
                 "results": results, "diagnosis": None,
-                "consecutive_failures": 0, **common}
+                "consecutive_failures": 0, **spent, **common}
 
     wt.rollback()
     # 交付失败要盖过 fix_node 记下的守卫原因：模型这一轮做对了（补丁打上去、
@@ -286,7 +387,7 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
         return {"verdict": verdict.value, "current": None, "attempt": 0,
                 "results": results, "diagnosis": None,
                 "consecutive_failures": state.get("consecutive_failures", 0) + 1,
-                **common}
+                **spent, **common}
 
     return {"verdict": verdict.value, "attempt": state["attempt"] + 1,
-            "results": results, "diagnosis": None, **common}
+            "results": results, "diagnosis": None, **spent, **common}

@@ -46,6 +46,7 @@ export AIFIX_FIXER__MODEL="qwen3-coder-flash"
 ## 模型路由
 
 两条独立路由，可以指向**两个不同的供应商**（诊断挑便宜的、修复挑强的，未必出自同一家）。
+第三条 `reviewer` 只在打开裁判层时才需要，见下。
 
 | 变量 | 说明 |
 |---|---|
@@ -56,7 +57,26 @@ export AIFIX_FIXER__MODEL="qwen3-coder-flash"
 | `AIFIX_FIXER__API_KEY` | |
 | `AIFIX_FIXER__MODEL` | |
 
-两条路由的类型都是框架的 `HarnessConfig`，所以它的字段都能这样配
+### 第三条路由：`reviewer`（裁判模型）
+
+只在 `AIFIX_REVIEWER_CHECK=true` 时才需要，默认关。
+
+```bash
+export AIFIX_REVIEWER__BASE_URL="https://another-endpoint/v1"
+export AIFIX_REVIEWER__API_KEY="sk-..."
+export AIFIX_REVIEWER__MODEL="..."      # 建议**不要**和 fixer 用同一个
+```
+
+**打开了却没配这条路由的话，aifix 当场拒绝启动**，不会悄悄回退到 fixer 那条 ——
+写补丁的和验补丁的是同一个模型时，两边的盲区、被 prompt 说服的方式、对「这算不算重构」
+的判断全都一样，那样这一层看起来在工作、实际什么都没验，比不开更糟。
+
+它和另外两条还有一处不同：**默认值是 `None`，不是一个构造出来的 `HarnessConfig`**。
+`HarnessConfig` 自己的 env_prefix 是 `HARNESS_`，无条件构造一个的话，环境里任何一个格式
+不对的 `HARNESS_*` 变量都会多出一条启动失败路径 —— 而「进程环境不归它管」正是这个配置类
+选 `extra="ignore"` 的理由。
+
+前两条路由的类型都是框架的 `HarnessConfig`，所以它的字段都能这样配
 （`AIFIX_FIXER__TEMPERATURE`、`AIFIX_FIXER__REQUEST_TIMEOUT`、
 `AIFIX_FIXER__MAX_RETRIES` 等）。
 
@@ -422,6 +442,7 @@ export AIFIX_ALLOWED_USERS="alice,bob"
 
 ```python
 detector / fixer               HarnessConfig()  # 框架默认，必须自己配
+reviewer                       None             # 裁判模型；开了 reviewer_check 就必须配
 price_map                      {}
 allowed_users                  frozenset()      # AIFIX_ALLOWED_USERS
 test_python                    None             # 自动探测
@@ -437,6 +458,8 @@ ask_user                       True
 max_diff_lines                 300
 necessity_check                True             # 交付前的补丁必要性反查
 necessity_max_units            10               # 超过就整体跳过反查
+reviewer_check                 False            # 交付前让裁判模型复审（要花钱）
+reviewer_max_tokens            20_000
 fix_guard_retries              2
 guard_giveup_limit             2
 consecutive_failure_limit      3
