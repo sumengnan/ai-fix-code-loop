@@ -85,19 +85,19 @@ class AifixState(TypedDict, total=False):
     signals: list[dict[str, Any]]
     consecutive_failures: int
     failure_token_budget: int | None
-    # 本轮 failure 分到的美元额度。**只有 cli.run_once 会填**：build_graph()
-    # 那条路径没有 RunBudget，整条美元闸不存在，这个字段一直是 None。
-    # None 与 0.0 语义不同——None 是「不设美元闸」，0.0 是「额度已扣光，
+    # 本轮 failure 分到的人民币额度。**只有 cli.run_once 会填**：build_graph()
+    # 那条路径没有 RunBudget，整条成本闸不存在，这个字段一直是 None。
+    # None 与 0.0 语义不同——None 是「不设成本闸」，0.0 是「额度已扣光，
     # 一次调用都不许发起」，见 fix_node 里的 is None 判定。
-    failure_usd_budget: float | None
+    failure_cny_budget: float | None
     cost_capped: bool
 
-    spent_usd: float
+    spent_cny: float
     spent_tokens: int
 
     results: list[dict[str, Any]]
     abort: str | None
-    # 中止的**种类**（budget.exhaustion 的取值：tokens / usd / wall；运行
+    # 中止的**种类**（budget.exhaustion 的取值：tokens / cny / wall；运行
     # 崩溃为 crash；baseline 全是收集错误为 collect；熔断为 None）。abort 是
     # 给人看的消息，种类是给程序判的：评测要据此区分「模型没在预算内修好」
     # （成绩）与「评测调度器的墙钟耗尽 / 这台机器缺依赖」（故障）。
@@ -129,8 +129,8 @@ def new_state(repo: Path, config: AifixConfig, run_id: str) -> AifixState:
         flaky_filtered=[], confirmed_regressions=[], signals=[],
         consecutive_failures=0,
         failure_token_budget=None,
-        failure_usd_budget=None, cost_capped=False,
-        spent_usd=0.0, spent_tokens=0,
+        failure_cny_budget=None, cost_capped=False,
+        spent_cny=0.0, spent_tokens=0,
         results=[], abort=None, abort_kind=None,
     )
 

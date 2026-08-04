@@ -39,7 +39,7 @@ issue，让它读懂描述、写复现测试、修、开 PR。
 | 4 | 那个端点**没有 IP 白名单** | GitHub runner 的出口 IP 是 Azure 的动态大段。这一条做不成整条 Actions 路线就不成立 —— 所以它是第 1 步 |
 | 5 | 你的测试套件在 CI 上能跑起来，且**单次全量在 10 分钟以内** | 一次 run 要跑 1 次 baseline + 每轮 1 次 verify。20 分钟的套件意味着一次 run 一小时起步 |
 | 6 | 你的测试**基本不抖** | 抖动会被过滤，但 baseline 里本来就红的用例会稀释「这个补丁没弄坏别的」这个判断 |
-| 7 | 你能接受**每次触发花 $0.1 ~ $2** | 见[成本那一节](#成本这一下大概花多少钱) |
+| 7 | 你能接受**每次触发花 ¥1 ~ ¥15** | 见[成本那一节](#成本这一下大概花多少钱) |
 
 第 5 条不满足也不是完全没戏 —— 调大 `AIFIX_TEST_TIMEOUT_SECONDS` 和 job 的
 `timeout-minutes` 能跑，只是慢且贵。
@@ -145,7 +145,7 @@ aifix run . --dry-run
 ```
 - 适配器：pytest
 - 修复：**0 / 0**          ← 你的仓库现在是全绿的，正常
-- 成本：$0.0000（0 tokens）
+- 成本：¥0.0000（0 tokens）
 ```
 
 **这一步能挡掉绝大部分接入失败**：适配器认不认得、解释器对不对、工作区干不干净、
@@ -297,7 +297,7 @@ jobs:
           AIFIX_DETECTOR__API_KEY:  ${{ secrets.AIFIX_API_KEY }}
 
           # 价格表用 variable 不用 secret：它不是机密，而 secret 在日志里会被
-          # 遮成 ***，你反而看不出它配没配对 —— 而没配价格表 = 美元闸永远不触发
+          # 遮成 ***，你反而看不出它配没配对 —— 而没配价格表 = 成本闸永远不触发
           AIFIX_PRICE_MAP: ${{ vars.AIFIX_PRICE_MAP }}
 
           # 额外获准触发的登录名，逗号分隔（可选）。默认已放行仓库所有者、
@@ -310,7 +310,7 @@ jobs:
           #   解释器，然后是一整批 collection error
           AIFIX_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
 
-          AIFIX_BUDGET_USD: ${{ vars.AIFIX_BUDGET_USD || '2.0' }}
+          AIFIX_BUDGET_CNY: ${{ vars.AIFIX_BUDGET_CNY || '15.0' }}
           AIFIX_BUDGET_WALL_SECONDS: "3600"
           # 复现那一步的思考模式默认关。`|| 'false'` 不能省：variable 未设置时
           # Actions 给的是**空串**，而空串的含义是「随端点默认」= 开，正好相反
@@ -437,7 +437,7 @@ jobs:
           #   gh variable set AIFIX_ALLOWED_USERS --body "alice,bob"
           AIFIX_ALLOWED_USERS: ${{ vars.AIFIX_ALLOWED_USERS }}
           # Maven 项目**不要**设 AIFIX_TEST_PYTHON —— 它是给 pytest 适配器用的
-          AIFIX_BUDGET_USD: ${{ vars.AIFIX_BUDGET_USD || '2.0' }}
+          AIFIX_BUDGET_CNY: ${{ vars.AIFIX_BUDGET_CNY || '15.0' }}
           AIFIX_BUDGET_WALL_SECONDS: "3600"
 
       - uses: actions/upload-artifact@v4
@@ -465,7 +465,7 @@ gh secret set AIFIX_API_KEY
 gh variable set AIFIX_FIXER__MODEL    --body qwen3-coder-flash
 gh variable set AIFIX_DETECTOR__MODEL --body qwen3-coder-flash
 gh variable set AIFIX_PRICE_MAP       --body '{"qwen3-coder-flash": [0.0003, 0.0012]}'
-gh variable set AIFIX_BUDGET_USD      --body 2.0
+gh variable set AIFIX_BUDGET_CNY      --body 15.0
 
 # 可选：额外获准触发的人（默认已放行所有者/协作者/组织成员）
 gh variable set AIFIX_ALLOWED_USERS   --body "alice,bob"
@@ -475,9 +475,9 @@ gh variable set AIFIX_ALLOWED_USERS   --body "alice,bob"
 
 **一、`AIFIX_PRICE_MAP` 用 variable，不要用 secret。** 模型名和价格表都不是机密，而
 secret 在日志里会被遮成 `***` —— 跑错模型时你从日志里根本看不出来。而没配价格表的后果
-更直接：成本恒算成 0，**美元预算闸永远不会触发**。
+更直接：成本恒算成 0，**成本闸永远不会触发**。
 
-（顺带：显式设了 `AIFIX_BUDGET_USD` 却没配价格表时，aifix **当场拒绝启动**并告诉你为
+（顺带：显式设了 `AIFIX_BUDGET_CNY` 却没配价格表时，aifix **当场拒绝启动**并告诉你为
 什么 —— 与其给一个假的保证，不如现在就停。）
 
 **二、价格表是扁平价表**，格式是 `{模型名: [输入价/千token, 输出价/千token]}`。不是分档
@@ -695,14 +695,18 @@ uv run pytest -q tests/test_issue_event.py tests/test_workflow.py
 | | 每任务均值 |
 |---|---|
 | tokens | 238,070 |
-| 成本 | $0.1241 |
+| 成本 | $0.1241（≈ ¥0.89） |
 
-复现那一步另算，取决于你仓库的规模 —— 实测在一个中等仓库上用较强的模型跑要 $0.21 以上。
+> 这批读数是换币种之前测的，**原始单位是美元**；括号里的人民币按默认汇率 7.2 折算，
+> 不是重新测出来的数。
+
+复现那一步另算，取决于你仓库的规模 —— 实测在一个中等仓库上用较强的模型跑要 $0.21
+（≈ ¥1.5）以上。
 
 ### 三个闸，配置里都有
 
 ```bash
-AIFIX_BUDGET_USD=2.0            # 美元（需要价格表）
+AIFIX_BUDGET_CNY=15.0           # 人民币（需要价格表）
 AIFIX_BUDGET_TOKENS=500000      # token
 AIFIX_BUDGET_WALL_SECONDS=3600  # 墙钟
 ```
@@ -712,7 +716,7 @@ AIFIX_BUDGET_WALL_SECONDS=3600  # 墙钟
 
 ### 两条实用建议
 
-**别把预算设太紧。** 实测把每任务上限从 $0.60 调到 $0.20 时，某个任务 1 轮就被掐断判成
+**别把预算设太紧。** 实测（当时的币种是美元）把每任务上限从 0.60 调到 0.20 时，某个任务 1 轮就被掐断判成
 「没修好」；放回去之后同一个任务修好了。**预算设太紧会把「模型不行」和「额度不够」混成
 同一个数字。**
 

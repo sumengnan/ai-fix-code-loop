@@ -120,40 +120,40 @@ def test_safe_label_fallback_for_empty():
     assert _safe_label("") == "未命名"
 
 
-def test_explicit_usd_budget_without_price_map_is_refused():
+def test_explicit_budget_without_price_map_is_refused():
     """设了上限却没价格表 = 一个系统给不了的保证。当场拒绝。"""
-    from aifix.cli import require_price_map_for_usd_budget
+    from aifix.cli import require_price_map_for_budget
     from aifix.config import AifixConfig
 
-    cfg = AifixConfig(budget_usd=0.6)          # 显式提供
+    cfg = AifixConfig(budget_cny=0.6)          # 显式提供
     with pytest.raises(SystemExit) as e:
-        require_price_map_for_usd_budget(cfg)
+        require_price_map_for_budget(cfg)
     msg = str(e.value)
     assert "AIFIX_PRICE_MAP" in msg, "报错要说清楚缺什么、怎么配"
 
 
-def test_default_usd_budget_without_price_map_is_allowed():
+def test_default_budget_without_price_map_is_allowed():
     """没显式要求就不打扰 —— 退回 token 闸。"""
-    from aifix.cli import require_price_map_for_usd_budget
+    from aifix.cli import require_price_map_for_budget
     from aifix.config import AifixConfig
 
-    require_price_map_for_usd_budget(AifixConfig())   # 不抛即通过
+    require_price_map_for_budget(AifixConfig())   # 不抛即通过
 
 
-def test_explicit_usd_budget_with_price_map_is_allowed():
-    from aifix.cli import require_price_map_for_usd_budget
+def test_explicit_budget_with_price_map_is_allowed():
+    from aifix.cli import require_price_map_for_budget
     from aifix.config import AifixConfig
 
-    cfg = AifixConfig(budget_usd=0.6, price_map={"m": [0.001, 0.002]})
-    require_price_map_for_usd_budget(cfg)             # 不抛即通过
+    cfg = AifixConfig(budget_cny=0.6, price_map={"m": [0.001, 0.002]})
+    require_price_map_for_budget(cfg)             # 不抛即通过
 
 
 def test_cli_budget_flag_counts_as_explicit():
     """--budget 走的是 model_copy，也会被 model_fields_set 记住。"""
     from aifix.config import AifixConfig
 
-    cfg = AifixConfig().model_copy(update={"budget_usd": 0.6})
-    assert "budget_usd" in cfg.model_fields_set
+    cfg = AifixConfig().model_copy(update={"budget_cny": 0.6})
+    assert "budget_cny" in cfg.model_fields_set
 
 
 def test_eval_budget_flags():
@@ -205,7 +205,7 @@ def test_eval_total_help_states_the_overshoot_bound():
 
     只断言「并发数」三个字区分度太弱 —— 旧说法「并发数 - 1 个任务」和
     更正后的「并发数 × 一次模型调用」都含这三个字，测试对这次更正毫无
-    反应。旧说法是实测证伪的：total_usd=1.0、每任务 1.0、4 个任务、
+    反应。旧说法是实测证伪的：整批上限 1.0、每任务 1.0、4 个任务、
     parallel=4，按它算应该只花 $1.0，实际花掉 $4.00 且 4 个任务全跑满。
     """
     h = _sub_help("eval")            # 已删掉全部空白，断言串也不带空格
@@ -553,7 +553,7 @@ def test_replay_renders_the_run_and_never_fakes_a_zero_cost(repo, capsys):
     assert "apply_patch" in out
     assert "return a + b" in out, "补丁正文要在，否则复盘看不到改了什么"
     assert "$0.00" not in out
-    # 不带原因的「未知」：渲染器看到的只是 cost_usd 是 0，它不知道价格表
+    # 不带原因的「未知」：渲染器看到的只是这一步的成本是 0，它不知道价格表
     # 配没配（见 replay._COST_UNKNOWN）
     assert "成本：未知" in out
 

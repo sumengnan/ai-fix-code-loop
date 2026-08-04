@@ -118,7 +118,7 @@ def test_detect_node_actually_reads_the_files(repo, monkeypatch):
             return _gen()
 
     class _Outcome:
-        ok, text, events, tokens, cost_usd = False, "", [], 0, 0.0
+        ok, text, events, tokens, cost_cny = False, "", [], 0, 0.0
         event_times: list = []
 
     async def _consume(_gen, **kw):
@@ -150,7 +150,7 @@ def test_detect_node_actually_reads_the_files(repo, monkeypatch):
         "current": 0,
         "worktree_path": str(repo),
         "spent_tokens": 0,
-        "spent_usd": 0.0,
+        "spent_cny": 0.0,
     }
     asyncio.run(detect_mod.detect_node(state, client=object()))
     assert "line 50" in seen["prompt"], seen["prompt"][:400]

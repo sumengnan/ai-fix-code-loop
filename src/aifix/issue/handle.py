@@ -28,9 +28,10 @@ from ..delivery import COMMIT_EMAIL, COMMIT_NAME
 from ..traces import TRACES_BRANCH
 from ..nodes.report import count_fixed
 from ..progress import TerminalProgress
-from ..reproduce import (KIND_COST_CAPPED, KIND_EMPTY_ANSWER,
-                         KIND_MISSING_INFO, KIND_NO_CONVERGENCE,
-                         KIND_TRUNCATED, KIND_UNPARSEABLE, ReproduceOutcome)
+from ..reproduce import (KIND_CALL_FAILED, KIND_COST_CAPPED,
+                         KIND_EMPTY_ANSWER, KIND_MISSING_INFO,
+                         KIND_NO_CONVERGENCE, KIND_TRUNCATED,
+                         KIND_UNPARSEABLE, ReproduceOutcome)
 from .. import pending as pending_store
 from ..agents.fixer import format_answer
 from ..agents.reproducer import Reproduction
@@ -46,7 +47,7 @@ class HandleResult:
 
 
 # 「这次没跑成」的四种中止。口径必须与 `aifix run` 的退出码一致（见
-# cli._FAILED_RUN_KINDS）：预算耗尽（usd / tokens / wall）相反 —— 那是**正常
+# cli._FAILED_RUN_KINDS）：预算耗尽（cny / tokens / wall）相反 —— 那是**正常
 # 收场**，活干到钱花完为止，结论仍然可信，所以退 0。
 #
 # preflight 是 2026-08-01 的功能巡检补上的：漏掉它时，Actions 上一次「仓库
@@ -75,6 +76,7 @@ def _git(repo: Path, *args: str) -> str:
 _REPRO_HEADLINES = {
     KIND_MISSING_INFO: "**issue 信息不足，写不出复现测试。**",
     KIND_NO_CONVERGENCE: "**模型没能在预算内收敛，这一轮没有产出。**",
+    KIND_CALL_FAILED: "**模型调用本身失败了 —— 不是模型答不好，是这次调用没跑成。**",
     KIND_UNPARSEABLE: "**模型的输出解析不出复现测试。**",
     KIND_EMPTY_ANSWER: "**模型没有吐出任何正文，这一轮没有产出。**",
     KIND_TRUNCATED: "**这次模型调用中途断了，不是模型的问题。**",
@@ -123,7 +125,7 @@ def _trace_reproduce(repo: Path, run_id: str, out: Any) -> None:
 
 
 def _pr_body(state: dict[str, Any], target: str, issue_number: int,
-             repro_tokens: int = 0, repro_usd: float = 0.0) -> str:
+             repro_tokens: int = 0, repro_cny: float = 0.0) -> str:
     """PR 正文 = 报告 + 必要的背景。
 
     baseline 里有别的红时**必须出声**：那多半是 runner 的环境漂移，而它会
@@ -136,7 +138,7 @@ def _pr_body(state: dict[str, Any], target: str, issue_number: int,
     if repro_tokens:
         # 报告里的成本只统计 run_once 那一段。复现这一步在它之外发起调用，
         # 不单独写出来的话，这笔钱在**任何一份产物里都不存在**。
-        cost = "未知" if repro_usd <= 0 else f"${repro_usd:.4f}"
+        cost = "未知" if repro_cny <= 0 else f"¥{repro_cny:.4f}"
         parts += ["", f"（另：写复现测试花了 {repro_tokens:,} tokens、{cost}，"
                       f"已从上面那次 run 的额度里扣除。）"]
 
@@ -306,7 +308,7 @@ async def handle(
     # **复现那一步的花销要从后面的额度里扣掉。**
     #
     # 它在 run_once 之外发起调用，三层预算闸一分都管不到 —— 不扣的话，设
-    # AIFIX_BUDGET_USD=0.50 实际可能花掉两倍，而这个项目对预算的措辞是「越线
+    # AIFIX_BUDGET_CNY 设的上限实际可能花掉两倍，而这个项目对预算的措辞是「越线
     # 之后不再发起新的模型调用」，超支上界必须是可推导的。一个精确措辞但从没
     # 验证过的上界实际超支 4 倍，是这个仓库已经犯过一次的错。
     #
@@ -318,7 +320,7 @@ async def handle(
     # 直接杀进程，run_once 里那个「保证报告先落地」的 except 执行不到，跑了一
     # 个半小时什么都留不下。红检那一步跑的是真测试，耗时不是可以忽略的量。
     run_config = config.model_copy(update={
-        "budget_usd": max(0.0, config.budget_usd - out.cost_usd),
+        "budget_cny": max(0.0, config.budget_cny - out.cost_cny),
         "budget_tokens": max(0, config.budget_tokens - out.tokens),
         "budget_wall_seconds": max(
             0.0, config.budget_wall_seconds - (time.monotonic() - t0))})
@@ -367,7 +369,7 @@ async def handle(
     # run_once 内部已经保证「报告先落地再返回」（见 cli.run_once 的 except），
     # 所以这里不再包一层 try —— 包了只会把它已经处理好的结果再吞一次。
     body = _pr_body(state, r.target_test_id, ev.number,
-                    repro_tokens=out.tokens, repro_usd=out.cost_usd)
+                    repro_tokens=out.tokens, repro_cny=out.cost_cny)
     fixed = count_fixed(state.get("results") or [])
     crashed = state.get("abort_kind") == "crash"
     code = 1 if state.get("abort_kind") in _ENV_ABORTS else 0

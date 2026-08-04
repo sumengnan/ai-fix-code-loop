@@ -65,22 +65,35 @@ class Reproduction(BaseModel):
 
 
 def build_prompt(issue_title: str, issue_body: str, test_dirs: list[str],
-                 max_steps: int | None = None) -> str:
-    """测试目录由**适配器**给，不让模型猜。
+                 max_steps: int | None = None,
+                 example_id: str = "") -> str:
+    """测试目录与 id 样例都由**适配器**给，不让模型猜。
 
-    猜错的后果不是「路径不好看」：落在产品目录下的文件，「不许改测试文件」
-    那道守卫按 test_dirs 判定时不认它，于是修复阶段的 agent 可以随手改掉自己
-    的判卷标准。pytest 是 tests/，Maven 是 src/test/java —— 适配器已经知道
-    答案（见 ProjectAdapter.test_dirs），没有理由让模型再猜一次。
+    目录猜错的后果不是「路径不好看」：落在产品目录下的文件，「不许改测试文件」
+    那道守卫不认它，于是修复阶段的 agent 可以随手改掉自己的判卷标准。pytest 是
+    tests/，Maven 是 src/test/java —— 适配器已经知道答案，没有理由让模型再猜。
+
+    **id 样例是实测逼出来的**（2026-08-04，qwen-coder-plus 跑
+    ai-learning-helper#84）：系统提示词里只写「格式与本项目其余用例一致」，而
+    模型没见过本项目的 id，于是给出 unittest 方言 `TestC.test_x`。测试本身写得
+    完全正确，却被「id 要能追溯到 test_file」那道闸打回，整轮作废 —— 一次做对了
+    活却因为没人告诉它格式而白跑的失败。
+
+    样例给空串时整段不出现，而不是印一个「（未知）」：一个占位符对模型没有帮助，
+    只会占掉上下文。
     """
     dirs = "、".join(test_dirs) if test_dirs else "（未知）"
     # 把步数上限写进 prompt。不告诉它预算，它无从判断「该收手了」——
     # 实测（2026-07-30，issue #1）就是这么翻满 25 步、一个字没作答的。
     budget = (f"你最多还能调用 {max_steps} 次工具，用完必须作答。\n\n"
               if max_steps else "")
+    sample = (f"本项目的用例 id 长这样：{example_id}\n"
+              f"target_test_id **必须**用这个格式，而且要能对上你写下的那个文件。\n\n"
+              if example_id else "")
     return (
         f"本项目的测试目录：{dirs}\n"
         f"新测试文件必须写在其中之一的下面。\n\n"
+        f"{sample}"
         f"{budget}"
         f"缺陷报告标题：{issue_title}\n\n"
         f"<issue>\n{issue_body}\n</issue>\n")
@@ -105,22 +118,36 @@ def _path_is_safe(p: str, is_test: Callable[[str], bool]) -> bool:
     return is_test(p)
 
 
-def _is_coherent(r: Reproduction, is_test: Callable[[str], bool]) -> bool:
-    """字段之间自洽吗。不自洽一律当解析失败，走「写不出复现」那条通路。"""
+def _incoherence(r: Reproduction, is_test: Callable[[str], bool]) -> str:
+    """字段之间哪里不自洽 —— 自洽返回空串。
+
+    返回**理由**而不是布尔：不自洽与「JSON 坏了」此前共用一个 `None`，于是回帖
+    统一写「模型的输出不合约定的 JSON 格式」。实测（2026-08-04，qwen-coder-plus
+    跑 ai-learning-helper#84）那句话是假的 —— JSON 五个字段齐全、解析完好，真正
+    卡住的是 `target_test_id` 用了 unittest 方言。照着那句话去看「它吐了什么」，
+    看到的是一段格式完美的 JSON。
+
+    两者该给的下一步完全不同：JSON 坏了要换模型 / 看输出，字段不自洽要把格式
+    在提示词里说死。合成一句等于**指错方向的诊断** —— 这个项目把它看得比崩溃还重。
+    """
     if not r.can_reproduce:
         # 说不出缺什么的放弃，回帖会是一句没有信息的废话，而那段说明是
         # 这条通路唯一的产出。
-        return bool(r.missing_info)
+        return "" if r.missing_info else "说了写不出，却没说缺什么"
 
     if not (r.test_file and r.test_code and r.target_test_id):
         # 缺任何一项，下游都会以「跑了个空」收场：没有 target_test_id 就
         # 没有用例可跑，没有 test_code 就写出一个空文件 —— pytest 收集不到
         # 用例时以退出码 5 结束，而那个形态和「测试红了」区分不开。一次从未
         # 被执行过的复现会被读成复现成功。
-        return False
+        missing = [n for n, v in (("test_file", r.test_file),
+                                  ("test_code", r.test_code),
+                                  ("target_test_id", r.target_test_id)) if not v]
+        return f"缺字段：{'、'.join(missing)}"
 
     if not _path_is_safe(r.test_file, is_test):
-        return False
+        return (f"test_file `{r.test_file}` 不是一个合法的测试文件路径"
+                "（要相对、不含 `..`、且被适配器认作测试文件）")
 
     # target_test_id 要能追溯到 test_file，否则写下去的是 A、跑起来的是 B，
     # 而 B 可能是仓库里本来就红的某个用例 —— 「复现成功」量的成了别人的失败。
@@ -134,14 +161,37 @@ def _is_coherent(r: Reproduction, is_test: Callable[[str], bool]) -> bool:
     # 子串，裸子串会放行 —— 于是写下去的是 A、红检跑的是 B，而 B 若恰好是仓库
     # 里本来就红的用例，红检通过、fixer 被派去修它，issue 里那个 bug 一个字没动。
     stem = PurePosixPath(r.test_file).stem
-    return re.search(rf"(?<!\w){re.escape(stem)}(?!\w)",
-                     r.target_test_id) is not None
+    if re.search(rf"(?<!\w){re.escape(stem)}(?!\w)", r.target_test_id):
+        return ""
+    return (f"target_test_id `{r.target_test_id}` 追溯不到 test_file "
+            f"`{r.test_file}`（文件名主干 `{stem}` 不在里面）—— "
+            "多半是 id 用了别家的方言")
 
 
 def parse_reproduction(raw: str, is_test: Callable[[str], bool]) -> Reproduction | None:
     """解析失败返回 None —— 这是降级信号，调用方据此走「写不出复现」通路。
 
     与 parse_diagnosis 同款的围栏容错：有些端点会在 JSON 外包一层解释文字。
+
+    **要知道为什么失败的调用方用 `parse_reproduction_ex`。** 这个薄壳留着是因为
+    绝大多数调用点（测试、命令行那侧）只关心成不成。
+    """
+    return parse_reproduction_ex(raw, is_test)[0]
+
+
+def parse_reproduction_ex(
+        raw: str, is_test: Callable[[str], bool],
+) -> tuple[Reproduction | None, str]:
+    """解析并**说清楚为什么不成**：`(结果, 理由)`，成功时理由是空串。
+
+    分两类，因为下一步完全不同：
+
+    - **JSON 本身不成立** —— 换模型、看它到底吐了什么
+    - **字段之间不自洽** —— 把格式在提示词里说死（`example_test_id` 就是为此加的）
+
+    合成一句的代价是实测过的（2026-08-04）：qwen 给出的 JSON 五个字段齐全、解析
+    完好，只是 `target_test_id` 用了 unittest 方言，而回帖写的是「模型的输出不合
+    约定的 JSON 格式」—— 照着那句话去查，看到的是一段格式完美的 JSON。
     """
     for text in (raw, _last_object(raw)):
         if text is None:
@@ -150,8 +200,9 @@ def parse_reproduction(raw: str, is_test: Callable[[str], bool]) -> Reproduction
             r = Reproduction.model_validate_json(text)
         except ValidationError:
             continue
-        return r if _is_coherent(r, is_test) else None
-    return None
+        why = _incoherence(r, is_test)
+        return (None, why) if why else (r, "")
+    return None, "输出里找不到一个能解析的 JSON 对象"
 
 
 def _last_object(raw: str) -> str | None:

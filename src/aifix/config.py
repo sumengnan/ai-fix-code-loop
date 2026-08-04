@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import sys
 from typing import Annotated
 
 from harness.config import HarnessConfig
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from .money import CNY, CURRENCIES, DEFAULT_USD_TO_CNY, USD, Money
 
 
 class AifixConfig(BaseSettings):
@@ -55,8 +58,21 @@ class AifixConfig(BaseSettings):
 
     # 扁平价表：{模型名: [输入价/1k, 输出价/1k]}。注意**不是**分档表
     # （[[上限, 输入, 输出], ...]），两者不通用。不配就算不出成本 ——
-    # 报告里会明写"未配置价格表"，而不是显示一个假的 $0.00。
+    # 报告里会明写"未配置价格表"，而不是显示一个假的 ¥0.00。
     price_map: dict[str, list[float]] = Field(default_factory=dict)
+
+    # 价表按哪种货币填：USD（默认）或 CNY。**只影响价表怎么读**，不影响别的
+    # 任何东西 —— 预算、闸、报告、库里的数一律是人民币（见 money.py）。
+    #
+    # 默认 USD 是为了「抄过来就能用」：厂商公开的价目表几乎都是美元/千 token，
+    # 逼着人先乘一遍汇率再填，等于把一次手算错小数点的机会写进配置流程。
+    # 手里拿的是国内厂商的人民币报价时设成 CNY，那时汇率完全不参与计算。
+    price_currency: str = USD
+    # 美元价表折人民币的汇率。写死可配的约数，不是实时值 —— 理由见
+    # money.DEFAULT_USD_TO_CNY 那段：实时汇率会让同一批 eval 隔天跑出来的
+    # 成本不可比，而这套预算存在的意义正是跨模型、跨时间比。
+    # price_currency=CNY 时这个值一次都用不到。
+    usd_to_cny: float = DEFAULT_USD_TO_CNY
 
     # 额外获准触发 aifix 的 GitHub 登录名（`AIFIX_ALLOWED_USERS`，逗号分隔）。
     #
@@ -99,6 +115,24 @@ class AifixConfig(BaseSettings):
     def _empty_means_unset(cls, v):
         if isinstance(v, str) and v.strip().lower() in ("", "null", "none"):
             return None
+        return v
+
+    @field_validator("price_currency", mode="before")
+    @classmethod
+    def _known_currency(cls, v):
+        """只认 USD / CNY，大小写随意。
+
+        拼错时**必须报错**，不能悄悄退回默认：`AIFIX_PRICE_CURRENCY=RMB` 被
+        当成 USD 的话，一份人民币价表会被再乘一遍汇率，账目整体虚高 7 倍，
+        而闸照常工作、报告照常渲染，没有任何一处看得出不对。
+        """
+        if isinstance(v, str):
+            v = v.strip().upper()
+            if v in ("RMB", "￥", "¥", "CNH"):      # 常见的另一种写法
+                v = CNY
+        if v not in CURRENCIES:
+            raise ValueError(
+                f"price_currency 只能是 {' / '.join(CURRENCIES)}，得到 {v!r}")
         return v
 
     @field_validator("price_map", mode="before")
@@ -217,9 +251,46 @@ class AifixConfig(BaseSettings):
     # 共用的话要么局部等太久（挂死时白等半小时），要么全量被局部的尺度掐掉。
     scoped_test_timeout_seconds: float = 600.0
 
-    budget_usd: float = 2.0
+    # 本次 run 的人民币上限（`AIFIX_BUDGET_CNY`）。默认 15 元 —— 换币种之前
+    # 这里是 $2.0，按 7.2 折约 ¥14.4，取整到 15 而不是留一个 14.4：默认值是
+    # 给人看的，一个带小数的默认值会被当成精算过的结果去解读。
+    budget_cny: float = 15.0
+    # 旧名 `AIFIX_BUDGET_USD`。**仍按美元解释**，读到就折成人民币填进
+    # budget_cny（见下面的验证器）。
+    #
+    # 不把它直接当人民币读，是因为那是一次**静默的 7 倍缩水**：已经在 CI 里
+    # 写着 `AIFIX_BUDGET_USD: 2.0` 的仓库会突然变成 ¥2 的上限，表现是「模型
+    # 最近怎么老是没修完就说预算耗尽」——一句没有人会联想到货币变更的报错。
+    budget_usd: float | None = None
     budget_tokens: int = 500_000
     budget_wall_seconds: float = 1800.0
+
+    @model_validator(mode="after")
+    def _legacy_budget_usd(self):
+        """把旧的美元上限折成人民币，并出声。"""
+        if self.budget_usd is None:
+            return self
+        if "budget_cny" in self.model_fields_set:
+            raise ValueError(
+                "AIFIX_BUDGET_USD 与 AIFIX_BUDGET_CNY 不要同时设："
+                "两个上限一个是美元一个是人民币，谁生效只能靠猜。"
+                "留下 AIFIX_BUDGET_CNY 那个。")
+        rate = self.money.usd_to_cny
+        self.budget_cny = self.budget_usd * rate
+        # 补进 fields_set：cli.require_price_map_for_budget 靠它判断「用户是不是
+        # 真的要了一道成本闸」。不补的话，只设了旧变量的仓库会绕过那道检查，
+        # 于是「设了上限却没有价格表」重新变成一次静默失效。
+        self.model_fields_set.add("budget_cny")
+        print(f"AIFIX_BUDGET_USD 已改名为 AIFIX_BUDGET_CNY（结算货币改为人民币）。"
+              f"这次仍按美元读：${self.budget_usd:g} × {rate:g} = "
+              f"¥{self.budget_cny:g}。", file=sys.stderr)
+        return self
+
+    @property
+    def money(self) -> Money:
+        """价表货币 → 人民币的折算规则。**别在别处自己拼一个**（见 money.Money）。"""
+        return Money(price_currency=self.price_currency,
+                     usd_to_cny=self.usd_to_cny)
 
     max_attempts: int = 3
     # 信息不全时允不允许 agent 停下来问人（`ask_user` 工具）。
@@ -295,14 +366,14 @@ class AifixConfig(BaseSettings):
     # 制——而它们的下一步动作不同（调步数 vs 换模型）。
     #
     # 250k 是配合 25 步的余量，让 steps 成为唯一的约束：那样「用满步数没答出来」
-    # 才是一句干净的结论。代价要说清楚 —— 按 pro 的价目这一步跑满约 $1，但它
+    # 才是一句干净的结论。代价要说清楚 —— 按 pro 的价目这一步跑满约 ¥7，但它
     # **会从后面修复那一步的额度里扣掉**（见 issue/handle.py 里那段），所以花的
     # 不是额外的钱，是同一份预算里更靠前的一段。
     reproducer_max_tokens: int = 250_000
     # 复现这一步最多能用掉整份预算的几成。**没有这一条，扣减会把修复步饿死。**
     #
-    # 实测（2026-07-30，issue #2，pro 跑 25 步）：复现把 AIFIX_BUDGET_USD=0.50
-    # 全吃光，run_once 拿到 $0、当场中止，报告只写「美元预算耗尽：$0 / $0」——
+    # 实测（2026-07-30，issue #2，pro 跑 25 步，当时的币种是美元）：复现把 0.50
+    # 的上限全吃光，run_once 拿到 0、当场中止，报告只写「预算耗尽：0 / 0」——
     # 一句看不出是被前一步吃光的话。扣减本身是对的（不扣就超支），错的是**没有
     # 分配**：没有任何东西保证后面那一步还剩下钱。
     #
@@ -336,7 +407,8 @@ class AifixConfig(BaseSettings):
     #
     # 默认**关**，与必要性反查相反。三条理由：
     # 1. 它要发一次真实的模型调用，花的是钱不是墙钟，而这个项目的其它信号层
-    #    全是零成本的 —— 默认给所有人加一笔开销不合适。
+    #    全是零成本的 —— 默认给所有人加一笔开销不合适。它的花销与别处同尺，
+    #    一并计入 `budget_cny` 那道闸。
     # 2. 它的产出是这几层里唯一**不可复现**的：同一个补丁两次跑可能给不同的
     #    判断。默认开着会让「报告为什么这次多了一节」变成一个没法回答的问题。
     # 3. 它只在配了独立的 `reviewer` 路由（最好是与 fixer 不同的模型）时才有

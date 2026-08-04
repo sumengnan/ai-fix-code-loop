@@ -224,8 +224,16 @@ GitHub 的评论正文用 **CRLF**。按 `\n` 切完第一行是 `"/aifix\r"`，
 
 - **没人在等**（不是命令、是 PR、是 bot）→ 静默。回帖等于每条闲聊都被机器人怼一句
   「这不是命令」，比不回还糟。
-- **有人在等**（看起来是命令，但权限不够）→ **必须出声**。静默丢弃会让人以为它已经在
-  跑了。
+- **有人在等**（看起来是命令，但权限不够 / 命令写歪了）→ **必须出声**。静默丢弃会让人
+  以为它已经在跑了。
+
+「命令写歪了」这一条是实测撞出来的：`/aifix 重跑一下把 PR 开出来` 让 workflow 的 `if:`
+（用的是 `startsWith`）**起了 job**、装完全套依赖，然后在 `authorize` 里被丢掉 —— 没有
+评论、没有 reaction，issue 上一点痕迹都没有。
+
+判据是**第一行有没有以 `/aifix` 开头**：开了头就说明这个人确实在下命令，只是格式不对
+（第一行必须**恰好**是 `/aifix` 或 `/aifix <编号>`，想说的话写在第二行往后）；没开头的
+仍然一个字不回。
 
 ---
 
@@ -298,7 +306,7 @@ GitHub 的评论正文用 **CRLF**。按 `\n` 切完第一行是 `"/aifix\r"`，
 最后一条是**实测逼出来的**。issue #9 的真跑里，模型写的复现用了 `pytest.raises` 却没有
 `import pytest`，测试红在自己的 `NameError` 上 —— 模块 import 正常（不是收集错误）、用例
 跑了、用例也确实红了，三道闸逐条放行。fixer 于是对着一个假靶子改了两轮、
-**$1.45 / 468k tokens**，两轮都引入回归、都被三态判决回滚。最后给人的报告是「没修好」，
+**$1.45 / 468k tokens**（当时的币种是美元，≈ ¥10.4），两轮都引入回归、都被三态判决回滚。最后给人的报告是「没修好」，
 而报告里没有任何一句话指向真正的原因。
 
 判据是**异常抛在哪，不是异常是什么类型**：
@@ -319,7 +327,7 @@ GitHub 的评论正文用 **CRLF**。按 `\n` 切完第一行是 `"/aifix\r"`，
 拿不到栈帧时一律放行。把「没有证据」当成「有罪的证据」，会让这道闸在自己瞎掉的时候变得
 最严厉，而那正是最不该拦人的时候。
 
-### 七种收场，七套措辞
+### 八种收场，八套措辞
 
 「没能写出复现测试」这一句话下面藏着完全不同的下一步动作，所以分开报：
 
@@ -327,13 +335,14 @@ GitHub 的评论正文用 **CRLF**。按 `\n` 切完第一行是 `"/aifix\r"`，
 |---|---|---|
 | `missing_info` | issue 信息不足，模型如实说了缺什么 | **人** 去补充 issue |
 | `no_convergence` | 模型翻了一堆文件就是不作答（步数/token 用尽） | **运维**：调 `REPRODUCER_MAX_STEPS` / 换模型 |
-| `unparseable` | 输出不合约定格式 | 运维：看 trace / 换模型 |
+| `call_failed` | 模型调用**本身**失败（端点报错、凭据不对、网络断） | 查端点与凭据，或重试 —— 调上限无效 |
+| `unparseable` | 输出不合约定格式，**或字段之间不自洽** | 前者看 trace / 换模型；后者把格式在提示词里说死 |
 | `empty_answer` | 正文一个字都没有 | 运维：推理型模型把输出预算全烧在推理里了，换个推理更短的 |
 | `truncated` | 流在某一步中途断了，这次调用没跑完 | 重试，或查端点是不是在长响应上掐流 |
-| `cost_capped` | 撞上**我们自己**的美元闸 | 调预算 |
+| `cost_capped` | 撞上**我们自己**的成本闸 | 调预算 |
 | `ok` | 有了一条可用的复现测试 | — |
 
-这七类是实测逼出来的。第一次真跑时沿用 fixer 的步数，模型翻了 25 步没吐 JSON，而回帖说的
+这八类是实测逼出来的。第一次真跑时沿用 fixer 的步数，模型翻了 25 步没吐 JSON，而回帖说的
 是「没能写出复现测试」—— **一句会让人去改 issue 的话，而改 issue 根本不解决问题**。
 
 `truncated` 与 `cost_capped` 的事件签名**一模一样**（都没有 `RunFinished`），必须先判后者，
@@ -345,15 +354,15 @@ GitHub 的评论正文用 **CRLF**。按 `\n` 切完第一行是 `"/aifix\r"`，
 
 ### 复现这一步的花销要从后面扣掉
 
-它在 `run_once` **之外**发起调用，三层预算闸一分都管不到。不扣的话设 `BUDGET_USD=0.50`
+它在 `run_once` **之外**发起调用，三层预算闸一分都管不到。不扣的话设 `BUDGET_CNY=3.5`
 实际可能花掉两倍。
 
-三样都扣：美元、token、墙钟。而且**都夹到 0，不允许负数** —— 负数会让「还剩多少」的比较
+三样都扣：金额、token、墙钟。而且**都夹到 0，不允许负数** —— 负数会让「还剩多少」的比较
 全部反向。
 
 同时它自己也有一道闸：最多用掉整份预算的 `reproducer_budget_share`（默认 0.4）。没有这
-一条的话，**扣减会把修复步饿死** —— 实测：复现把 $0.50 全吃光，`run_once` 拿到 $0 当场中止，
-报告只写「美元预算耗尽：$0 / $0」，一句看不出是被前一步吃光的话。
+一条的话，**扣减会把修复步饿死** —— 实测（当时的币种是美元）：复现把 0.50 全吃光，`run_once` 拿到 0 当场中止，
+报告只写「预算耗尽：0 / 0」，一句看不出是被前一步吃光的话。
 
 ---
 
@@ -453,14 +462,14 @@ gh secret set AIFIX_DETECTOR_API_KEY
 gh variable set AIFIX_FIXER__MODEL    --body qwen3-coder-flash
 gh variable set AIFIX_DETECTOR__MODEL --body qwen3-coder-flash
 gh variable set AIFIX_PRICE_MAP       --body '{"qwen3-coder-flash": [0.0003, 0.0012]}'
-gh variable set AIFIX_BUDGET_USD      --body 2.0
+gh variable set AIFIX_BUDGET_CNY      --body 15.0
 
 # 可选：额外获准触发的人（默认已放行所有者/协作者/组织成员）
 gh variable set AIFIX_ALLOWED_USERS   --body "alice,bob"
 ```
 
 **模型名和价格表要用 variable 不用 secret**：它们不是机密，而 secret 在日志里会被遮成
-`***` —— 跑错模型时你从日志里根本看不出来，而没配价格表的后果是美元闸永远不触发。
+`***` —— 跑错模型时你从日志里根本看不出来，而没配价格表的后果是成本闸永远不触发。
 
 **variable 名与环境变量同名**：设什么就是什么，不用记一层映射。换模型因此不必改 workflow
 文件 —— 而改它要合进默认分支才生效，一次换模型要走一次提交、评审、合并，那个摩擦足以让人
@@ -615,7 +624,7 @@ ground truth 自带 —— 与 `aifix mine` 同一个思路，只是量的是复
 | 「模型端点不可达」 | 先跑 `aifix-connectivity.yml`。最常见的是端点有 IP 白名单 |
 | 一整批 collection error | 没配 `AIFIX_TEST_PYTHON`，或者目标项目的测试环境步骤没填 |
 | PR 没开成，报 *not permitted to create and approve pull requests* | Settings → Actions → General → Workflow permissions 那一格没勾 |
-| 复现这一步报「撞上了它自己的美元闸」 | 调大 `AIFIX_BUDGET_USD` 或 `AIFIX_REPRODUCER_BUDGET_SHARE`。这个数随**目标仓库规模**走，不是通用值 |
+| 复现这一步报「撞上了它自己的成本闸」 | 调大 `AIFIX_BUDGET_CNY` 或 `AIFIX_REPRODUCER_BUDGET_SHARE`。这个数随**目标仓库规模**走，不是通用值 |
 | 复现这一步报「模型没有吐出任何正文」 | 推理型模型把输出预算全烧在推理里了。`AIFIX_REPRODUCER_THINKING` 默认已经是 `false`，确认它没被空串覆盖成「随端点默认」 |
 | Actions 跑了一小时什么都没留下 | job 的 `timeout-minutes` 没有显著大于 `AIFIX_BUDGET_WALL_SECONDS` |
 

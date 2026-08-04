@@ -103,7 +103,7 @@ def test_the_test_interpreter_is_explicit_not_probed():
 
 def test_the_price_map_is_a_variable_not_a_secret():
     """放进 secret 会被日志遮蔽成 ***，你反而看不出它配没配对 —— 而没配价格表
-    的后果是美元闸永远不触发。这个项目为「假的 $0.00」栽过三次。"""
+    的后果是成本闸永远不触发。这个项目为「假的 0.00」栽过三次。"""
     assert "vars.AIFIX_PRICE_MAP" in _RAW
     assert "secrets.AIFIX_PRICE_MAP" not in _RAW
 

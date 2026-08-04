@@ -25,8 +25,14 @@ _DIAG = json.dumps({
 # （不是空串 —— 写错的话 effective_cost 匹配不到价表、成本恒为 0，
 # 成本闸的测试会全部沦为空转而依然「通过」）。
 # 单价定得极高：effective_cost = 输入/1k×价 + 输出/1k×价，
-# Usage(10,5,15) 配 [1000,1000] 恰好是 10+5=15 美元，一次调用就越线。
+# Usage(10,5,15) 配 [1000,1000] 恰好是 10+5=15，一次调用就越线。
+#
+# 价表按**人民币**填（配套 _CNY_TABLE）：这一组测试要钉的是闸的算术 ——
+# 谁先越线、超支上界是多少、额度怎么分 —— 折算是另一回事，已经在
+# test_agent_runner 里单独钉过。混进一个 7.2 只会让每一条断言都要先在
+# 心里做一次除法。
 _PRICEY = {"gpt-4o-mini": [1000.0, 1000.0]}
+_CNY_TABLE = {"price_map": _PRICEY, "price_currency": "CNY"}
 
 
 class _Scripted:
@@ -53,19 +59,19 @@ def _tool(name, args, usage=Usage(10, 5, 15)):
             StreamChunk(type="done", usage=usage)]
 
 
-# 配 _PRICEY 时成本 = 输入 + 输出（每千 token 1000 美元）。取几个互不相同的
+# 配 _PRICEY 时成本 = 输入 + 输出（每千 token 1000 元）。取几个互不相同的
 # 数额，好让「哪一笔钱花在哪儿」在断言里可以逐笔对上。
-_USD10 = Usage(6, 4, 10)
-_USD15 = Usage(10, 5, 15)
-_USD30 = Usage(20, 10, 30)
+_U10 = Usage(6, 4, 10)
+_U15 = Usage(10, 5, 15)
+_U30 = Usage(20, 10, 30)
 
 
-async def test_usd_budget_stops_the_run(buggy_repo):
-    """极小的美元额度 —— fix 不该跑满，报告要如实说没修好。"""
+async def test_cost_budget_stops_the_run(buggy_repo):
+    """极小的金额额度 —— fix 不该跑满，报告要如实说没修好。"""
     fixer = _Scripted([_tool("apply_patch", json.dumps({"diff": _PATCH})),
                        _text("已修复")])
     state = await run_once(
-        buggy_repo, AifixConfig(budget_usd=0.0001, price_map=_PRICEY),
+        buggy_repo, AifixConfig(budget_cny=0.0001, **_CNY_TABLE),
         run_id="cap1",
         detector_client=_Scripted([_text(_DIAG)]), fixer_client=fixer)
     # 钉死具体判定而不是 `!= "better"`：否定式断言连 "worse"（把别的用例
@@ -77,7 +83,7 @@ async def test_usd_budget_stops_the_run(buggy_repo):
 async def test_generous_budget_lets_it_finish(buggy_repo):
     """对照组：额度足够时行为不变，证明上面那条测的是闸不是别的。"""
     state = await run_once(
-        buggy_repo, AifixConfig(budget_usd=1000.0, price_map=_PRICEY),
+        buggy_repo, AifixConfig(budget_cny=1000.0, **_CNY_TABLE),
         run_id="cap2",
         detector_client=_Scripted([_text(_DIAG)]),
         fixer_client=_Scripted([_tool("apply_patch",
@@ -97,7 +103,7 @@ async def test_budget_abort_still_records_in_flight_failure(buggy_repo):
     fixer = _Scripted([_tool("apply_patch", json.dumps({"diff": _PATCH})),
                        _text("已修复")])
     state = await run_once(
-        buggy_repo, AifixConfig(budget_usd=0.0001, price_map=_PRICEY),
+        buggy_repo, AifixConfig(budget_cny=0.0001, **_CNY_TABLE),
         run_id="cap3",
         detector_client=_Scripted([_text(_DIAG)]), fixer_client=fixer)
     rows = [r for r in state["results"]
@@ -126,14 +132,14 @@ async def test_detect_spend_shrinks_the_budget_fix_gets(buggy_repo):
     额度这个具体数字与「熔断有没有发生」这个行为，两条都钉住。
     """
     state = await run_once(
-        buggy_repo, AifixConfig(budget_usd=50.0, price_map=_PRICEY),
+        buggy_repo, AifixConfig(budget_cny=50.0, **_CNY_TABLE),
         run_id="alloc1",
-        detector_client=_Scripted([_text(_DIAG, usage=_USD10)]),
+        detector_client=_Scripted([_text(_DIAG, usage=_U10)]),
         fixer_client=_Scripted([
-            _tool("apply_patch", json.dumps({"diff": _PATCH}), usage=_USD15),
-            _text("已修复", usage=_USD30)]))
+            _tool("apply_patch", json.dumps({"diff": _PATCH}), usage=_U15),
+            _text("已修复", usage=_U30)]))
 
-    assert state["failure_usd_budget"] == pytest.approx(40.0), (
+    assert state["failure_cny_budget"] == pytest.approx(40.0), (
         "fix 拿到的额度必须是扣掉 detect 那 $10 之后的 $40，而不是整份 $50")
     assert state["cost_capped"] is True, (
         "$45 已经越过 $40 的额度，fix 必须在那一刻熔断；"
@@ -218,20 +224,20 @@ async def test_abort_does_not_credit_a_failure_that_never_ran(two_bugs_repo):
     """
     fixer = _Scripted([_tool("apply_patch",
                              json.dumps({"diff": _TWO_BUGS_PATCH}),
-                             usage=_USD15),
-                       _text("已修复", usage=_USD30)])
+                             usage=_U15),
+                       _text("已修复", usage=_U30)])
     state = await run_once(
-        two_bugs_repo, AifixConfig(budget_usd=50.0, price_map=_PRICEY),
+        two_bugs_repo, AifixConfig(budget_cny=50.0, **_CNY_TABLE),
         run_id="two1",
-        detector_client=_Scripted([_text(_DIAG, usage=_USD10)]),
+        detector_client=_Scripted([_text(_DIAG, usage=_U10)]),
         fixer_client=fixer)
 
-    assert state["abort_kind"] == "usd", "前提没成立：这一轮不是被美元闸掐断的"
+    assert state["abort_kind"] == "cny", "前提没成立：这一轮不是被成本闸掐断的"
     # RunBudget 记的账必须与 state 记的账逐分对上。detect 与 fix 现在分两笔
     # charge，重复计入或遗漏都只会体现成一个错的数字、不会报错 —— 这里把
     # 两本账钉在一起：$10（detect）+ $15 + $30（fix）= $55，一分不多一分不少。
-    assert state["spent_usd"] == pytest.approx(55.0)
-    assert "$55.00 / $50.00" in state["abort"], (
+    assert state["spent_cny"] == pytest.approx(55.0)
+    assert "¥55.00 / ¥50.00" in state["abort"], (
         f"RunBudget 的账与 state 对不上：{state['abort']}")
     fixed = [r for r in state["results"]
              if r["test_id"] == "tests/test_calc.py::test_add"]

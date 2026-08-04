@@ -4,7 +4,7 @@ from aifix.eval.task import TaskResult
 
 def _r(**over):
     base = dict(task_id="t", model="M", locate_hit=True, suspect_file="a.py",
-                verdict="better", attempts=1, tokens=1000, cost_usd=0.10,
+                verdict="better", attempts=1, tokens=1000, cost_cny=0.10,
                 violations=0)
     base.update(over)
     return TaskResult(**base)
@@ -70,9 +70,9 @@ def test_empty_input():
 
 
 def test_averages_and_totals():
-    s = summarize([_r(cost_usd=0.10, attempts=1, violations=2, signals=3),
-                   _r(cost_usd=0.30, attempts=3, violations=1, signals=4)])
-    assert abs(s.avg_cost_usd - 0.20) < 1e-9
+    s = summarize([_r(cost_cny=0.10, attempts=1, violations=2, signals=3),
+                   _r(cost_cny=0.30, attempts=3, violations=1, signals=4)])
+    assert abs(s.avg_cost_cny - 0.20) < 1e-9
     assert abs(s.avg_attempts - 2.0) < 1e-9
     assert s.violations == 3, "越界是总数不是均值 —— 关心的是有没有、有几次"
     assert s.signals == 7, "可疑信号也是总数不是均值，理由同越界尝试"
@@ -93,49 +93,49 @@ def test_table_has_one_row_per_model():
 
 
 def test_zero_cost_with_tokens_spent_renders_as_unknown():
-    """没配价格表时成本恒为 0，显示假的 $0.000 比不显示更糟。
+    """没配价格表时成本恒为 0，显示假的 ¥0.000 比不显示更糟。
 
     验收命令只设 API_KEY / BASE_URL / MODEL，不设 AIFIX_PRICE_MAP ——
     第一张跨模型对比表的成本列两行都会是 0，读起来像「极其便宜」，
     而不是「没数据」。report.py 早就这么处理了，score.py 不能再犯。
     """
-    md = render_table([summarize([_r(cost_usd=0.0, tokens=12_345)])])
-    assert "$0.000" not in md
+    md = render_table([summarize([_r(cost_cny=0.0, tokens=12_345)])])
+    assert "¥0.000" not in md
     assert "未知" in md and "AIFIX_PRICE_MAP" in md
 
 
 def test_zero_cost_without_tokens_is_a_real_zero():
     """一个 token 都没花（全 dry-run / 全出错）时，0 元就是 0 元。"""
-    md = render_table([summarize([_r(cost_usd=0.0, tokens=0)])])
+    md = render_table([summarize([_r(cost_cny=0.0, tokens=0)])])
     assert "未知" not in md
 
 
 def test_cost_column_keeps_four_decimals():
-    """成本列固定 4 位小数，不能复用 budget.fmt_usd。
+    """成本列固定 4 位小数，不能复用 money.fmt_cny。
 
-    fmt_usd 是给预算总额设计的，对成本列典型落在的 1~10 分区间精度
-    不够 —— 会把 $0.0201 和 $0.0249 都压成 $0.02。跨模型成本对比表
+    fmt_cny 是给预算总额设计的，对成本列典型落在的 1~10 分区间精度
+    不够 —— 会把 ¥0.0201 和 ¥0.0249 都压成 ¥0.02。跨模型成本对比表
     最需要看的正是这一位，所以这里必须固定 4 位小数并且能分辨出来。
     """
-    md = render_table([summarize([_r(model="A", cost_usd=0.0201)]),
-                       summarize([_r(model="B", cost_usd=0.0249)])])
-    assert "$0.0201" in md, md
-    assert "$0.0249" in md, md
+    md = render_table([summarize([_r(model="A", cost_cny=0.0201)]),
+                       summarize([_r(model="B", cost_cny=0.0249)])])
+    assert "¥0.0201" in md, md
+    assert "¥0.0249" in md, md
 
 
 def test_cost_column_width_matches_across_rows():
     """两个量级的成本要能对齐着看，不能出现科学计数法。"""
-    md = render_table([summarize([_r(cost_usd=0.1)]),
-                       summarize([_r(cost_usd=0.000012)])])
+    md = render_table([summarize([_r(cost_cny=0.1)]),
+                       summarize([_r(cost_cny=0.000012)])])
     assert "e-" not in md, md
-    assert "$0.1000" in md, md
-    assert "$0.0000" in md, md
+    assert "¥0.1000" in md, md
+    assert "¥0.0000" in md, md
 
 
 def test_table_shows_fraction_and_interval():
     """1/1 的 100% 必须在表格里就能看出「只有一个样本」。"""
     r = TaskResult(task_id="t", model="m", locate_hit=True, suspect_file="a.py",
-                   verdict="better", attempts=1, tokens=10, cost_usd=0.1,
+                   verdict="better", attempts=1, tokens=10, cost_cny=0.1,
                    violations=0)
     table = render_table([summarize([r])])
     assert "100% (1/1" in table
@@ -147,7 +147,7 @@ def test_table_shows_fraction_and_interval():
 def test_zero_valid_tasks_renders_dash_not_zero_percent():
     """全是评测故障时，比率没有意义，不能显示 0%（会被读成「一个都没修好」）。"""
     r = TaskResult(task_id="t", model="m", locate_hit=False, suspect_file=None,
-                   verdict="same", attempts=0, tokens=0, cost_usd=0.0,
+                   verdict="same", attempts=0, tokens=0, cost_cny=0.0,
                    violations=0, error="克隆失败")
     table = render_table([summarize([r])])
     assert "0%" not in table
@@ -169,10 +169,10 @@ def test_table_renders_avg_tokens_column():
     消耗量信息 —— report.py 的同款处理带了 `（{tokens:,} tokens）`，
     对比表不能比单任务报告少这个信息。
 
-    用没配价格表（cost_usd 恒为 0、tokens>0）的场景验证：这正是最需要
+    用没配价格表（成本恒为 0、tokens>0）的场景验证：这正是最需要
     tokens 列兜底的情形。
     """
-    s = summarize([_r(cost_usd=0.0, tokens=12_345)])
+    s = summarize([_r(cost_cny=0.0, tokens=12_345)])
     md = render_table([s])
     assert "平均 tokens" in md, md
     row = md.strip().splitlines()[-1]

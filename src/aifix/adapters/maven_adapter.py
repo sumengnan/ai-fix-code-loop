@@ -150,6 +150,10 @@ class MavenAdapter:
             return name
         return f"{classname}#{name}" if name else classname
 
+    def example_test_id(self) -> str:
+        """surefire 的 `-Dtest=` 只认全限定类名，与文件路径毫无关系。"""
+        return "com.example.CalcTest#addWorks"
+
     def is_file_level_id(self, test_id: str) -> bool:
         """类级 id 就是裸的全限定类名，用例 id 一定带 `#方法`。
 

@@ -25,7 +25,7 @@ aifix
 ## `aifix run`
 
 ```
-aifix run [repo] [--test TEST_ID] [--budget USD] [--dry-run] [--quiet]
+aifix run [repo] [--test TEST_ID] [--budget CNY] [--dry-run] [--quiet]
 ```
 
 主命令。跑一遍完整循环：preflight → baseline → (detect → fix → verify)* → report。
@@ -34,7 +34,7 @@ aifix run [repo] [--test TEST_ID] [--budget USD] [--dry-run] [--quiet]
 |---|---|
 | `repo` | 目标仓库路径，默认当前目录 |
 | `--test TEST_ID` | 只修这一个失败用例。队列会被筛成一条 |
-| `--budget USD` | 本次 run 的美元上限。**需要配置 `AIFIX_PRICE_MAP`**，否则当场拒绝启动 |
+| `--budget CNY` | 本次 run 的人民币上限。**需要配置 `AIFIX_PRICE_MAP`**，否则当场拒绝启动 |
 | `--dry-run` | 只跑 preflight + baseline，报告有多少活。**不调用任何模型，不花一分钱** |
 | `--quiet` / `-q` | 不印进度 |
 
@@ -61,7 +61,7 @@ aifix run [repo] [--test TEST_ID] [--budget USD] [--dry-run] [--quiet]
 ## `aifix answer`
 
 ```
-aifix answer <编号> [repo] [--run-id RUN_ID] [--budget USD] [--quiet]
+aifix answer <编号> [repo] [--run-id RUN_ID] [--budget CNY] [--quiet]
 ```
 
 上一次 run 里模型调用了 `ask_user` 停下来问了个问题（问题和选项印在报告里），
@@ -197,7 +197,7 @@ aifix mutate [repo] [--max-tasks N] [--max-new-failures N] [--scope smart|full]
 
 ```
 aifix eval <tasks.jsonl> [--parallel N] [--label LABEL] [--out PATH]
-           [--budget-per-task USD] [--budget-total USD]
+           [--budget-per-task CNY] [--budget-total CNY]
 ```
 
 在任务集上跑评测。每个任务：克隆仓库 → 还原到 base commit → 嫁接测试 → 跑一次完整的
@@ -208,8 +208,8 @@ aifix eval <tasks.jsonl> [--parallel N] [--label LABEL] [--out PATH]
 | `--parallel` | 4 | 并发任务数 |
 | `--label` | fixer 的 model | 这一轮的模型标签，会进结果文件名 |
 | `--out` | `evals/results-<label>.jsonl` | 逐任务明细 |
-| `--budget-per-task` | — | 每个任务的美元上限 |
-| `--budget-total` | — | 整批的美元上限 |
+| `--budget-per-task` | — | 每个任务的人民币上限 |
+| `--budget-total` | — | 整批的人民币上限 |
 
 跑完直接印一张对比表（按任务来源分行），明细落成 jsonl。
 

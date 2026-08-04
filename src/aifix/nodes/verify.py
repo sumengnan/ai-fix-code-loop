@@ -41,7 +41,7 @@ def new_files_of(wt: Worktree, worktree_path: Path,
 
 async def review_patch(state: AifixState, diff: str,
                        client: Any = None) -> tuple[Review | None, int, float]:
-    """让裁判模型看一眼补丁。返回 (结论, 花掉的 token, 花掉的钱)。
+    """让裁判模型看一眼补丁。返回 (结论, 花掉的 token, 花掉的钱／人民币)。
 
     无工具、单步、强制 JSON —— 与 `detect_node` 同一个形状，理由也一样：给它
     工具就等于给它一条能烧掉整轮预算的岔路，而它要回答的是一个只需要读一遍
@@ -81,9 +81,10 @@ async def review_patch(state: AifixState, diff: str,
     )
     with json_output():
         outcome = await consume(loop.run(
-            build_review_prompt(failure, diff, state.get("diagnosis"))))
+            build_review_prompt(failure, diff, state.get("diagnosis"))),
+            money=cfg.money)
     review = parse_review(outcome.text) if outcome.ok else None
-    return review, outcome.tokens, outcome.cost_usd
+    return review, outcome.tokens, outcome.cost_cny
 
 
 async def filter_flaky(baseline: FailureSet, current: FailureSet,
@@ -226,13 +227,13 @@ async def verify_node(state: AifixState,
     # 新增文件的内容要拼进去：`git diff` 看不见未跟踪文件，而只给裁判看一半
     # 的改动，它对「改动是否超出所需范围」这一条就只能瞎猜。
     review: Review | None = None
-    review_tokens, review_usd = 0, 0.0
+    review_tokens, review_cny = 0, 0.0
     if verdict is Verdict.BETTER and cfg.reviewer_check:
         try:
             review_diff = wt.diff()
             for p in new_files_of(wt, worktree_path, touched):
                 review_diff += f"\n--- 新增文件 {p} ---\n{_now(p) or ''}"
-            review, review_tokens, review_usd = await review_patch(
+            review, review_tokens, review_cny = await review_patch(
                 state, review_diff, client=reviewer_client)
         except Exception as e:      # noqa: BLE001 —— 同上，信号不能挡交付
             trace.fact("reviewer_failed", str(e))
@@ -354,10 +355,14 @@ async def verify_node(state: AifixState,
         trace.fact("signals_discarded", asdict(sig))
 
     # 裁判花掉的钱要记账，三条返回分支一条都不能漏 —— 漏了的话
-    # `budget_usd` 那道闸就有一个口子：钱真花出去了，闸上看不见。
+    # `budget_cny` 那道闸就有一个口子：钱真花出去了，闸上看不见。
     # 单独一个 dict 而不是往每条分支里手抄两行，理由就是「一条都不能漏」。
+    #
+    # `money=cfg.money` 不能省（见 review_patch）：留默认值的话这一层按默认
+    # 汇率折算，而 run 的其余部分按配置的汇率 —— 同一个 run 里两套汇率，
+    # 账面上看不出来。
     spent = {"spent_tokens": state["spent_tokens"] + review_tokens,
-             "spent_usd": state["spent_usd"] + review_usd}
+             "spent_cny": state["spent_cny"] + review_cny}
 
     results = list(state["results"])
     common = {"flaky_filtered": sorted(flaky),

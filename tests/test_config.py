@@ -6,7 +6,9 @@ from aifix.config import AifixConfig
 def test_defaults():
     c = AifixConfig()
     assert c.max_attempts == 3
-    assert c.budget_usd == 2.0
+    assert c.budget_cny == 15.0
+    assert c.price_currency == "USD"
+    assert c.usd_to_cny == 7.2
     assert c.budget_tokens == 500_000
     assert c.budget_wall_seconds == 1800.0
     assert c.fixer_max_steps == 25
@@ -54,7 +56,7 @@ def test_price_map_from_env(monkeypatch):
 def test_price_map_rejects_tiered_format(monkeypatch):
     """分档表 [[上限,输入,输出]] 不是扁平价表，必须在加载时就拒绝。
 
-    真实运行中传错格式，导致跑到一半才在 cost_usd 里解包失败崩溃 ——
+    真实运行中传错格式，导致跑到一半才在成本计算里解包失败崩溃 ——
     token 已经花掉了。成本计算是装饰性的，不该有崩掉整个 run 的权力。
     """
     import pydantic

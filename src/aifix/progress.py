@@ -49,7 +49,7 @@ class NullProgress:
     def note(self, text: str) -> None: ...
 
     def finished(self, fixed: int, total: int, tokens: int,
-                 usd: float | None) -> None: ...
+                 cny: float | None) -> None: ...
 
 
 def _mmss(seconds: float) -> str:
@@ -461,7 +461,7 @@ class TerminalProgress(NullProgress):
         self._w(f"      ⚠️  {text}")
 
     def finished(self, fixed: int, total: int, tokens: int,
-                 usd: float | None) -> None:
-        # usd 为 None 表示没配价格表 —— 印 $0.00 就是伪造，见 report.cost_is_unknown
-        cost = "成本未知" if usd is None else f"${usd:.4f}"
+                 cny: float | None) -> None:
+        # cny 为 None 表示没配价格表 —— 印 ¥0.00 就是伪造，见 report.cost_is_unknown
+        cost = "成本未知" if cny is None else f"¥{cny:.4f}"
         self._w(f"完成：修复 {fixed}/{total} · {tokens:,} tokens · {cost}")

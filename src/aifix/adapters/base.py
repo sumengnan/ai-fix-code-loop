@@ -179,6 +179,18 @@ class ProjectAdapter(Protocol):
 
     def make_test_id(self, classname: str, name: str, file: str | None) -> str: ...
 
+    # 这套体系的用例 id 长什么样 —— **给模型看的样例**，不是给程序解析的。
+    #
+    # reproducer 要产出一个 `target_test_id`，而提示词此前只说「格式与本项目
+    # 其余用例一致」。对一个没见过本项目 id 的模型，那句话等于没说：实测
+    # （2026-08-04，qwen-coder-plus 跑 ai-learning-helper#84）它写出了一条完全
+    # 正确的测试，却把 id 写成 unittest 方言 `TestC.test_x`，被「id 要能追溯到
+    # test_file」那道闸打回 —— 整轮作废，而模型其实已经做对了活。
+    #
+    # 各家语法差得很远（pytest 的 `文件::用例`、surefire 的 `类#方法`、
+    # vitest 的 `文件::描述 > 用例`），所以只能由适配器给。
+    def example_test_id(self) -> str: ...
+
     # 这个 id 指的是一整个测试文件 / 测试类，而不是单个用例吗。
     # 收集阶段整体失败时报告里发的就是这种 id：pytest 的测试文件导入失败发
     # 一条文件级 <error>（id 是文件路径），surefire 的测试类初始化失败发一条

@@ -18,7 +18,7 @@
   布尔，也有列表（三类信号的 value 就是列表）。一列里混着裸值和 JSON 之后
   没人能安全地解它。代价是查询时必须按 JSON 解 —— `WHERE value='better'`
   永远匹配不到，字符串在库里是 `"better"`（带引号），比大小更是无从谈起。
-- 取不到的字段一律存 NULL，不填 0、不填空串。花了 token 却记 $0.00 这种假
+- 取不到的字段一律存 NULL，不填 0、不填空串。花了 token 却记 ¥0.00 这种假
   数字，比缺一列难查得多。
 """
 from __future__ import annotations
@@ -43,7 +43,12 @@ CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
     started_at TEXT, adapter TEXT, branch TEXT,
     baseline_failures INTEGER, fixed INTEGER,
-    spent_tokens INTEGER, spent_usd REAL,
+    spent_tokens INTEGER, spent_cny REAL,
+    -- 换币种之前的老列。**保留而不是改写**：里面的数是美元，按当时某个不可
+    -- 考的汇率折成人民币只会得到一列看着正常的假数字，而这张表的用途正是
+    -- 「按成本排序、按成本汇总」。新 run 一律只写 spent_cny，老行两列并存，
+    -- 按成本聚合时要么只取一列，要么自己决定怎么折。
+    spent_usd REAL,
     abort TEXT, abort_kind TEXT
 );
 -- value 是 JSON 文本（见模块 docstring）：读的时候要 json.loads，
@@ -60,7 +65,7 @@ CREATE INDEX IF NOT EXISTS facts_key ON facts(key);
 # 这五列的类型。run_once 各写一条同名的 fact，是它们的**数据契约**来源。
 _COLUMN_TYPES: dict[str, Any] = {
     "adapter": str, "branch": str, "fixed": int,
-    "spent_tokens": int, "spent_usd": (int, float),
+    "spent_tokens": int, "spent_cny": (int, float), "spent_usd": (int, float),
 }
 
 # 下面这套正则只是**回退**：M4 之前落下的 run 没写过这五条 fact，只有渲染出来
@@ -71,7 +76,9 @@ _COLUMN_TYPES: dict[str, Any] = {
 _RE_ADAPTER = re.compile(r"^- 适配器：(.+)$", re.M)
 _RE_BRANCH = re.compile(r"^- 分支：`(.+)`$", re.M)
 _RE_FIXED = re.compile(r"^- 修复：\*\*(\d+) / (\d+)\*\*$", re.M)
-_RE_COST = re.compile(r"^- 成本：(.*)（([\d,]+) tokens）$", re.M)
+# 成本那一行现在带汇率说明（`- 成本：¥1.42（12,345 tokens，按 1 USD = …）`），
+# 所以 token 数后面允许跟一段任意文字。老报告没有那段，同一条正则都吃得下。
+_RE_COST = re.compile(r"^- 成本：(.*)（([\d,]+) tokens[^（）]*）$", re.M)
 
 
 def _read_facts(path: Path) -> Iterator[dict[str, Any]]:
@@ -97,7 +104,8 @@ def _read_facts(path: Path) -> Iterator[dict[str, Any]]:
 def _parse_report(path: Path) -> dict[str, Any]:
     """从 report.md 解出 facts.jsonl 里没有的那几个字段。"""
     out: dict[str, Any] = {"adapter": None, "branch": None, "fixed": None,
-                           "spent_tokens": None, "spent_usd": None}
+                           "spent_tokens": None, "spent_cny": None,
+                           "spent_usd": None}
     if not path.is_file():
         return out
     text = path.read_text(encoding="utf-8")
@@ -111,13 +119,18 @@ def _parse_report(path: Path) -> dict[str, Any]:
         out["spent_tokens"] = int(m.group(2).replace(",", ""))
         cost = m.group(1)
         # 没配价格表时这里是「未知（未配置 AIFIX_PRICE_MAP）」。解成 0.0 就
-        # 是伪造 $0.00：往后所有按成本排序、按成本汇总的结论都是假的，而它
+        # 是伪造 ¥0.00：往后所有按成本排序、按成本汇总的结论都是假的，而它
         # 看起来完全正常。
-        if cost.startswith("$"):
-            try:
-                out["spent_usd"] = float(cost[1:])
-            except ValueError:
-                pass
+        #
+        # 按符号分列，**不换算**：`$` 只出现在换币种之前的老报告里，那时
+        # 用的汇率无从考证，折一个数出来就是在编。
+        for sym, col in (("¥", "spent_cny"), ("$", "spent_usd")):
+            if cost.startswith(sym):
+                try:
+                    out[col] = float(cost[1:])
+                except ValueError:
+                    pass
+                break
     return out
 
 
@@ -147,7 +160,21 @@ def _connect(db: Path) -> sqlite3.Connection:
     db.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(db)
     con.executescript(_SCHEMA)
+    _migrate(con)
     return con
+
+
+def _migrate(con: sqlite3.Connection) -> None:
+    """给已经存在的库补上新列。
+
+    `CREATE TABLE IF NOT EXISTS` 对已建好的表**什么都不做** —— 加一列之后不
+    补这一步的话，老库上每一次 ingest 都会以「no such column: spent_cny」
+    炸掉，而这张表恰恰是长期资产，重建一个空的等于把历史扔了。
+    """
+    have = {row[1] for row in con.execute("PRAGMA table_info(runs)")}
+    for col, decl in (("spent_cny", "REAL"), ("spent_usd", "REAL")):
+        if col not in have:
+            con.execute(f"ALTER TABLE runs ADD COLUMN {col} {decl}")
 
 
 def _ingest_one(con: sqlite3.Connection, run_dir: Path) -> None:
@@ -182,11 +209,13 @@ def _ingest_one(con: sqlite3.Connection, run_dir: Path) -> None:
     baseline = run_level.get("baseline_failures")
     con.execute(
         "INSERT OR REPLACE INTO runs(run_id, started_at, adapter, branch, "
-        "baseline_failures, fixed, spent_tokens, spent_usd, abort, abort_kind)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "baseline_failures, fixed, spent_tokens, spent_cny, spent_usd, "
+        "abort, abort_kind)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (run_id, _started_at(run_dir), cols["adapter"], cols["branch"],
          baseline if isinstance(baseline, int) else None,
-         cols["fixed"], cols["spent_tokens"], cols["spent_usd"],
+         cols["fixed"], cols["spent_tokens"], cols["spent_cny"],
+         cols["spent_usd"],
          run_level.get("abort"), run_level.get("abort_kind")))
 
 

@@ -316,12 +316,12 @@ async def test_a_token_overrun_is_also_no_convergence(buggy_repo):
     assert "解析" not in out.reason
 
 
-async def test_reproduce_cannot_eat_the_whole_dollar_budget(buggy_repo, monkeypatch):
+async def test_reproduce_cannot_eat_the_whole_budget(buggy_repo, monkeypatch):
     """复现最多花掉整份预算的一部分，剩下的留给修复。
 
-    实测（2026-07-30，issue #2）：pro 跑 25 步把 AIFIX_BUDGET_USD=0.50 全吃光，
-    run_once 拿到 $0 当场中止，报告写「美元预算耗尽：$0 / $0」—— 一句看不出是
-    被前一步吃光的话。
+    实测（2026-07-30，issue #2，当时的币种是美元）：pro 跑 25 步把整份预算
+    全吃光，run_once 拿到 0 当场中止，报告写「预算耗尽：0 / 0」—— 一句看不出
+    是被前一步吃光的话。
     """
     seen = {}
     real = __import__("aifix.agents.runner", fromlist=["consume"]).consume
@@ -331,14 +331,14 @@ async def test_reproduce_cannot_eat_the_whole_dollar_budget(buggy_repo, monkeypa
         return await real(stream, cost_cap=cost_cap, **k)
 
     monkeypatch.setattr("aifix.reproduce.consume", _spy)
-    cfg = AifixConfig(budget_usd=0.50, reproducer_budget_share=0.4)
+    cfg = AifixConfig(budget_cny=0.50, reproducer_budget_share=0.4)
     await reproduce(buggy_repo, PytestAdapter(), cfg, "t", "b",
                     client=_Scripted([_text("x")]))
     assert seen["cap"] == pytest.approx(0.20)
 
 
-async def test_no_dollar_gate_when_no_budget_is_set(buggy_repo, monkeypatch):
-    """budget_usd 为 0 是「不设闸」，不是「额度已扣光」。
+async def test_no_cost_gate_when_no_budget_is_set(buggy_repo, monkeypatch):
+    """budget_cny 为 0 是「不设闸」，不是「额度已扣光」。
 
     传 0.0 进去会让 consume 把**第一次**调用就掐掉 —— 恰好在闸本不该存在的
     时候把它关死（与 fix_node 里 `0.0 or None` 那处同款）。
@@ -351,7 +351,7 @@ async def test_no_dollar_gate_when_no_budget_is_set(buggy_repo, monkeypatch):
         return await real(stream, cost_cap=cost_cap, **k)
 
     monkeypatch.setattr("aifix.reproduce.consume", _spy)
-    await reproduce(buggy_repo, PytestAdapter(), AifixConfig(budget_usd=0.0),
+    await reproduce(buggy_repo, PytestAdapter(), AifixConfig(budget_cny=0.0),
                     "t", "b", client=_Scripted([_text("x")]))
     assert seen["cap"] is None
 
@@ -456,20 +456,21 @@ async def test_a_stream_cut_mid_step_is_not_blamed_on_the_model(buggy_repo):
     assert classify_incomplete(normal) is False
 
 
-async def test_hitting_our_own_dollar_gate_says_so(buggy_repo):
-    """撞上**我们自己**的美元闸，不能报成「端点掐流」。
+async def test_hitting_our_own_cost_gate_says_so(buggy_repo):
+    """撞上**我们自己**的成本闸，不能报成「端点掐流」。
 
-    实测（2026-07-30，issue #2）两轮的累计成本是 $0.2179 / $0.2070，而闸是
-    $0.50 × 0.4 = $0.20 —— `consume` 主动关掉生成器，事件流里没有 RunFinished，
+    实测（2026-07-30，issue #2，当时的币种是美元）两轮的累计成本是 0.2179 /
+    0.2070，而闸是 0.50 × 0.4 = 0.20 —— `consume` 主动关掉生成器，事件流里
+    没有 RunFinished，
     签名与「端点断流」一模一样。上一版据此报「重试，或查端点是不是在长响应上
     掐流」，那是一句假话：端点没问题，是我们自己掐的。
 
     `consume` 早就把这件事记在 `cost_capped` 上了 —— 只是没人读。
     """
-    # 必须配价格表：不配的话 cost_usd 恒为 0、闸永远不触发 —— 这正是这个项目
+    # 必须配价格表：不配的话成本恒为 0、闸永远不触发 —— 这正是这个项目
     # 反复强调的那件事，写测试时先自己踩了一遍。
     cfg = AifixConfig(fixer={"model": "m"}, price_map={"m": [1.0, 1.0]},
-                      budget_usd=0.001, reproducer_budget_share=0.4)
+                      budget_cny=0.001, reproducer_budget_share=0.4)
     out = await reproduce(buggy_repo, PytestAdapter(), cfg, "t", "b",
                           client=_Scripted([_text("x"), _text("y")]))
     assert out.kind == "cost_capped", out.reason
@@ -477,7 +478,7 @@ async def test_hitting_our_own_dollar_gate_says_so(buggy_repo):
     # 断言的是「有没有让人去查端点」，不是「出没出现端点这两个字」——
     # 消息里那句「也不是端点的问题」是**否定句**，按关键词判会把它误伤，
     # 而它恰恰是这条消息最该说的话。
-    assert "AIFIX_BUDGET_USD" in out.reason
+    assert "AIFIX_BUDGET_CNY" in out.reason
     assert "AIFIX_REPRODUCER_BUDGET_SHARE" in out.reason
     assert "查端点" not in out.reason and "重试" not in out.reason
 
@@ -498,3 +499,59 @@ async def test_the_reproduce_step_carries_its_event_timestamps(buggy_repo):
     assert out.event_times, "复现这一步一个时间戳都没有"
     assert len(out.event_times) == len(out.events), \
         "时刻与事件必须一一对应 —— 错位一格，replay 会把耗时算到别的步上"
+
+
+# ------------------------------- 调用失败 ≠ 没在预算内收敛
+
+def test_a_transport_error_is_not_reported_as_non_convergence():
+    """**实测逼出来的**（2026-08-04，百炼专属网关）。
+
+    一次服务端 `AgentServiceGetResultError` 被报成「模型没能在预算内收敛」，
+    下一步写的是「调大 AIFIX_REPRODUCER_MAX_STEPS / MAX_TOKENS」—— 对一个服务端
+    错误，调多少步都没用。指错方向的诊断。
+
+    判据按**我们自己的上限**算，不按错误文本挑：错误文本是框架和端点的，随时会
+    变（上一版拿 `"max_steps" in err` 挑就是这么栽的）。真撞上限时步数或 token
+    必然贴到配置值；没贴到就说明是半路断的。
+    """
+    from aifix.reproduce import KIND_CALL_FAILED, KIND_NO_CONVERGENCE
+
+    assert KIND_CALL_FAILED != KIND_NO_CONVERGENCE
+
+    from aifix.config import AifixConfig
+    from aifix.reproduce import hit_ceiling, steps_used
+
+    cfg = AifixConfig(reproducer_max_steps=25, reproducer_max_tokens=250_000)
+
+    # 半路断的：步数与 token 都远没贴到上限 → 不是没收敛，是调用挂了
+    assert hit_ceiling(3, 4_000, cfg) is False
+    # 真翻满了
+    assert hit_ceiling(25, 4_000, cfg) is True
+    assert hit_ceiling(3, 250_000, cfg) is True
+
+
+def test_steps_are_counted_by_event_type_not_by_error_text():
+    """判据按**我们自己的配置**算，不按错误文本挑 —— 错误文本是框架和端点的，
+    随时会变。上一版拿子串挑，挑不中的全落进另一档，于是 token 超限被报成
+    「输出格式不对」。"""
+    from aifix.reproduce import steps_used
+
+    class _Step:
+        pass
+    _Step.__name__ = "StepStarted"
+
+    class _Other:
+        pass
+
+    assert steps_used([_Step(), _Other(), _Step()]) == 2
+    assert steps_used([]) == 0
+
+
+def test_the_new_kind_has_its_own_headline():
+    """kind 只是个标签，真正给人看的是回帖开头那句。少了映射的话，新增的这一档
+    会以一句空标题出现 —— 而它存在的全部理由就是「话说得对不对」。"""
+    from aifix.issue.handle import _REPRO_HEADLINES
+    from aifix.reproduce import KIND_CALL_FAILED
+
+    assert KIND_CALL_FAILED in _REPRO_HEADLINES
+    assert "调用" in _REPRO_HEADLINES[KIND_CALL_FAILED]

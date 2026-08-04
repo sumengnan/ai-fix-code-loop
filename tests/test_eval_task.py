@@ -39,7 +39,7 @@ def test_non_ascii_survives_roundtrip(tmp_path):
 
 def test_result_defaults():
     r = TaskResult(task_id="x", model="m", locate_hit=False, suspect_file=None,
-                   verdict="same", attempts=1, tokens=10, cost_usd=0.1,
+                   verdict="same", attempts=1, tokens=10, cost_cny=0.1,
                    violations=0)
     assert r.abort_reason is None
     assert r.error is None
@@ -65,7 +65,7 @@ def test_task_defaults_keep_old_jsonl_readable():
 def test_task_result_defaults_keep_old_jsonl_readable():
     """TaskResult 同理：老结果文件没有 origin/signals，也要能读进来。"""
     line = ('{"task_id":"x","model":"m","locate_hit":false,"suspect_file":null,'
-            '"verdict":"same","attempts":1,"tokens":10,"cost_usd":0.1,'
+            '"verdict":"same","attempts":1,"tokens":10,"cost_cny":0.1,'
             '"violations":0}')
     r = TaskResult.model_validate_json(line)
     assert r.origin == "mined" and r.signals == 0

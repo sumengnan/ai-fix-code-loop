@@ -211,7 +211,7 @@ async def test_a_broken_reviewer_does_not_block_delivery(repo):
 async def test_reviewer_tokens_are_billed_to_the_run(repo):
     """裁判花的钱要记进 run 的账。
 
-    不记的话 `budget_usd` 那道闸就有一个口子：钱真花出去了，闸上看不见。
+    不记的话 `budget_cny` 那道闸就有一个口子：钱真花出去了，闸上看不见。
     """
     with_reviewer = await _run(repo, "rv4", [_text(json.dumps(
         {"verdict": "plausible", "reason": "ok"}))])

@@ -26,9 +26,11 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .money import Money
+
 _HR = "──"
 
-# 没配价格表时 effective_cost 恒为 0（或 None）—— 这个项目为「假的 $0.00」
+# 没配价格表时 effective_cost 恒为 0（或 None）—— 这个项目为「假的 0.00」
 # 栽过两次（报告一次、对比表一次）。0 与「真的不花钱」在这里没法区分，
 # 宁可说不知道，也不要给一个看着精确的假数字。
 #
@@ -43,14 +45,19 @@ _REASONING_MAX = 200
 
 
 def render(run_dir: Path, step: int | None = None,
-           full: bool = False, max_chars: int = 2000) -> str:
+           full: bool = False, max_chars: int = 2000,
+           money: Money | None = None) -> str:
     """渲染一次 run 的回放文本。
 
     step：只看某一步（全局步号，从 1 数起）。
     full：不截断长文本（补丁、工具返回常常几千字）。
     max_chars：单个字段的截断阈值，截断处一定留标记。
+    money：把事件里那个**价表货币**的成本折成人民币。事件是原样落盘的，
+      折算不在产物里 —— 不折的话，回放里的每步成本与报告里的总额差着一个
+      汇率，而两个数都印着钱的样子。
     """
     run_dir = Path(run_dir)
+    money = money or Money()
     if not run_dir.is_dir():
         return _missing_dir(run_dir)
 
@@ -77,7 +84,8 @@ def render(run_dir: Path, step: int | None = None,
             return "\n".join(head) + "\n"
         head.append(f"（已按 step={step} 过滤；去掉这个参数可看完整时间轴与领域事实）")
         evs = steps[step - 1]
-        body = _render_step(step, evs, full, max_chars, _step_key(evs))
+        body = _render_step(step, evs, full, max_chars, _step_key(evs),
+                            money)
         return "\n".join(head) + "\n\n" + body
 
     if events and facts and not any("failure" in e for e in events):
@@ -100,7 +108,8 @@ def render(run_dir: Path, step: int | None = None,
 
     for key, group in _group_steps(steps):
         for index, evs in group:
-            parts.append(_render_step(index, evs, full, max_chars, key))
+            parts.append(_render_step(index, evs, full, max_chars, key,
+                                      money))
         # 这一段步骤对应的事实紧跟其后 —— 计划与规格都要求「领域事实按其所
         # 属的 failure 与 attempt 插进对应位置」。全堆在末尾时，第一个
         # failure 的 verdict 排在第二个 failure 的步骤之后，读的人得在两处
@@ -290,16 +299,19 @@ def _render_args(arguments: Any, full: bool, max_chars: int) -> list[str]:
     return [_block("参数", _fmt_value(arguments), full, max_chars)]
 
 
-def _fmt_usage(data: dict) -> str:
+def _fmt_usage(data: dict, money: Money) -> str:
     u = data.get("usage") or {}
-    cost = data.get("cost_usd")
+    # 事件里的 `cost_usd` 是**按价表算出来的数**，币种由价表决定（字段名是
+    # 框架的）。折成人民币才和报告里的总额对得上。
+    raw = data.get("cost_usd")
+    cost = money.to_cny(raw) if raw else raw
     if not cost:
         cost_text = _COST_UNKNOWN
     elif cost < 0.0001:
-        # 四舍五入到 $0.0000 又是一个「看着是零、其实不是」的数字
-        cost_text = "< $0.0001"
+        # 四舍五入到 ¥0.0000 又是一个「看着是零、其实不是」的数字
+        cost_text = "< ¥0.0001"
     else:
-        cost_text = f"${cost:.4f}"
+        cost_text = f"¥{cost:.4f}"
     parts = [f"输入 {u.get('prompt', '?')} / 输出 {u.get('completion', '?')}"
              f" / 合计 {u.get('total', '?')} token",
              f"成本：{cost_text}"]
@@ -327,7 +339,8 @@ def _elapsed(events: list[dict]) -> str:
 
 
 def _render_step(index: int, events: list[dict], full: bool, max_chars: int,
-                 key: tuple = (None, None)) -> str:
+                 key: tuple = (None, None), money: Money | None = None) -> str:
+    money = money or Money()
     lines = [f"{_HR} 步骤 {index}{_attr_suffix(key)}{_elapsed(events)} {_HR}"]
     # 同一个 tool_call 的参数在 ToolCallRequested 与 ToolStarted 里各有一份。
     # 一个几千字的补丁印两遍只是把输出撑长，所以第二次只报名字；但万一某条
@@ -371,7 +384,7 @@ def _render_step(index: int, events: list[dict], full: bool, max_chars: int,
             lines.append(tag + _block(f"工具返回（{mark}，id={r.get('tool_call_id')}）",
                                       str(r.get("content", "")), full, max_chars))
         elif kind == "ModelUsage":
-            lines.append(tag + "用量：" + _fmt_usage(data))
+            lines.append(tag + "用量：" + _fmt_usage(data, money))
         elif kind == "RunFinished":
             msg = data.get("message") or {}
             lines.append(tag + _block("会话结束，最终消息",

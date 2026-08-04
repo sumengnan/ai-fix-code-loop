@@ -218,7 +218,7 @@ def test_the_message_does_not_talk_about_python_on_a_maven_project():
 def _report_state(**over):
     st = {"run_id": "r1", "adapter_names": ["pytest"], "branch": "aifix/r1",
           "baseline_ids": [f"tests/test_bad{i}.py" for i in range(4)],
-          "results": [], "spent_tokens": 0, "spent_usd": 0.0,
+          "results": [], "spent_tokens": 0, "spent_cny": 0.0,
           "signals": [], "abort": None, "abort_kind": None}
     st.update(over)
     return st

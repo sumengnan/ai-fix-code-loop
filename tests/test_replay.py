@@ -102,7 +102,7 @@ async def test_replay_shows_every_tool_call_and_result(run_dir):
     # 4. token 与成本：没配价格表时不许显示假的 $0.00
     assert "15" in out
     assert "$0.00" not in out
-    # 说「未知」而不说原因：渲染器看到的只是 cost_usd 是 0，它不知道价格表
+    # 说「未知」而不说原因：渲染器看到的只是这一步的成本是 0，它不知道价格表
     # 配没配（见 _COST_UNKNOWN）
     assert "成本：未知" in out
     # 5. 领域事实：verdict 出现在写明归属的位置上
@@ -423,15 +423,16 @@ def test_usage_does_not_blame_a_price_map_it_knows_nothing_about():
     价格表配好了、但某一步的 usage 为 0 或字段缺失时（模型没回 usage、
     这一步没发生模型调用），这句话就是假的。不知道原因就别说原因。
     """
+    from aifix.money import CNY, Money
     from aifix.replay import _fmt_usage
 
     text = _fmt_usage({"usage": {"prompt": 10, "completion": 5, "total": 15},
-                       "model": "m"})
+                       "model": "m"}, Money(price_currency=CNY))
 
     assert "未知" in text
     assert "AIFIX_PRICE_MAP" not in text, text
     # 区分度：真有成本时照常给数字，别把这一支也说成未知
-    assert "$0.5000" in _fmt_usage({"cost_usd": 0.5})
+    assert "¥0.5000" in _fmt_usage({"cost_usd": 0.5}, Money(price_currency=CNY))
 
 
 def test_step_headers_show_how_long_each_step_took(tmp_path):
@@ -472,3 +473,15 @@ def test_a_run_without_timestamps_still_renders(tmp_path):
     out = render(d)
     assert "步骤 1" in out
     assert "0s" not in out, "没有时刻就别编一个 0 秒出来"
+
+
+def test_usage_cost_is_converted_to_cny_like_the_report():
+    """回放里的每步成本与报告里的总额必须是同一种货币。
+
+    事件是原样落盘的，里面的数按价表货币计（美元价表就是美元）。这一层
+    不折的话，两个印着钱的数差着一个汇率 —— 而没有任何一处写着哪个是哪个。
+    """
+    from aifix.money import Money
+    from aifix.replay import _fmt_usage
+
+    assert "¥1.4400" in _fmt_usage({"cost_usd": 0.2}, Money(usd_to_cny=7.2))
