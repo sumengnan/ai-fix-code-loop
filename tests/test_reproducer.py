@@ -274,3 +274,46 @@ def test_every_example_survives_the_coherence_check():
         "test_file": "tests/test_calc.py",
         "test_code": "x", "target_test_id": example, "missing_info": []})
     assert parse_reproduction(raw, a.is_test_path) is not None, example
+
+
+# ------------------------------------------- 解析失败要说清是哪一类
+
+def test_a_broken_json_and_incoherent_fields_say_different_things():
+    """**实测逼出来的**（2026-08-04，qwen-coder-plus）。
+
+    那次模型给的 JSON 五个字段齐全、解析完好，只是 target_test_id 用了 unittest
+    方言 —— 而回帖写的是「模型的输出不合约定的 JSON 格式」。照着那句话去查，
+    看到的是一段格式完美的 JSON。
+
+    两者该给的下一步完全不同：JSON 坏了要换模型 / 看输出，字段不自洽要把格式在
+    提示词里说死。合成一句就是指错方向的诊断。
+    """
+    import json
+
+    from aifix.adapters.pytest_adapter import PytestAdapter
+    from aifix.agents.reproducer import parse_reproduction_ex
+
+    a = PytestAdapter()
+
+    r, why = parse_reproduction_ex("这压根不是 JSON", a.is_test_path)
+    assert r is None
+    assert "JSON" in why
+
+    bad_id = json.dumps({
+        "can_reproduce": True, "test_file": "tests/test_calc.py",
+        "test_code": "x", "target_test_id": "TestCalc.test_add",
+        "missing_info": []})
+    r2, why2 = parse_reproduction_ex(bad_id, a.is_test_path)
+    assert r2 is None
+    assert "target_test_id" in why2, why2
+    assert "方言" in why2, "要点出这是格式问题，不是 JSON 问题"
+    assert why2 != why, "两类必须说不同的话"
+
+
+def test_a_good_reproduction_reports_no_reason():
+    from aifix.adapters.pytest_adapter import PytestAdapter
+    from aifix.agents.reproducer import parse_reproduction_ex
+
+    a = PytestAdapter()
+    r, why = parse_reproduction_ex(_ok(), a.is_test_path)
+    assert r is not None and why == ""

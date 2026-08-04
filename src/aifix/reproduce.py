@@ -25,7 +25,7 @@ from harness.tools.builtins.fs_tools import ListFilesTool
 
 from .adapters.base import Failure, ProjectAdapter
 from .agents.reproducer import (SYSTEM_PROMPT, Reproduction, build_prompt,
-                                parse_reproduction)
+                                parse_reproduction_ex)
 from .agents.runner import consume
 from .config import AifixConfig
 from .nodes.baseline import file_level_ids, run_scoped
@@ -62,6 +62,11 @@ KIND_EMPTY_ANSWER = "empty_answer"
 # 流在某一步中途断了。与 unparseable 分开：那一类是模型答歪了，这一类是这次
 # 调用**根本没跑完** —— 下一步是重试或查端点，不是改 prompt。
 KIND_TRUNCATED = "truncated"
+# 模型调用**本身**失败了（端点报错、网络断、凭据不对），而不是模型答不好。
+# 与 no_convergence 分开：那一档的下一步是「调大上限 / 换模型」，对一个服务端
+# 错误完全无效 —— 实测（2026-08-04）一次 AgentServiceGetResultError 就是被那样
+# 报的。判据是**有没有撞上我们自己的上限**（见 reproduce 里那段）。
+KIND_CALL_FAILED = "call_failed"
 # 撞上**我们自己**的美元闸。与 truncated 的事件签名一模一样（都没有
 # RunFinished），但原因和下一步完全不同 —— 那一类要查端点，这一类要调预算。
 KIND_COST_CAPPED = "cost_capped"
@@ -107,6 +112,31 @@ def classify_incomplete(events: list[Any]) -> bool:
     只在 `outcome.ok` 为真的分支里调用：有 `RunError` 时已经归进 no_convergence。
     """
     return not any(type(e).__name__ == "RunFinished" for e in events)
+
+
+def steps_used(events: list[Any]) -> int:
+    """这一轮实际走了几步。判据是 `StepStarted` 的条数。
+
+    按类名判而不是 isinstance：这个模块不该为了数一个数去 import 框架的事件类
+    （`classify_incomplete` 同款理由）。
+    """
+    return sum(1 for e in events if type(e).__name__ == "StepStarted")
+
+
+def hit_ceiling(used: int, tokens: int, config: AifixConfig) -> bool:
+    """这一轮是**撞上我们自己的上限**才停的吗。
+
+    分开这个判据，是为了把「翻满了没作答」与「调用本身失败」区分开 —— 两者共用
+    `outcome.ok is False`，而下一步完全不同：前者调大上限或换模型，后者查端点。
+
+    实测（2026-08-04，百炼专属网关）一次服务端 `AgentServiceGetResultError` 被
+    报成「模型没能在预算内收敛」，建议是「调大 MAX_STEPS」—— 对一个服务端错误，
+    调多少步都没用。
+
+    **按我们自己的配置算，不按错误文本挑。** 错误文本是框架和端点的，随时会变；
+    上一版拿子串去挑，挑不中的全落进另一档，于是 token 超限被报成「输出格式不对」。
+    """
+    return used >= config.reproducer_max_steps or tokens >= config.reproducer_max_tokens
 
 
 def _route(config: AifixConfig):
@@ -368,6 +398,29 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
         # 按**结构**分而不是按字符串挑：错误文本是框架的，随时会变；
         # 「循环有没有跑完」是我们自己的判据。
         err = outcome.error or ""
+        # **「翻满了没作答」与「调用本身失败」不是一回事**，而它们共用
+        # `outcome.ok is False`。实测（2026-08-04，百炼专属网关）一次
+        # `AgentServiceGetResultError` 被报成「模型没能在预算内收敛」，给出的
+        # 下一步是「调大 MAX_STEPS / MAX_TOKENS」—— 对一个服务端错误，调多少
+        # 步都没用。指错方向的诊断，这个项目最忌讳的那种。
+        #
+        # 判据按**我们自己的上限**算，不按错误文本挑（错误文本是框架和端点的，
+        # 随时会变 —— 上一版拿 `"max_steps" in err` 挑就是这么栽的）：真撞上限
+        # 的话，步数或 token 必然已经贴到配置值；没贴到就说明是半路断的。
+        used = steps_used(outcome.events)
+        if not hit_ceiling(used, outcome.tokens, config):
+            return ReproduceOutcome(
+                None,
+                f"模型调用本身失败了：{err}\n"
+                f"  它只走到第 {used} 步（上限 {config.reproducer_max_steps}）、"
+                f"用了 {outcome.tokens:,} token（上限 "
+                f"{config.reproducer_max_tokens:,}）—— **没有撞上任何一道闸**，"
+                "所以调大上限不解决问题。\n"
+                "  这既不是 issue 写得不清楚，也不是模型答不好。\n"
+                "  下一步：查端点与凭据（`AIFIX_FIXER__BASE_URL` / "
+                "`AIFIX_FIXER__API_KEY`），确认那个端点支持带工具调用的多步对话；"
+                "或直接重试一次 —— 服务端错误常常是一过性的。",
+                kind=KIND_CALL_FAILED, **common)
         return ReproduceOutcome(
             None,
             f"模型没能在预算内给出复现测试（{err}）。\n"
@@ -425,11 +478,11 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
             None, f"模型没有吐出任何正文。\n  {hint}",
             kind=KIND_EMPTY_ANSWER, **common)
 
-    r = parse_reproduction(outcome.text, adapter.is_test_path)
+    r, why = parse_reproduction_ex(outcome.text, adapter.is_test_path)
     if r is None:
         return ReproduceOutcome(
             None,
-            "模型的输出不合约定的 JSON 格式，解析不出复现测试。\n"
+            f"{why}。\n"
             "  同样不是 issue 的问题；events.jsonl 里有它实际吐出来的东西。",
             kind=KIND_UNPARSEABLE, **common)
     if not r.can_reproduce:
