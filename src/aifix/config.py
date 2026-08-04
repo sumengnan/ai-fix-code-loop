@@ -415,6 +415,11 @@ class AifixConfig(BaseSettings):
     #    意义，而那是一个需要人显式做的决定。
     reviewer_check: bool = False
     reviewer_max_tokens: int = 20_000
+    # 框架的停滞检测窗口，**一个开关管两道判据**（见 harness.config）：
+    # 签名（连续 N 步同名同参）与结果（同一工具连续 N 次返回逐字相同的结果，
+    # 不管参数变没变）。后者是 harness 0.0.4 加的，专治 fixer 最贵的那种卡死 ——
+    # 每轮改的地方都不一样、每轮拿回同一条失败输出，一路烧到预算耗尽。
+    # <2 关掉两者。
     loop_detect_window: int = 3
     tool_result_max_chars: int = 8000
 

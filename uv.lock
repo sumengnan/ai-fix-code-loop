@@ -4,7 +4,7 @@ requires-python = ">=3.11"
 
 [[package]]
 name = "ai-harness-framework"
-version = "0.0.3"
+version = "0.0.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "openai" },
@@ -12,14 +12,14 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0e/92/c1788b364039e5ef4af5c2fe027625c0c9e7bdcf601b490a82d2d3dbda9d/ai_harness_framework-0.0.3.tar.gz", hash = "sha256:47b83f009e82087d391fd2aa87a1b4dec4aa6f2f7fd684e6b9b728386070d35d", size = 295203, upload-time = "2026-07-28T09:35:18.042Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c8/a8/495f2a4c7a457994f6a8295e84983c54b9a39589c4fe7900777b4ac8bcac/ai_harness_framework-0.0.4.tar.gz", hash = "sha256:2b59388fc5c9a7dd6c4dcbde7489494f55fc6099dbc9fe5e0cf806e0a253d5aa", size = 298702, upload-time = "2026-08-04T06:48:27.433Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ca/b0/e62f9e02fd54bb0523389c5fd267fe9983ca710835c07e7361816f7b8c7a/ai_harness_framework-0.0.3-py3-none-any.whl", hash = "sha256:460cc503aeab6b302cbc51d40e870bd490249b496d6bd7b550d5a354d5d84934", size = 139758, upload-time = "2026-07-28T09:35:16.753Z" },
+    { url = "https://files.pythonhosted.org/packages/11/41/4df19e61fe432a8c3ad1fc9a99ab27335110a99f483ec14b1c3d6f69696b/ai_harness_framework-0.0.4-py3-none-any.whl", hash = "sha256:91e66d68049ac32ba1cf08e6969cfe1652a5771e20ef53f92995f90c6a95ea27", size = 141827, upload-time = "2026-08-04T06:48:26.134Z" },
 ]
 
 [[package]]
 name = "aifix-code"
-version = "0.3.1"
+version = "0.3.2"
 source = { editable = "." }
 dependencies = [
     { name = "ai-harness-framework" },
@@ -38,7 +38,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ai-harness-framework", specifier = ">=0.0.3" },
+    { name = "ai-harness-framework", specifier = ">=0.0.4" },
     { name = "langgraph", specifier = ">=1.2" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3.1" },
     { name = "pydantic", specifier = ">=2.7" },

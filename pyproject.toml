@@ -8,7 +8,7 @@
 #                                      产物目录 `.aifix/`、全部文档都是这个词。
 # 与 scikit-learn → sklearn 同一个形状。
 name = "aifix-code"
-version = "0.3.1"
+version = "0.3.2"
 description = "测试失败驱动的自我修复 agentic loop：红着的测试进去，一条验证过的补丁分支出来"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -43,8 +43,13 @@ dependencies = [
     # 0.0.3 起 run()/resume() 被 aclose() 时会终结内层生成器 —— 成本闸越线
     # 中止时正是这么关流的，0.0.2 上那一关关不到内层，ExitStack（还原打转
     # 纠偏的采样升温）与三层 span 要等事件循环回收才清理，时机不确定。
-    # 不要降到 0.0.2 以下。
-    "ai-harness-framework>=0.0.3",
+    #
+    # **抬到 0.0.4** 是因为那一版加了「结果停滞」检测：同一个工具连续 N 次返回
+    # 逐字相同的结果就出声、再不变就中止，**不管调用参数变没变**。0.0.3 只按
+    # 调用签名判，而 fixer 最贵的一种卡死形态恰好签名每次都不同 —— 实测一次真
+    # 跑里模型九次改同一个函数、九次拿回逐字相同的失败输出，一路烧到 token 预算
+    # 耗尽。降回 0.0.3 不会报错，只是那道闸整个不存在。
+    "ai-harness-framework>=0.0.4",
     # eval 的数据模型（Task / TaskResult / Summary）直接 import pydantic。
     # 它此前只是靠 ai-harness-framework 传递进来的隐式依赖 —— 公开的数据
     # 模型层不能依赖别人的依赖树。
