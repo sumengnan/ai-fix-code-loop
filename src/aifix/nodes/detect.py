@@ -12,7 +12,7 @@ from harness.tools.base import ToolRegistry
 from ..agents.detector import SYSTEM_PROMPT, build_prompt, parse_diagnosis
 from ..agents.runner import consume
 from ..graph import AifixState, trace_of
-from ..snippet import around
+from ..runtime.snippet import around
 from .baseline import adapter_for_test
 
 # 喂几段源码。三段各二十来行 ≈ 一屏半，再多就把 traceback 挤到模型注意力的

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..money import fmt_cny
+from ..runtime.money import fmt_cny
 from ..graph import COLLECTION_ABORT_KIND
 
 _VERDICT_CN = {"better": "已修复", "same": "未改善", "worse": "引入回归"}
@@ -173,6 +173,25 @@ def _signal_section(signals: list[dict[str, Any]]) -> list[str]:
     return lines + tail
 
 
+def _invariant_section(invariant: str | None) -> list[str]:
+    """复现那一步说的「这条测试钉的是什么规则」。没有就一行都不加。
+
+    要写出来，是因为判定只看那一条测试，而它只有一个样本点：补丁扛过了那个
+    样本不等于修好了。最后那道闸是人，人要判断「这个 diff 是不是按规则改的」
+    就得看见规则。
+
+    措辞必须标明出处 —— 它是模型写的一句话，排版上和「适配器」「分支」一样
+    会被当成事实。
+    """
+    if not invariant:
+        return []
+    return ["", "## 这条复现测试钉的规则", "",
+            f"> {invariant}", "",
+            "写复现的那一步给的说法，**仅供参考**，不参与判定 —— "
+            "判定只看测试结果。合并之前值得对着它看一眼 diff："
+            "补丁是按这条规则改的，还是只让那一条用例通过。"]
+
+
 def count_fixed(results: list[dict[str, Any]]) -> int:
     """判定为「已修复」的用例数。
 
@@ -273,6 +292,7 @@ def render_report(state: dict[str, Any]) -> str:
         lines.append(
             f"| `{r['test_id']}` | {_VERDICT_CN.get(r['verdict'], r['verdict'])} "
             f"| {r['attempts']} | {r['abort_reason'] or '—'} |")
+    lines += _invariant_section(state.get("invariant"))
     lines += _signal_section(state.get("signals") or [])
 
     # 一个都没修好时不给合并命令：那条分支与 HEAD 逐字相同，`git merge` 是在

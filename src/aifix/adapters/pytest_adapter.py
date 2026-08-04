@@ -11,7 +11,7 @@ import sys
 import tomllib
 from pathlib import Path, PurePosixPath
 
-from ..signals import under_dirs
+from ..checks.signals import under_dirs
 from .base import Failure, SourceCandidate
 
 # 走不进去的目录。`.venv` 是硬需求而不是优化：仓库里的虚拟环境有上万个 .py，

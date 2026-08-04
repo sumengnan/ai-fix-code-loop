@@ -15,7 +15,7 @@ from ..adapters.pytest_adapter import (PytestAdapter,
                                        resolve_test_python)
 from ..adapters.vitest_adapter import VitestAdapter
 from ..graph import COLLECTION_ABORT_KIND, AifixState, trace_of
-from ..testenv import sanitized_command
+from ..runtime.testenv import sanitized_command
 
 # 全项目唯一的适配器注册表。preflight_node 按插入顺序逐个 detect()，
 # adapter_for 按名字取，两种用法共用这一份数据 —— 曾经
@@ -441,7 +441,7 @@ async def _run_one_full(worktree: Path, adapter: ProjectAdapter,
     await sb.start()
     try:
         # 剥掉 aifix 自己的 AIFIX_* 变量：它们会被目标项目读走
-        # （见 aifix.testenv 里那段实测）
+        # （见 aifix.runtime.testenv 里那段实测）
         res = await sb.exec(sanitized_command(adapter.full_test_command()),
                             timeout)
         paths = adapter.report_paths(worktree)

@@ -17,7 +17,7 @@ from ..cli import run_once
 from ..config import AifixConfig
 from ..graph import MODEL_ABORT_KIND
 from ..nodes.baseline import COLLECTION_ABORT_KIND
-from ..signals import same_file
+from ..checks.signals import same_file
 from .task import Task, TaskResult
 from .workspace import prepare_task_repo
 
@@ -124,7 +124,7 @@ def locate_hit(suspect: str | None, gold_files: list[str]) -> bool:
     带任何目录）的情况之所以命中，是因为它本身就是「分段序列长度为 1 的
     后缀」，符合同一条规则，不是放宽出的特例。
 
-    分段后缀匹配本身在 `aifix.signals.same_file` —— 补丁合理性信号里的
+    分段后缀匹配本身在 `aifix.checks.signals.same_file` —— 补丁合理性信号里的
     `files_outside_suspect` 问的是同一个问题「模型说的那个文件和我手上这
     个是不是同一个」。两边各留一份实现会各自漂移，届时同一对路径可能在定
     位准确率里算命中、在越界信号里算越界。

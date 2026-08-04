@@ -11,9 +11,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .budget import RunBudget
+from .runtime.budget import RunBudget
 from .config import AifixConfig
-from .delivery import Worktree
+from .runtime.delivery import Worktree
 from .graph import (MODEL_ABORT_KIND, PREFLIGHT_ABORT_KIND, AifixState,
                     check_circuit_breaker, new_state)
 from .nodes.baseline import COLLECTION_ABORT_KIND, baseline_node
@@ -23,14 +23,14 @@ from .nodes.preflight import preflight_node, probe_model
 from .nodes.report import (cost_is_unknown, count_fixed, render_report,
                            report_node)
 from .nodes.verify import verify_node
-from .progress import NullProgress, TerminalProgress
-from . import pending as pending_store
+from .observe.progress import NullProgress, TerminalProgress
+from .runtime import pending as pending_store
 # replay 与 trajectory 可以放在模块顶部：它们只读 jsonl / sqlite，一个
 # aifix 内部模块都不 import，不存在 eval 子包那条 `eval.runner → cli` 的环
 # （trajectory 宁可复制一份 SIGNAL_KEYS 也不 import eval.runner，正是为此）。
-from .replay import render as render_replay
-from .trace import RunTrace
-from .trajectory import DB_RELPATH, ingest, query_stats
+from .observe.replay import render as render_replay
+from .observe.trace import RunTrace
+from .observe.trajectory import DB_RELPATH, ingest, query_stats
 
 
 # 「这次 run 没跑成」的四种中止 —— 退出码非 0。**每加一种都要列进来**：

@@ -9,12 +9,12 @@ from ..agents.reviewer import SYSTEM_PROMPT as REVIEWER_PROMPT
 from ..agents.reviewer import Review
 from ..agents.reviewer import build_prompt as build_review_prompt
 from ..agents.reviewer import parse_review
-from ..delivery import Worktree
+from ..runtime.delivery import Worktree
 from ..graph import AifixState, trace_of
-from ..metamorphic import Metamorphic, diverging_mutations
-from ..necessity import Necessity, unnecessary_changes
-from ..signals import analyze
-from ..verify import compare
+from ..checks.metamorphic import Metamorphic, diverging_mutations
+from ..checks.necessity import Necessity, unnecessary_changes
+from ..checks.signals import analyze
+from ..checks.verify import compare
 from .baseline import adapters_from_state, run_full_suite, run_scoped
 
 

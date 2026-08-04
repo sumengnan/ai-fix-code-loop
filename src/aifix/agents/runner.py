@@ -9,7 +9,7 @@ from harness.events import (Event, ModelUsage, RunError, TextDelta,
                             ToolFinished, ToolStarted)
 from harness.types import ToolCall, ToolResult
 
-from ..money import Money
+from ..runtime.money import Money
 
 
 @dataclass

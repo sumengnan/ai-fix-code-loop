@@ -7,7 +7,7 @@ from harness.config import HarnessConfig
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from .money import CNY, CURRENCIES, DEFAULT_USD_TO_CNY, USD, Money
+from .runtime.money import CNY, CURRENCIES, DEFAULT_USD_TO_CNY, USD, Money
 
 
 class AifixConfig(BaseSettings):

@@ -30,15 +30,15 @@ from typing import Any, Callable
 from ..config import AifixConfig
 from ..graph import (COLLECTION_ABORT_KIND, MODEL_ABORT_KIND,
                      PREFLIGHT_ABORT_KIND)
-from ..delivery import COMMIT_EMAIL, COMMIT_NAME
-from ..traces import TRACES_BRANCH
+from ..runtime.delivery import COMMIT_EMAIL, COMMIT_NAME
+from ..observe.traces import TRACES_BRANCH
 from ..nodes.report import count_fixed
-from ..progress import TerminalProgress
+from ..observe.progress import TerminalProgress
 from ..reproduce import (KIND_CALL_FAILED, KIND_COST_CAPPED,
                          KIND_EMPTY_ANSWER, KIND_MISSING_INFO,
                          KIND_NO_CONVERGENCE, KIND_TRUNCATED,
                          KIND_UNPARSEABLE, ReproduceOutcome)
-from .. import pending as pending_store
+from ..runtime import pending as pending_store
 from ..agents.fixer import format_answer
 from ..agents.reproducer import Reproduction
 from .event import COMMAND, authorize
@@ -142,7 +142,7 @@ def _trace_reproduce(repo: Path, run_id: str, out: Any,
     失败不能影响主流程：这是诊断数据，不是产出。磁盘满、路径没权限都不该让
     一次本来能交付的 run 变成失败。
     """
-    from ..trace import RunTrace
+    from ..observe.trace import RunTrace
     try:
         t = RunTrace(Path(repo) / ".aifix" / "runs" / run_id, run_id=run_id)
         try:
@@ -210,7 +210,7 @@ async def handle(
     from ..cli import run_once
     from ..nodes.baseline import detect_adapter
     from ..reproduce import red_check, reproduce, write_reproduction
-    from ..traces import publish_traces
+    from ..observe.traces import publish_traces
     from ..adapters.pytest_adapter import resolve_test_python
 
     reproduce_fn = reproduce_fn or reproduce
@@ -548,7 +548,7 @@ async def handle(
                    f"另一道闸。\n\n{state.get('report_md') or ''}")
         return HandleResult(1, "pr_failed")
 
-    # trace 落到孤儿分支上 —— runner 是临时的，不推就全没了（见 aifix.traces）。
+    # trace 落到孤儿分支上 —— runner 是临时的，不推就全没了（见 aifix.observe.traces）。
     #
     # **失败不能影响交付**：补丁已经推上去、PR 已经开了，为了一次归档失败把
     # 整个 job 弄红，等于让人以为修复没成功。出声但不改结果。

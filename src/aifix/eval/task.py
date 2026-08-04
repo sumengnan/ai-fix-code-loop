@@ -50,7 +50,7 @@ class TaskResult(BaseModel):
     # mined | mutated，跟随对应 Task.origin 走，供 score.summarize_by_origin
     # 分开统计
     origin: str = "mined"
-    # 补丁合理性静态信号的条数（见 aifix.signals）。不改判定，只标注
+    # 补丁合理性静态信号的条数（见 aifix.checks.signals）。不改判定，只标注
     signals: int = 0
 
 

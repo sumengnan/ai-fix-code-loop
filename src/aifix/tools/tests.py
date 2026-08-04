@@ -8,7 +8,7 @@ from harness.sandbox.base import Sandbox
 from harness.tools.base import Tool, ToolError
 from harness.tools.builtins._sandbox_util import format_exec
 
-from ..testenv import sanitized_command
+from ..runtime.testenv import sanitized_command
 
 from ..adapters.base import ProjectAdapter
 

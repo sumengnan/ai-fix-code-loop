@@ -15,9 +15,9 @@ from ..agents.fixer import (build_initial_messages, build_registry,
 from ..agents.runner import consume
 from ..config import AifixConfig
 from ..graph import AifixState, progress_of, trace_of
-from ..progress import StepReporter
+from ..observe.progress import StepReporter
 from ..tools.ask import Pending
-from ..violations import count_violations
+from ..checks.violations import count_violations
 from .baseline import adapter_for_test
 
 _EMPTY_FEEDBACK = (

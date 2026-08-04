@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import AifixConfig
-from ..delivery import ensure_clean
+from ..runtime.delivery import ensure_clean
 from ..graph import PREFLIGHT_ABORT_KIND, AifixState
 from .baseline import ADAPTERS, detect_adapters
 

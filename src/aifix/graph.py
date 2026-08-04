@@ -162,7 +162,7 @@ def progress_of(state: AifixState):
     **横切**的，让每个节点的签名各加一个参数，等于每加一处出声点就要改一遍
     调用链。哑实现是默认值 —— eval 并行跑几十个 run，默认出声会串成一团。
     """
-    from .progress import NullProgress
+    from .observe.progress import NullProgress
     p = state.get("_progress")
     return p if p is not None else NullProgress()
 

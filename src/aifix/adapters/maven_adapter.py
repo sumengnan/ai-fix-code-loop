@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path, PurePosixPath
 
-from ..signals import under_dirs
+from ..checks.signals import under_dirs
 from .base import Failure, SourceCandidate
 
 # Java 栈帧：`\tat demo.Calc.divide(Calc.java:9)`。
