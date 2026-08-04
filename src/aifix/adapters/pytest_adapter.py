@@ -613,6 +613,15 @@ class PytestAdapter:
         path = "/".join(parts[:i]) + ".py"
         return "::".join([path, *parts[i:], name])
 
+    def example_test_id(self) -> str:
+        """两种形状都给：模块级函数与类内方法。
+
+        只给一种的话，模型写类内测试时会照着模块级那条拼，得到
+        `tests/test_x.py::test_y` 而实际用例在类里 —— 那个 id 跑不出结果。
+        """
+        return ("tests/test_calc.py::test_add"
+                "（类内的是 tests/test_calc.py::TestCalc::test_add）")
+
     def is_file_level_id(self, test_id: str) -> bool:
         """收集错误发出的 id 就是文件路径本身，用例 id 一定带 `::`。
 

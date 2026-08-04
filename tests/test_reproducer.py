@@ -216,3 +216,61 @@ def test_a_later_object_wins_over_an_earlier_one():
            "但实际上我能复现：\n" + _ok())
     r = parse_reproduction(raw, _IS_TEST)
     assert r is not None and r.can_reproduce is True
+
+
+# --------------------------------------------------- 用例 id 的样例
+
+def test_the_prompt_carries_a_concrete_id_example():
+    """**实测逼出来的**（2026-08-04，qwen-coder-plus 跑 ai-learning-helper#84）。
+
+    系统提示词里只写「格式与本项目其余用例一致」，而模型没见过本项目的 id ——
+    于是它给出 unittest 方言 `TestC.test_x`。测试本身写得完全正确，却被
+    `_is_coherent` 里「id 要能追溯到 test_file」那道闸打回，整轮作废。
+    一次做对了活、却因为没人告诉它格式而白跑的失败。
+    """
+    from aifix.adapters.pytest_adapter import PytestAdapter
+
+    a = PytestAdapter()
+    p = build_prompt(_TITLE, _BODY, a.test_dirs(), example_id=a.example_test_id())
+    assert "tests/test_calc.py::test_add" in p
+    assert "target_test_id" in p, "样例要和字段名挨在一起，模型才知道它管哪一项"
+
+
+def test_no_example_means_no_placeholder():
+    """给空串时整段不出现，而不是印一个「（未知）」—— 占位符对模型没有帮助，
+    只会占掉上下文。"""
+    p = build_prompt(_TITLE, _BODY, ["tests"], example_id="")
+    assert "用例 id 长这样" not in p
+
+
+def test_each_adapter_gives_its_own_dialect():
+    """三家语法差得很远，样例只能由适配器给。
+
+    写死一份的话，另外两种体系的模型会照着错的格式拼 —— 而那个 id 不会报错，
+    只会「跑不出结果」。
+    """
+    from aifix.adapters.maven_adapter import MavenAdapter
+    from aifix.adapters.pytest_adapter import PytestAdapter
+    from aifix.adapters.vitest_adapter import VitestAdapter
+
+    assert "::" in PytestAdapter().example_test_id()
+    assert "#" in MavenAdapter().example_test_id()
+    assert " > " in VitestAdapter().example_test_id()
+
+
+def test_every_example_survives_the_coherence_check():
+    """**样例本身必须过得了那道闸。** 给一个自己都过不了的样例，等于把模型
+    直接引向失败 —— 而这条测试正是那次真跑教会我们要写的。
+    """
+    import json
+
+    from aifix.adapters.pytest_adapter import PytestAdapter
+
+    a = PytestAdapter()
+    # 取样例里第一个形状（括号里那个是补充说明，不是 id 本身）
+    example = a.example_test_id().split("（")[0].strip()
+    raw = json.dumps({
+        "can_reproduce": True,
+        "test_file": "tests/test_calc.py",
+        "test_code": "x", "target_test_id": example, "missing_info": []})
+    assert parse_reproduction(raw, a.is_test_path) is not None, example

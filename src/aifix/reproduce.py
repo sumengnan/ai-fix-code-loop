@@ -342,7 +342,8 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
             price_map=config.price_map,
         )
         prompt = build_prompt(issue_title, issue_body, adapter.test_dirs(),
-                              max_steps=config.reproducer_max_steps)
+                              max_steps=config.reproducer_max_steps,
+                              example_id=adapter.example_test_id())
         # 美元闸：复现最多用掉整份预算的 reproducer_budget_share。
         # 不设的话它能把修复那一步饿死（见 config 里那段实测）。
         # budget_usd 为 0 时传 None —— 那是「不设闸」，与「额度已扣光」不同，

@@ -65,22 +65,35 @@ class Reproduction(BaseModel):
 
 
 def build_prompt(issue_title: str, issue_body: str, test_dirs: list[str],
-                 max_steps: int | None = None) -> str:
-    """测试目录由**适配器**给，不让模型猜。
+                 max_steps: int | None = None,
+                 example_id: str = "") -> str:
+    """测试目录与 id 样例都由**适配器**给，不让模型猜。
 
-    猜错的后果不是「路径不好看」：落在产品目录下的文件，「不许改测试文件」
-    那道守卫按 test_dirs 判定时不认它，于是修复阶段的 agent 可以随手改掉自己
-    的判卷标准。pytest 是 tests/，Maven 是 src/test/java —— 适配器已经知道
-    答案（见 ProjectAdapter.test_dirs），没有理由让模型再猜一次。
+    目录猜错的后果不是「路径不好看」：落在产品目录下的文件，「不许改测试文件」
+    那道守卫不认它，于是修复阶段的 agent 可以随手改掉自己的判卷标准。pytest 是
+    tests/，Maven 是 src/test/java —— 适配器已经知道答案，没有理由让模型再猜。
+
+    **id 样例是实测逼出来的**（2026-08-04，qwen-coder-plus 跑
+    ai-learning-helper#84）：系统提示词里只写「格式与本项目其余用例一致」，而
+    模型没见过本项目的 id，于是给出 unittest 方言 `TestC.test_x`。测试本身写得
+    完全正确，却被「id 要能追溯到 test_file」那道闸打回，整轮作废 —— 一次做对了
+    活却因为没人告诉它格式而白跑的失败。
+
+    样例给空串时整段不出现，而不是印一个「（未知）」：一个占位符对模型没有帮助，
+    只会占掉上下文。
     """
     dirs = "、".join(test_dirs) if test_dirs else "（未知）"
     # 把步数上限写进 prompt。不告诉它预算，它无从判断「该收手了」——
     # 实测（2026-07-30，issue #1）就是这么翻满 25 步、一个字没作答的。
     budget = (f"你最多还能调用 {max_steps} 次工具，用完必须作答。\n\n"
               if max_steps else "")
+    sample = (f"本项目的用例 id 长这样：{example_id}\n"
+              f"target_test_id **必须**用这个格式，而且要能对上你写下的那个文件。\n\n"
+              if example_id else "")
     return (
         f"本项目的测试目录：{dirs}\n"
         f"新测试文件必须写在其中之一的下面。\n\n"
+        f"{sample}"
         f"{budget}"
         f"缺陷报告标题：{issue_title}\n\n"
         f"<issue>\n{issue_body}\n</issue>\n")
