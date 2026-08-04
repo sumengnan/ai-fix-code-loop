@@ -200,7 +200,7 @@ on:
   # 一条半年前的 issue 被悄悄改成 /aifix 开头来触发。
   issues:
     types: [opened]
-  # 第一行是 /aifix 的评论 —— 用来再跑一次，以及回答 `/aifix <编号>`。
+  # 第一行是 /aifix 的评论 —— 再跑一次、补充说明、回答上一轮的提问。
   issue_comment:
     types: [created]
 
@@ -350,7 +350,7 @@ on:
   # 主入口：正文第一行是 /aifix 的新 issue。理由与判据同上面那份
   issues:
     types: [opened]
-  # 再跑一次 / 回答 `/aifix <编号>`
+  # 再跑一次 / 补充说明 / 回答提问
   issue_comment:
     types: [created]
 

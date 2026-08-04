@@ -4,7 +4,7 @@
 
 - `issues` / `opened` —— **主入口**，正文第一行是 `/aifix` 的新 issue。
   这条路上触发的动作与被读的文本是同一个人写的同一个对象，注入面**结构上**归零。
-- `issue_comment` / `created` —— 用来再跑一次，以及回答 `/aifix <编号>`。
+- `issue_comment` / `created` —— 用来再跑一次、补充说明、回答上一轮的提问。
   这条路要查两个人：按按钮的（评论者）和写正文的（issue 作者）。
 
 判定权不能交给模型：让它读一段文本去回答「这算不算授权」，等于把闸门交给一个
@@ -20,12 +20,25 @@ from typing import Any
 
 COMMAND = "/aifix"
 
-# `/aifix 2` —— 回答上一轮 `ask_user` 提的那个问题。
+# 整个命令语法就这一条正则，**只有两种形态**：
 #
-# 为什么是编号而不是自由文本：自由回复要再过一次模型去解析意图，而那一步
-# 出错的方式是**按用户没说过的意图改了代码** —— 比不问更糟。编号让「人说了
-# 什么」到「机器做什么」这一段是纯确定性的。
-_ANSWER = re.compile(rf"^{re.escape(COMMAND)}\s+(\d+)$")
+#     /aifix            → text 为空
+#     /aifix <文字>      → text 是那段文字
+#
+# `\s+` 不能省：没有它 `/aifixfoo` 会被当成命令，而那只是一个恰好以这几个字符
+# 开头的词。行尾的可选分组让光 `/aifix` 也匹配得上。
+#
+# **那段文字是什么意思，由状态决定，不由语法决定** —— issue 上有待答问题时它是
+# 回答，没有时它是对本次缺陷的补充说明（见 handle）。这是有意的取舍：引入哨兵
+# 或保留词能让语法自解释，代价是每加一个命令就有一类写法被悄悄改变含义。这里
+# 的代价则是同一句话在两种状态下含义不同，缓解办法是**机器每次都回显自己采纳
+# 的是哪种解读** —— 静默采纳一种解读是这个项目最忌讳的形态。
+_COMMAND_RE = re.compile(rf"^{re.escape(COMMAND)}(?:\s+(.*))?$")
+
+# 纯数字的回答（`/aifix 2`）仍然单独认一手：它走 `pending.choose()`，选的就是
+# 模型自己列出的第 N 项，这条审计记录是无歧义的。自由回答没有这个性质，所以
+# 两条路都留着，而不是用自由文本把编号取代掉。
+_DIGITS = re.compile(r"^\d+$")
 
 
 @dataclass(frozen=True)
@@ -37,10 +50,24 @@ class IssueEvent:
     owner: str
     commenter: str
     comment_id: int
-    # `/aifix 2` 里那个 2（从 1 数起），普通的 `/aifix` 是 None。
-    # 权限判定对两者**完全一样** —— 回答一个问题会直接决定代码怎么改，
+    # `/aifix` 后面那段文字，原样带出来（已 strip）。光 `/aifix` 是空串。
+    #
+    # **这里只做词法，不做语义**：它是回答还是补充说明，取决于 issue 上有没有
+    # 待答问题，而那要查一次 GitHub —— 授权判定是纯函数（脱网可穷举），不该
+    # 为了分类去碰网络。分类在 handle 里做。
+    #
+    # 权限判定对两种形态**完全一样** —— 回答一个问题会直接决定代码怎么改，
     # 它和发起一次修复是同一级别的动作，不该有一条更宽的门。
-    answer_choice: int | None = None
+    text: str = ""
+
+    @property
+    def choice(self) -> int | None:
+        """纯数字形态的编号（从 1 数起），否则 None。
+
+        `int(text)` 不够：`٢`（阿拉伯数字二）之类的字符 `str.isdigit()`
+        与 `int()` 都收，而它显然不是人想打的那个 2。用 ASCII 数字正则判死。
+        """
+        return int(self.text) if _DIGITS.match(self.text) else None
 
 
 @dataclass(frozen=True)
@@ -107,7 +134,7 @@ def authorize(payload: dict[str, Any],
     """这条事件要不要触发一次修复。两条入口，判定都在这里。
 
     - **issue 正文**以 `/aifix` 开头（`issues` / `opened`）—— 开 issue 即触发
-    - **评论**第一行是 `/aifix` 或 `/aifix <编号>`（`issue_comment` / `created`）
+    - **评论**第一行是 `/aifix` 或 `/aifix <文字>`（`issue_comment` / `created`）
 
     `allowed_users` 是显式白名单（**登录名，已 casefold**）。它是**参数不是环境
     变量**：这个函数是全项目最要紧的一道判定，保持纯函数才能被脱网穷举 ——
@@ -231,7 +258,7 @@ def _from_issue(payload: dict[str, Any], issue: dict[str, Any],
 def _from_comment(payload: dict[str, Any], issue: dict[str, Any],
                   repo: dict[str, Any],
                   allowed_users: frozenset[str]) -> Decision:
-    """评论触发。用来**再跑一次**，以及回答 `/aifix <编号>`。
+    """评论触发。用来**再跑一次**、补充说明、回答上一轮的提问。
 
     判据比 issue 那条**多一项**，因为这条路上两者不是同一个人：模型读的是
     issue 正文，而按按钮的是评论者。所以写正文的人和按按钮的人都要可信。
@@ -247,32 +274,15 @@ def _from_comment(payload: dict[str, Any], issue: dict[str, Any],
         # 那条路永远会触发，不受那层保护 —— 这一道是给那条路留的。
         return Decision(False, "评论来自 bot")
 
-    first = _first_line(comment.get("body") or "")
-    choice: int | None = None
-    if first != COMMAND:
-        m = _ANSWER.match(first)
-        if m is None:
-            # **写歪了要出声，写的不是命令才闭嘴。** 两者的区别是第一行有没有
-            # 以 `/aifix` 开头 —— 开了头就说明这个人确实在下命令，只是格式不对。
-            #
-            # 实测踩过（2026-08-04）：`/aifix 重跑一下把 PR 开出来` 这条评论让
-            # workflow 的 `if:`（用的是 startsWith）**起了 job**、装完全套依赖，
-            # 然后在这里被静默丢弃 —— 没有评论、没有 reaction，issue 上一点痕迹
-            # 都没有。写命令的人看到的就是「什么都没发生」。
-            #
-            # 这与 aifix.yml 里「没权限的人打了 /aifix 要回帖告诉他」是同一条
-            # 理由：静默丢弃会让人以为它已经在跑了，而那正是本项目栽过十次以上
-            # 的失败形态。
-            if first.startswith(COMMAND):
-                return Decision(
-                    False,
-                    f"`{first}` —— 命令认不出来。\n\n"
-                    f"第一行必须**恰好**是 `{COMMAND}`（重跑一次），"
-                    f"或者 `{COMMAND} <编号>`（回答上一轮的提问）。\n"
-                    f"想说的话写在第二行往后，第一行只放命令。",
-                    notify=True)
-            return Decision(False, f"第一行不是 {COMMAND}")
-        choice = int(m.group(1))
+    m = _COMMAND_RE.match(_first_line(comment.get("body") or ""))
+    if m is None:
+        # 绝大多数评论都不是命令，这一类一个字都不能回。
+        #
+        # 从前这里还有一支「以 /aifix 开头但格式不对 → 出声拒绝」——
+        # `/aifix <文字>` 成为合法写法之后它再也进不来了，已删。留着会让人以为
+        # 还有一类写法会被拒，而实际上命令后面写什么都收。
+        return Decision(False, f"第一行不是 {COMMAND}")
+    text = (m.group(1) or "").strip()
 
     # 走到这里，有人确实在等一个回应了 —— 下面的拒绝全部 notify=True。
     is_org = _is_org(repo)
@@ -301,10 +311,13 @@ def _from_comment(payload: dict[str, Any], issue: dict[str, Any],
     return Decision(True, event=IssueEvent(
         number=int(issue.get("number", 0)),
         title=issue.get("title") or "",
-        body=issue.get("body") or "",
+        # **和 issue 触发那条路一样剥掉命令行。** 从前这里是原样取正文，于是
+        # 评论重跑时模型读到的第一句是 `/aifix`，而首次触发时不是 —— 同一个
+        # issue 的两次跑，喂进去的东西不一样。理由见 _from_issue 里那段。
+        body=_strip_command(issue.get("body") or ""),
         repo_full_name=repo.get("full_name") or "",
         owner=owner,
         commenter=commenter,
         comment_id=int(comment.get("id", 0)),
-        answer_choice=choice,
+        text=text,
     ))

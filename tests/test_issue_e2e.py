@@ -81,6 +81,14 @@ class _Gh:
     def upsert_status(self, issue, body):
         self.statuses.append(body)
 
+    def status_body(self, issue):
+        """后写的整条覆盖先写的 —— 与真客户端「只维护一条状态评论」一致。
+
+        这条评论是待答问题与上一次那份补充说明的持久层，替身恒返回空串的话，
+        「跨轮活下来」这件事在测试里根本发生不了。
+        """
+        return self.statuses[-1] if self.statuses else ""
+
     def create_pr(self, head, title, body, base=None):
         self.prs.append({"head": head, "title": title, "body": body})
         return "https://example.invalid/pr/1"

@@ -45,6 +45,18 @@ class _Gh:
     def upsert_status(self, issue, body):
         self.statuses.append((issue, body))
 
+    def status_body(self, issue):
+        """真客户端维护的是**一条**状态评论：后写的整条覆盖先写的。
+
+        替身照这个语义来，而不是恒返回空串 —— 状态评论现在同时是待答问题和
+        上一次那份补充说明的持久层，一个不会回读的替身没法验证「跨轮活下来」，
+        而那正是这条路最容易悄悄断掉的地方。
+        """
+        for number, body in reversed(self.statuses):
+            if number == issue:
+                return body
+        return ""
+
     def create_pr(self, head, title, body, base=None):
         self.prs.append({"head": head, "title": title, "body": body})
         return "https://example.invalid/pr/1"
