@@ -340,7 +340,7 @@ async def test_environment_aborts_exit_nonzero(tmp_path):
     反向对照：预算耗尽是**正常收场**（活干到钱花完为止，结论仍可信），退 0。
     """
     for kind, code in (("crash", 1), ("collect", 1), ("model", 1),
-                       ("usd", 0), ("wall", 0), (None, 0)):
+                       ("cny", 0), ("wall", 0), (None, 0)):
         st = _state(branch="", abort_kind=kind)
         res, _, _ = await _handle(_payload(), tmp_path, state=st)
         assert res.exit_code == code, f"{kind} 应该退 {code}"
@@ -352,24 +352,24 @@ async def test_the_reproduce_spend_is_deducted_from_the_run_budget(tmp_path):
     """复现那一步花的钱必须从后面的额度里扣掉。
 
     它在 `run_once` **之外**发起调用，三层预算闸一分都管不到。不扣的话，
-    设 AIFIX_BUDGET_USD=0.50 实际可能花掉两倍 —— 而这个项目对预算的措辞是
+    设 AIFIX_BUDGET_CNY=0.50 实际可能花掉两倍 —— 而这个项目对预算的措辞是
     「越线之后不再发起新的模型调用」，超支上界必须是可推导的。一个精确措辞
     但从没验证过的上界实际超支 4 倍，是这个仓库已经犯过的错。
     """
     seen = {}
     fakes, _ = _fakes(repro=ReproduceOutcome(_REPRO, tokens=1200,
-                                             cost_usd=0.30))
+                                             cost_cny=0.30))
 
     async def _run(repo, config, **k):
-        seen["usd"] = config.budget_usd
+        seen["cny"] = config.budget_cny
         seen["tokens"] = config.budget_tokens
         return _state()
 
     fakes["run_fn"] = _run
-    cfg = AifixConfig(budget_usd=0.50, budget_tokens=10_000)
+    cfg = AifixConfig(budget_cny=0.50, budget_tokens=10_000)
     (tmp_path / "tests").mkdir(exist_ok=True)
     await handle(_payload(), tmp_path, cfg, _Gh(), **fakes)
-    assert seen["usd"] == pytest.approx(0.20)
+    assert seen["cny"] == pytest.approx(0.20)
     assert seen["tokens"] == 8_800
 
 
@@ -380,37 +380,37 @@ async def test_the_budget_never_goes_negative(tmp_path):
     """
     seen = {}
     fakes, _ = _fakes(repro=ReproduceOutcome(_REPRO, tokens=99_999,
-                                             cost_usd=9.9))
+                                             cost_cny=9.9))
 
     async def _run(repo, config, **k):
-        seen["usd"], seen["tokens"] = config.budget_usd, config.budget_tokens
+        seen["cny"], seen["tokens"] = config.budget_cny, config.budget_tokens
         return _state()
 
     fakes["run_fn"] = _run
     (tmp_path / "tests").mkdir(exist_ok=True)
     await handle(_payload(), tmp_path,
-                 AifixConfig(budget_usd=0.50, budget_tokens=10_000),
+                 AifixConfig(budget_cny=0.50, budget_tokens=10_000),
                  _Gh(), **fakes)
-    assert seen["usd"] == 0.0 and seen["tokens"] == 0
+    assert seen["cny"] == 0.0 and seen["tokens"] == 0
 
 
 async def test_the_reproduce_cost_is_visible_in_the_pr(tmp_path):
     """扣掉还不够，还得让人看见 —— 报告里的成本只算 run_once 那一段，
     PR 上不写的话，这笔钱在任何一份产物里都不存在。"""
     fakes, _ = _fakes(repro=ReproduceOutcome(_REPRO, tokens=1200,
-                                             cost_usd=0.30))
+                                             cost_cny=0.30))
     gh = _Gh()
     (tmp_path / "tests").mkdir(exist_ok=True)
     await handle(_payload(), tmp_path, AifixConfig(), gh, **fakes)
     assert "1,200" in gh.prs[0]["body"] or "1200" in gh.prs[0]["body"]
 
 
-def test_issue_handle_refuses_a_usd_budget_without_a_price_map(
+def test_issue_handle_refuses_a_budget_without_a_price_map(
         tmp_path, monkeypatch):
     """与 `aifix run` 同一道闸。在 Actions 上这个假保证尤其贵：没人盯着终端，
     发现时钱已经花完了。"""
     from aifix.cli import _cmd_issue, build_parser
-    monkeypatch.setenv("AIFIX_BUDGET_USD", "0.5")
+    monkeypatch.setenv("AIFIX_BUDGET_CNY", "3.5")
     monkeypatch.delenv("AIFIX_PRICE_MAP", raising=False)
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(tmp_path / "ev.json"))
     args = build_parser().parse_args(
@@ -421,7 +421,7 @@ def test_issue_handle_refuses_a_usd_budget_without_a_price_map(
 
 
 async def test_the_wall_clock_spent_on_reproduce_is_deducted_too(tmp_path):
-    """墙钟与美元、token 同理 —— 复现那一步耗掉的时间也不在闸内。
+    """墙钟与金额、token 同理 —— 复现那一步耗掉的时间也不在闸内。
 
     不扣的话，workflow 里那条不变式会被击穿：`AIFIX_BUDGET_WALL_SECONDS=3600`
     配 `timeout-minutes: 90`（5400 秒），复现 3600 + 修复 3600 = 7200 > 5400，
@@ -571,3 +571,28 @@ async def test_the_core_loop_gets_a_progress_reporter(tmp_path):
     prog._stream = buf
     prog.note("测试心跳")
     assert buf.getvalue().strip(), "传进去的 progress 一个字都不印"
+
+
+def test_the_old_usd_budget_variable_still_arms_the_same_gate(
+        tmp_path, monkeypatch):
+    """`AIFIX_BUDGET_USD` 是旧名，仍按**美元**读并折成人民币。
+
+    两件事都要钉住：折算过的值确实进了 budget_cny（不是被当成人民币直接
+    用，那是一次静默的 7 倍缩水），以及它照样算「用户显式要了一道闸」——
+    不算的话，只设了旧变量的仓库会绕过「没有价格表就拒绝启动」那一条，
+    于是那个假保证悄悄回来了。
+    """
+    from aifix.cli import _cmd_issue, build_parser
+    monkeypatch.setenv("AIFIX_BUDGET_USD", "0.5")
+    monkeypatch.delenv("AIFIX_BUDGET_CNY", raising=False)
+    monkeypatch.delenv("AIFIX_PRICE_MAP", raising=False)
+
+    cfg = AifixConfig()
+    assert cfg.budget_cny == pytest.approx(0.5 * cfg.usd_to_cny)
+
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(tmp_path / "ev.json"))
+    args = build_parser().parse_args(
+        ["issue", "handle", "--repo", str(tmp_path)])
+    with pytest.raises(SystemExit) as e:
+        _cmd_issue(args)
+    assert "价格表" in str(e.value)

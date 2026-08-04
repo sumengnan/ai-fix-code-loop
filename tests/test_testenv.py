@@ -1,7 +1,7 @@
 """跑目标项目的测试时，不能把 aifix 自己的配置环境带进去。
 
 实测（2026-07-30，issue #2 的真跑）：workflow 给 `aifix issue handle` 设了
-`AIFIX_PRICE_MAP` / `AIFIX_BUDGET_USD` / `AIFIX_FIXER__MODEL` 等，这些变量随
+`AIFIX_PRICE_MAP` / `AIFIX_BUDGET_CNY` / `AIFIX_FIXER__MODEL` 等，这些变量随
 进程环境一路传进了**目标项目的 pytest 子进程**。而目标项目恰好是 aifix 自己，
 它的 `AifixConfig` 读的正是这些变量 —— baseline 里凭空多出 15 个红。
 
@@ -18,7 +18,7 @@ from aifix.testenv import aifix_vars_in_env, sanitized_command
 
 @pytest.fixture
 def polluted(monkeypatch):
-    monkeypatch.setenv("AIFIX_BUDGET_USD", "2.0")
+    monkeypatch.setenv("AIFIX_BUDGET_CNY", "15.0")
     monkeypatch.setenv("AIFIX_FIXER__MODEL", "some-model")
     monkeypatch.setenv("PATH_LIKE_NORMAL", "keep-me")
 
@@ -26,7 +26,7 @@ def polluted(monkeypatch):
 def test_aifix_vars_are_stripped(polluted):
     cmd = sanitized_command(["python", "-m", "pytest"])
     assert cmd[:1] == ["env"]
-    assert "-u" in cmd and "AIFIX_BUDGET_USD" in cmd
+    assert "-u" in cmd and "AIFIX_BUDGET_CNY" in cmd
     assert "AIFIX_FIXER__MODEL" in cmd
     # 原命令原样跟在后面
     assert cmd[-3:] == ["python", "-m", "pytest"]
@@ -65,7 +65,7 @@ def test_the_child_process_really_does_not_see_them(polluted):
     # 反向对照：不剥的话它们确实在 —— 否则上面那条恒真
     raw = subprocess.run([sys.executable, "-c", probe],
                          capture_output=True, text=True, check=True).stdout
-    assert "AIFIX_BUDGET_USD" in raw
+    assert "AIFIX_BUDGET_CNY" in raw
 
 
 async def test_every_test_running_path_is_sanitized(tmp_path):
@@ -99,7 +99,7 @@ async def test_run_full_suite_hands_the_target_a_clean_environment(
     from aifix.adapters.pytest_adapter import PytestAdapter
     from aifix.nodes.baseline import run_full_suite
 
-    monkeypatch.setenv("AIFIX_BUDGET_USD", "2.0")
+    monkeypatch.setenv("AIFIX_BUDGET_CNY", "15.0")
     monkeypatch.setenv("AIFIX_PRICE_MAP", '{"m":[1,1]}')
 
     (tmp_path / "tests").mkdir()

@@ -37,7 +37,7 @@ from .trajectory import DB_RELPATH, ingest, query_stats
 # 漏掉的后果不是报错，是那一类静默退 0，流水线把它读成成功。preflight 就这么
 # 漏了一整轮（2026-08-01 的功能巡检才撞出来，见 graph.PREFLIGHT_ABORT_KIND）。
 #
-# 预算耗尽（tokens / usd / wall）**不在此列**：那是正常收场 —— 活干到钱花完
+# 预算耗尽（tokens / cny / wall）**不在此列**：那是正常收场 —— 活干到钱花完
 # 为止，结论仍然可信。
 #
 # 只留一份：`run` 与 `answer` 两条命令各写各的话，下次加中止种类必然只改一处。
@@ -107,9 +107,9 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
     LangGraph 的 checkpointer 接进来是 M2 的事（需要先有 trace 落盘）。
 
     **但两条路径不再等价：预算只在这里**。RunBudget、`failure_token_budget`
-    与 `failure_usd_budget` 的分配、以及「越线即中止」的检查全部写在这个
-    函数里；build_graph() 那条路径没有 RunBudget，`failure_usd_budget`
-    一直是 None，整条美元闸不存在。产品入口走的是 run_once，图那条路径
+    与 `failure_cny_budget` 的分配、以及「越线即中止」的检查全部写在这个
+    函数里；build_graph() 那条路径没有 RunBudget，`failure_cny_budget`
+    一直是 None，整条成本闸不存在。产品入口走的是 run_once，图那条路径
     目前只用于结构验证，别拿它去验证任何与花钱有关的保证。
 
     progress：进度回调（见 progress.py），默认 `NullProgress` —— 一个字都不
@@ -179,7 +179,7 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                 state["queue"] = []
 
             budget = RunBudget(total_tokens=config.budget_tokens,
-                               total_usd=config.budget_usd,
+                               total_cny=config.budget_cny,
                                total_seconds=config.budget_wall_seconds)
             budget.start()
 
@@ -210,7 +210,7 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                 remaining_failures = len(state["queue"]) + 1
                 state["failure_token_budget"] = budget.for_failure(
                     remaining_failures)
-                before = state["spent_tokens"], state["spent_usd"]
+                before = state["spent_tokens"], state["spent_cny"]
                 with trace.failure_span(state["current"]), \
                         trace.attempt_span(state["attempt"]):
                     prog.attempt_start(attempt=state["attempt"],
@@ -221,19 +221,19 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                         suspect=diag.get("suspect_file"),
                         anchored=state.get("suspect_anchored", True),
                         tokens=state["spent_tokens"] - before[0])
-                    # detect 不接美元闸是计划登记过的有意偏差，但它花掉的钱
+                    # detect 不接成本闸是计划登记过的有意偏差，但它花掉的钱
                     # 必须**在这里立刻结算**：否则下面算给 fix 的额度是按
                     # 「detect 还没花钱」算出来的，fix 会在可能已经越线的
                     # 状态下发起新调用，「越线之后不再发起新的模型调用」这句
-                    # 话就不成立 —— 实测 budget_usd=20、单次调用 $15、单
-                    # failure 会花掉 $45，超支 1.67 次调用而不是一次。
+                    # 话就不成立 —— 实测（当时的币种是美元）budget=20、单次
+                    # 调用 15、单 failure 会花掉 45，超支 1.67 次调用而不是一次。
                     budget.charge(state["spent_tokens"] - before[0],
-                                  state["spent_usd"] - before[1])
-                    mid = state["spent_tokens"], state["spent_usd"]
+                                  state["spent_cny"] - before[1])
+                    mid = state["spent_tokens"], state["spent_cny"]
                     # 额度必须在 detect 结算之后才算，取的是扣掉 detect 之后
                     # 的剩余。算出 0.0 是正常结果（detect 恰好花光），fix_node
                     # 按 is None 判定，会把它当成扣光的闸而不是「没设闸」。
-                    state["failure_usd_budget"] = budget.usd_for_failure(
+                    state["failure_cny_budget"] = budget.cny_for_failure(
                         remaining_failures)
                     state.update(await fix_node(state, client=fixer_client))
                     if state.get("ask"):
@@ -241,7 +241,7 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                         # 把改动回滚了，没有东西可验，跑一遍只是白花几分钟。
                         # 已经修好的 failure 留在 results 里，报告两样都印。
                         budget.charge(state["spent_tokens"] - mid[0],
-                                      state["spent_usd"] - mid[1])
+                                      state["spent_cny"] - mid[1])
                         state["abort_kind"] = "needs_input"
                         state["abort"] = "等待人工回答后才能继续"
                         trace.fact("abort_kind", "needs_input")
@@ -260,7 +260,7 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                     # 两笔 charge 相加恰好是 after_fix - before：不重复计入，
                     # 也不遗漏。verify_node 零 LLM，不产生花销。
                     budget.charge(state["spent_tokens"] - mid[0],
-                                  state["spent_usd"] - mid[1])
+                                  state["spent_cny"] - mid[1])
                     t_verify = time.monotonic()
                     state.update(await verify_node(state))
                     prog.verified(verdict=state.get("verdict") or "same",
@@ -295,11 +295,11 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
     else:
         _record_run_summary(trace, state)
         state.update(report_node(state))
-        tokens, usd = state["spent_tokens"], state["spent_usd"]
-        # usd 传 None 而不是 0.0：没配价格表时成本恒为 0，印 $0.0000 就是伪造
+        tokens, cny = state["spent_tokens"], state["spent_cny"]
+        # cny 传 None 而不是 0.0：没配价格表时成本恒为 0，印 ¥0.0000 就是伪造
         prog.finished(fixed=count_fixed(state["results"]),
                       total=len(state["baseline_ids"]), tokens=tokens,
-                      usd=None if cost_is_unknown(tokens, usd) else usd)
+                      cny=None if cost_is_unknown(tokens, cny) else cny)
     finally:
         trace.close()
     return state
@@ -318,11 +318,11 @@ def _record_run_summary(trace: RunTrace, state: AifixState) -> None:
     trace.fact("adapter", "+".join(state["adapter_names"]))
     trace.fact("branch", state["branch"])
     trace.fact("fixed", count_fixed(state["results"]))
-    tokens, usd = state["spent_tokens"], state["spent_usd"]
+    tokens, cny = state["spent_tokens"], state["spent_cny"]
     trace.fact("spent_tokens", tokens)
-    # 没配价格表时成本恒为 0，落库存 0.0 就是伪造 $0.00。写 None 是**有意的**
+    # 没配价格表时成本恒为 0，落库存 0.0 就是伪造 ¥0.00。写 None 是**有意的**
     # 事实：「花了钱，但这次不知道花了多少」——与「真的没花钱」是两回事。
-    trace.fact("spent_usd", None if cost_is_unknown(tokens, usd) else usd)
+    trace.fact("spent_cny", None if cost_is_unknown(tokens, cny) else cny)
 
 
 _LABEL_UNSAFE = re.compile(r"[^\w.-]+", re.UNICODE)
@@ -339,31 +339,33 @@ def _safe_label(label: str) -> str:
     return _LABEL_UNSAFE.sub("_", label).strip("_") or "未命名"
 
 
-def require_price_map_for_usd_budget(config: AifixConfig,
-                                     also_explicit: bool = False) -> None:
-    """显式要求了美元上限却没有价格表 —— 当场拒绝。
+def require_price_map_for_budget(config: AifixConfig,
+                                 also_explicit: bool = False) -> None:
+    """显式要求了金额上限却没有价格表 —— 当场拒绝。
 
     also_explicit：给 `eval --budget-total` 用。那个上限不进配置对象
     （它是这一次调用的调度约束，不是项目配置），所以 model_fields_set
-    看不见它，得由调用方把「用户确实要求了美元闸」这件事带进来。
+    看不见它，得由调用方把「用户确实要求了成本闸」这件事带进来。
 
-    不配价格表时 effective_cost 恒为 0，美元闸永远不会触发：用户设了上限，
+    不配价格表时 effective_cost 恒为 0，成本闸永远不会触发：用户设了上限，
     系统欣然接受，然后一分钱不拦。与其给一个假的保证，不如现在就停。
 
     「显式」由 pydantic 的 model_fields_set 判定，默认值不在其中；CLI 的
     --budget 走 model_copy(update=...)，同样会被记住，所以一处判定管住
-    环境变量、构造参数、命令行三条来源。
+    环境变量、构造参数、命令行三条来源。旧名 AIFIX_BUDGET_USD 也算显式：
+    它在配置加载时就折成 budget_cny 并补进了 fields_set（见 config）。
     """
-    explicit = also_explicit or "budget_usd" in config.model_fields_set
+    explicit = also_explicit or "budget_cny" in config.model_fields_set
     if not explicit or config.price_map:
         return
     raise SystemExit(
-        "拒绝启动：设置了美元预算上限，但没有配置价格表，这个上限不会生效。\n"
+        "拒绝启动：设置了预算上限，但没有配置价格表，这个上限不会生效。\n"
         "  没有 price_map 时成本恒为 0，闸永远不触发 —— 与其给一个假的保证，"
         "不如现在就停。\n"
         "  修法一：配置价格表（每千 token 的 [输入价, 输出价]）\n"
         "    export AIFIX_PRICE_MAP='{\"deepseek-v4-pro\": [0.003, 0.006]}'\n"
-        "  修法二：去掉美元上限，改用 AIFIX_BUDGET_TOKENS 限制 token")
+        "    价表按美元填就不用动别的；按人民币填时设 AIFIX_PRICE_CURRENCY=CNY\n"
+        "  修法二：去掉金额上限，改用 AIFIX_BUDGET_TOKENS 限制 token")
 
 
 # run / mine / mutate 三个子命令都在目标项目里真跑测试，都吃这一段。
@@ -393,9 +395,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--test", default=None,
                      help="只修这一个失败用例（test_id）")
     run.add_argument("--budget", type=float, default=None,
-                     help="本次 run 的美元上限。语义是「越线之后不再发起新的"
-                          "模型调用」——成本只有在调用返回后才知道，所以最后"
-                          "那一次必然已经花掉。需要配置 AIFIX_PRICE_MAP")
+                     help="本次 run 的**人民币**上限。语义是「越线之后不再发起"
+                          "新的模型调用」——成本只有在调用返回后才知道，所以"
+                          "最后那一次必然已经花掉。需要配置 AIFIX_PRICE_MAP")
     run.add_argument("--dry-run", action="store_true",
                      help="只跑 preflight + baseline，报告有多少活")
     run.add_argument("--quiet", "-q", action="store_true",
@@ -418,7 +420,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="回答哪一次 run 的问题。不填用最近的那个 —— "
                           "问题是刚才印在屏幕上的，不该再要人去翻一个哈希串")
     ans.add_argument("--budget", type=float, default=None,
-                     help="重跑那一次的美元上限。需要配置 AIFIX_PRICE_MAP")
+                     help="重跑那一次的人民币上限。需要配置 AIFIX_PRICE_MAP")
     ans.add_argument("--quiet", "-q", action="store_true",
                      help="不印进度")
 
@@ -460,9 +462,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="这一轮的模型标签，默认取 fixer 的 model")
     ev.add_argument("--out", default=None)
     ev.add_argument("--budget-per-task", type=float, default=None,
-                    help="每个任务的美元上限")
+                    help="每个任务的人民币上限")
     ev.add_argument("--budget-total", type=float, default=None,
-                    help="整批的美元上限。检查发生在派发时按并发上限预留额度，"
+                    help="整批的人民币上限。检查发生在派发时按并发上限预留额度，"
                          "所以整批超支上界 = 并发数 × 一次模型调用的成本，"
                          "而不是随任务数线性放大")
 
@@ -567,8 +569,8 @@ def main() -> None:
 def _cmd_run(args) -> None:
     config = AifixConfig()
     if args.budget is not None:
-        config = config.model_copy(update={"budget_usd": args.budget})
-    require_price_map_for_usd_budget(config)
+        config = config.model_copy(update={"budget_cny": args.budget})
+    require_price_map_for_budget(config)
     state = asyncio.run(run_once(
         Path(args.repo).resolve(), config, run_id=uuid.uuid4().hex[:8],
         only_test=args.test, dry_run=args.dry_run,
@@ -581,7 +583,7 @@ def _cmd_run(args) -> None:
         # 是崩的：退 0 的话流水线里「跑完了」和「炸了但报告还在」没有区别。
         #
         # 收集错误中止同样退非 0，理由是同一条：这次**没测成**。预算耗尽
-        # （tokens / usd / wall）相反，那是正常收场 —— 活干到钱花完为止，
+        # （tokens / cny / wall）相反，那是正常收场 —— 活干到钱花完为止，
         # 结论仍然可信，所以仍退 0。
         raise SystemExit(1)
 
@@ -614,8 +616,8 @@ def _cmd_answer(args) -> None:
     print(f"已选择：{choice}\n带着这个答复重新跑一次……\n")
     config = AifixConfig()
     if args.budget is not None:
-        config = config.model_copy(update={"budget_usd": args.budget})
-    require_price_map_for_usd_budget(config)
+        config = config.model_copy(update={"budget_cny": args.budget})
+    require_price_map_for_budget(config)
     state = asyncio.run(run_once(
         repo, config, run_id=uuid.uuid4().hex[:8],
         # 只跑当初卡住的那个用例：其余的要么上一轮已经修好并进了交付分支，
@@ -659,7 +661,7 @@ def _cmd_reproduce(args, client: Any = None) -> None:
     print(f"# aifix reproduce\n\n- 适配器：{adapter.name}\n- 标题：{title.strip()}\n")
     out = asyncio.run(reproduce(repo, adapter, config, title.strip(),
                                 body.strip(), client=client))
-    _print_cost(out.tokens, out.cost_usd, config)
+    _print_cost(out.tokens, out.cost_cny, config)
 
     if out.reproduction is None or not out.reproduction.can_reproduce:
         print(f"\n**未能复现。**\n\n{out.reason}")
@@ -693,16 +695,18 @@ def _cmd_reproduce(args, client: Any = None) -> None:
     raise SystemExit(0 if ok else 1)
 
 
-def _print_cost(tokens: int, usd: float, config: AifixConfig) -> None:
-    """没配价格表时印「未知」而不是 $0.0000。
+def _print_cost(tokens: int, cny: float, config: AifixConfig) -> None:
+    """没配价格表时印「未知」而不是 ¥0.0000。
 
-    一行整齐的 $0.0000 会被读成「极其便宜」，而真相是这一列没数据。
-    这个项目为「假的 $0.00」栽过三次。
+    一行整齐的 ¥0.0000 会被读成「极其便宜」，而真相是这一列没数据。
+    这个项目为「假的 0.00」栽过三次。
     """
-    if cost_is_unknown(tokens, usd):
+    if cost_is_unknown(tokens, cny):
         print(f"- 成本：未知（{tokens:,} tokens，未配 AIFIX_PRICE_MAP）")
     else:
-        print(f"- 成本：${usd:.4f}（{tokens:,} tokens）")
+        note = config.money.rate_note()
+        print(f"- 成本：¥{cny:.4f}（{tokens:,} tokens"
+              f"{'，' + note if note else ''}）")
 
 
 def _cmd_issue(args) -> None:
@@ -720,10 +724,10 @@ def _cmd_issue(args) -> None:
         raise SystemExit(1)
 
     config = AifixConfig()
-    # 与 `aifix run` 同一道闸：workflow 里显式设了 AIFIX_BUDGET_USD，而不配
-    # 价格表时成本恒为 0、美元闸永远不触发 —— 用户设了上限，系统欣然接受，
+    # 与 `aifix run` 同一道闸：workflow 里显式设了 AIFIX_BUDGET_CNY，而不配
+    # 价格表时成本恒为 0、成本闸永远不触发 —— 用户设了上限，系统欣然接受，
     # 然后一分钱不拦。在 Actions 上这个假保证尤其贵：没人盯着终端。
-    require_price_map_for_usd_budget(config)
+    require_price_map_for_budget(config)
 
     payload = load_payload(args.event)
     repo = Path(args.repo).resolve()
@@ -829,8 +833,8 @@ def _cmd_eval(args) -> None:
     config = AifixConfig()
     if args.budget_per_task is not None:
         config = config.model_copy(
-            update={"budget_usd": args.budget_per_task})
-    require_price_map_for_usd_budget(
+            update={"budget_cny": args.budget_per_task})
+    require_price_map_for_budget(
         config, also_explicit=args.budget_total is not None)
     label = args.label or config.fixer.model or "未命名"
     tasks = read_jsonl(Path(args.tasks), Task)
@@ -843,7 +847,7 @@ def _cmd_eval(args) -> None:
     print(f"{len(tasks)} 个任务 · {label} · 并行 {args.parallel}")
     results = asyncio.run(run_suite(tasks, config, label, workdir,
                                     parallel=args.parallel, on_done=done,
-                                    total_usd=args.budget_total))
+                                    total_cny=args.budget_total))
     out = Path(args.out or f"evals/results-{_safe_label(label)}.jsonl")
     write_jsonl(out, results)
     print()
@@ -871,8 +875,8 @@ def _cmd_replay(args) -> None:
     run_dir = Path(args.repo).resolve() / ".aifix" / "runs" / args.run_id
     # 「目录不存在」交给 render 自己说：它已经会给人话并列出同级现有的 run。
     # 在这里再判一次就是两套措辞，早晚有一套会跟另一套说得不一样。
-    print(render_replay(run_dir, step=args.step,
-                        full=args.full).rstrip("\n"))
+    print(render_replay(run_dir, step=args.step, full=args.full,
+                        money=AifixConfig().money).rstrip("\n"))
     if not run_dir.is_dir():
         # 措辞只有 render 那一份，这里只补一个退出码：退 0 的话流水线里
         # 「run_id 打错了」和「回放成功」没有任何区别

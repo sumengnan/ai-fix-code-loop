@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..budget import fmt_usd
+from ..money import fmt_cny
 from ..graph import COLLECTION_ABORT_KIND
 
 _VERDICT_CN = {"better": "已修复", "same": "未改善", "worse": "引入回归"}
@@ -66,14 +66,14 @@ def count_fixed(results: list[dict[str, Any]]) -> int:
     return sum(1 for r in results if r["verdict"] == "better")
 
 
-def cost_is_unknown(tokens: int, usd: float) -> bool:
+def cost_is_unknown(tokens: int, cny: float) -> bool:
     """花了 token 却算出 0 元 —— 没配价格表，effective_cost 恒为 0。
 
     这个 0 与「真的没花钱」在这里区分不了，所以一律当作「不知道」：
-    显示假的 $0.00、往库里存一个 0.0，都会让此后按成本做的排序与汇总变成
+    显示假的 ¥0.00、往库里存一个 0.0，都会让此后按成本做的排序与汇总变成
     看起来完全正常的假结论。
     """
-    return tokens > 0 and usd == 0.0
+    return tokens > 0 and cny == 0.0
 
 
 def _ask_section(ask: dict[str, Any] | None, run_id: str) -> list[str]:
@@ -113,11 +113,18 @@ def render_report(state: dict[str, Any]) -> str:
     fixed = count_fixed(results)
     total = len(state["baseline_ids"])
     tokens = state["spent_tokens"]
-    usd = state["spent_usd"]
-    # 显示假的 $0.00 比不显示更糟，见 cost_is_unknown
+    cny = state["spent_cny"]
+    # 显示假的 ¥0.00 比不显示更糟，见 cost_is_unknown
+    # 汇率要跟着金额一起印：一个不写汇率的人民币金额会被当成实时汇率折的，
+    # 而它是个写死的约数（见 money.DEFAULT_USD_TO_CNY）。
+    # 防御性地取：报告是用户手里唯一的成果凭据，渲染这一步不该因为一个
+    # 缺失的键而炸掉整次 run。取不到就不印汇率 —— 印一个默认汇率是在编。
+    cfg = state.get("config")
+    note = cfg.money.rate_note() if cfg is not None else ""
     cost = (f"未知（未配置 AIFIX_PRICE_MAP）（{tokens:,} tokens）"
-            if cost_is_unknown(tokens, usd)
-            else f"{fmt_usd(usd)}（{tokens:,} tokens）")
+            if cost_is_unknown(tokens, cny)
+            else f"{fmt_cny(cny)}（{tokens:,} tokens"
+                 f"{'，' + note if note else ''}）")
     lines = [
         f"# aifix run {state['run_id']}",
         "",

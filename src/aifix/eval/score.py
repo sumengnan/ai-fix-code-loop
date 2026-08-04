@@ -68,8 +68,8 @@ class Summary(BaseModel):
     fix_hits: int
     locate_rate: float
     fix_rate: float
-    avg_cost_usd: float
-    # 用来判断「到底花没花 token」：没配价格表时 cost_usd 恒为 0，
+    avg_cost_cny: float
+    # 用来判断「到底花没花 token」：没配价格表时 cost_cny 恒为 0，
     # 光看成本分不出「便宜」和「没数据」。
     avg_tokens: float
     avg_attempts: float
@@ -94,7 +94,7 @@ def summarize(results: list[TaskResult], origin: str = "") -> Summary:
         # 反而归零。出错的任务是评测自己的故障，本来就不该进任何口径。
         return Summary(model=model, origin=origin, tasks=0, locate_hits=0,
                        fix_hits=0, locate_rate=0.0, fix_rate=0.0,
-                       avg_cost_usd=0.0, avg_tokens=0.0, avg_attempts=0.0,
+                       avg_cost_cny=0.0, avg_tokens=0.0, avg_attempts=0.0,
                        violations=sum(r.violations for r in valid),
                        signals=sum(r.signals for r in valid),
                        errors=len(results) - n)
@@ -105,7 +105,7 @@ def summarize(results: list[TaskResult], origin: str = "") -> Summary:
         locate_hits=locate_hits, fix_hits=fix_hits,
         locate_rate=locate_hits / n,
         fix_rate=fix_hits / n,
-        avg_cost_usd=sum(r.cost_usd for r in valid) / n,
+        avg_cost_cny=sum(r.cost_cny for r in valid) / n,
         avg_tokens=sum(r.tokens for r in valid) / n,
         avg_attempts=sum(r.attempts for r in valid) / n,
         violations=sum(r.violations for r in valid),
@@ -135,22 +135,22 @@ def summarize_by_origin(results: list[TaskResult]) -> list[Summary]:
 
 
 def _cost_cell(s: Summary) -> str:
-    """花了 token 却算出 0 元，说明没配价格表 —— 显示假的 $0.0000 比不显示更糟。
+    """花了 token 却算出 0 元，说明没配价格表 —— 显示假的 ¥0.0000 比不显示更糟。
 
-    跨模型对比表就是拿来决定「哪个模型更划算」的：一列整齐的 $0.0000 会被
+    跨模型对比表就是拿来决定「哪个模型更划算」的：一列整齐的 ¥0.0000 会被
     读成「极其便宜」，而不是「这一列没数据」。report.py 已经这么处理，
     config.price_map 的注释也做了同样的承诺。这部分逻辑不受下面的精度
     调整影响，继续保留。
     """
-    if s.avg_tokens > 0 and s.avg_cost_usd == 0.0:
+    if s.avg_tokens > 0 and s.avg_cost_cny == 0.0:
         return "未知（未配置 AIFIX_PRICE_MAP）"
-    # 故意不复用 budget.fmt_usd：那是给**预算总额**设计的（讲究 `--budget
-    # 0.001` 不显示成 $0.00 这种大额场景），对 1~10 分区间的**单任务均价**
-    # 精度不够——$0.0201 和 $0.0249 会被它渲染成同一个 $0.02，恰好抹掉跨
-    # 模型成本对比最需要的那一位；它的 `%g` 分支还会给出 `$1.23e-05` 这种
-    # 和同列 `$0.1234` 宽度不齐的写法。这里固定 4 位小数，两者服务的量级
-    # 不同，不要为了"统一"又改回 fmt_usd。
-    return f"${s.avg_cost_usd:.4f}"
+    # 故意不复用 money.fmt_cny：那是给**预算总额**设计的（讲究 `--budget
+    # 0.001` 不显示成 ¥0.00 这种大额场景），对 1~10 分区间的**单任务均价**
+    # 精度不够——¥0.0201 和 ¥0.0249 会被它渲染成同一个 ¥0.02，恰好抹掉跨
+    # 模型成本对比最需要的那一位；它的 `%g` 分支还会给出 `¥1.23e-05` 这种
+    # 和同列 `¥0.1234` 宽度不齐的写法。这里固定 4 位小数，两者服务的量级
+    # 不同，不要为了"统一"又改回 fmt_cny。
+    return f"¥{s.avg_cost_cny:.4f}"
 
 
 def _rate_cell(hits: int, n: int) -> str:

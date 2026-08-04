@@ -50,7 +50,7 @@ def test_the_default_progress_says_nothing():
     p.baseline(ran=14, failing=2, seconds=0.4)
     p.failure_start(index=1, total=2, test_id="t.py::x")
     p.verified(verdict="better", seconds=1.0)
-    p.finished(fixed=1, total=2, tokens=100, usd=0.0)
+    p.finished(fixed=1, total=2, tokens=100, cny=0.0)
     # 什么都不该发生；这里没有可断言的输出，能跑通就是契约本身
     assert isinstance(p, NullProgress)
 

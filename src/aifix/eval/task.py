@@ -41,7 +41,7 @@ class TaskResult(BaseModel):
     verdict: str
     attempts: int
     tokens: int
-    cost_usd: float
+    cost_cny: float
     violations: int
     abort_reason: str | None = None
     # 任务本身跑挂了（克隆失败、baseline 没复现……）。与「没修好」是两回事：

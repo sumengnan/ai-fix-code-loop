@@ -298,7 +298,7 @@ GitHub 的评论正文用 **CRLF**。按 `\n` 切完第一行是 `"/aifix\r"`，
 最后一条是**实测逼出来的**。issue #9 的真跑里，模型写的复现用了 `pytest.raises` 却没有
 `import pytest`，测试红在自己的 `NameError` 上 —— 模块 import 正常（不是收集错误）、用例
 跑了、用例也确实红了，三道闸逐条放行。fixer 于是对着一个假靶子改了两轮、
-**$1.45 / 468k tokens**，两轮都引入回归、都被三态判决回滚。最后给人的报告是「没修好」，
+**$1.45 / 468k tokens**（当时的币种是美元，≈ ¥10.4），两轮都引入回归、都被三态判决回滚。最后给人的报告是「没修好」，
 而报告里没有任何一句话指向真正的原因。
 
 判据是**异常抛在哪，不是异常是什么类型**：
@@ -330,7 +330,7 @@ GitHub 的评论正文用 **CRLF**。按 `\n` 切完第一行是 `"/aifix\r"`，
 | `unparseable` | 输出不合约定格式 | 运维：看 trace / 换模型 |
 | `empty_answer` | 正文一个字都没有 | 运维：推理型模型把输出预算全烧在推理里了，换个推理更短的 |
 | `truncated` | 流在某一步中途断了，这次调用没跑完 | 重试，或查端点是不是在长响应上掐流 |
-| `cost_capped` | 撞上**我们自己**的美元闸 | 调预算 |
+| `cost_capped` | 撞上**我们自己**的成本闸 | 调预算 |
 | `ok` | 有了一条可用的复现测试 | — |
 
 这七类是实测逼出来的。第一次真跑时沿用 fixer 的步数，模型翻了 25 步没吐 JSON，而回帖说的
@@ -345,15 +345,15 @@ GitHub 的评论正文用 **CRLF**。按 `\n` 切完第一行是 `"/aifix\r"`，
 
 ### 复现这一步的花销要从后面扣掉
 
-它在 `run_once` **之外**发起调用，三层预算闸一分都管不到。不扣的话设 `BUDGET_USD=0.50`
+它在 `run_once` **之外**发起调用，三层预算闸一分都管不到。不扣的话设 `BUDGET_CNY=3.5`
 实际可能花掉两倍。
 
-三样都扣：美元、token、墙钟。而且**都夹到 0，不允许负数** —— 负数会让「还剩多少」的比较
+三样都扣：金额、token、墙钟。而且**都夹到 0，不允许负数** —— 负数会让「还剩多少」的比较
 全部反向。
 
 同时它自己也有一道闸：最多用掉整份预算的 `reproducer_budget_share`（默认 0.4）。没有这
-一条的话，**扣减会把修复步饿死** —— 实测：复现把 $0.50 全吃光，`run_once` 拿到 $0 当场中止，
-报告只写「美元预算耗尽：$0 / $0」，一句看不出是被前一步吃光的话。
+一条的话，**扣减会把修复步饿死** —— 实测（当时的币种是美元）：复现把 0.50 全吃光，`run_once` 拿到 0 当场中止，
+报告只写「预算耗尽：0 / 0」，一句看不出是被前一步吃光的话。
 
 ---
 
@@ -453,14 +453,14 @@ gh secret set AIFIX_DETECTOR_API_KEY
 gh variable set AIFIX_FIXER__MODEL    --body qwen3-coder-flash
 gh variable set AIFIX_DETECTOR__MODEL --body qwen3-coder-flash
 gh variable set AIFIX_PRICE_MAP       --body '{"qwen3-coder-flash": [0.0003, 0.0012]}'
-gh variable set AIFIX_BUDGET_USD      --body 2.0
+gh variable set AIFIX_BUDGET_CNY      --body 15.0
 
 # 可选：额外获准触发的人（默认已放行所有者/协作者/组织成员）
 gh variable set AIFIX_ALLOWED_USERS   --body "alice,bob"
 ```
 
 **模型名和价格表要用 variable 不用 secret**：它们不是机密，而 secret 在日志里会被遮成
-`***` —— 跑错模型时你从日志里根本看不出来，而没配价格表的后果是美元闸永远不触发。
+`***` —— 跑错模型时你从日志里根本看不出来，而没配价格表的后果是成本闸永远不触发。
 
 **variable 名与环境变量同名**：设什么就是什么，不用记一层映射。换模型因此不必改 workflow
 文件 —— 而改它要合进默认分支才生效，一次换模型要走一次提交、评审、合并，那个摩擦足以让人
@@ -615,7 +615,7 @@ ground truth 自带 —— 与 `aifix mine` 同一个思路，只是量的是复
 | 「模型端点不可达」 | 先跑 `aifix-connectivity.yml`。最常见的是端点有 IP 白名单 |
 | 一整批 collection error | 没配 `AIFIX_TEST_PYTHON`，或者目标项目的测试环境步骤没填 |
 | PR 没开成，报 *not permitted to create and approve pull requests* | Settings → Actions → General → Workflow permissions 那一格没勾 |
-| 复现这一步报「撞上了它自己的美元闸」 | 调大 `AIFIX_BUDGET_USD` 或 `AIFIX_REPRODUCER_BUDGET_SHARE`。这个数随**目标仓库规模**走，不是通用值 |
+| 复现这一步报「撞上了它自己的成本闸」 | 调大 `AIFIX_BUDGET_CNY` 或 `AIFIX_REPRODUCER_BUDGET_SHARE`。这个数随**目标仓库规模**走，不是通用值 |
 | 复现这一步报「模型没有吐出任何正文」 | 推理型模型把输出预算全烧在推理里了。`AIFIX_REPRODUCER_THINKING` 默认已经是 `false`，确认它没被空串覆盖成「随端点默认」 |
 | Actions 跑了一小时什么都没留下 | job 的 `timeout-minutes` 没有显著大于 `AIFIX_BUDGET_WALL_SECONDS` |
 

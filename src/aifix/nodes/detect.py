@@ -52,7 +52,7 @@ async def detect_node(state: AifixState, client: Any = None) -> dict[str, Any]:
     )
     with json_output():
         outcome = await consume(loop.run(
-            build_prompt(failure, candidates, snippets)))
+            build_prompt(failure, candidates, snippets)), money=cfg.money)
 
     # 候选里有没有**非测试**文件，决定了 suspect_file 是推断还是猜测。
     # 一个源码候选都没有时模型只能按包名猜路径，猜错是常态 —— 下游的
@@ -89,5 +89,5 @@ async def detect_node(state: AifixState, client: Any = None) -> dict[str, Any]:
         "diagnosis": diagnosis.model_dump() if diagnosis else None,
         "suspect_anchored": anchored,
         "spent_tokens": state["spent_tokens"] + outcome.tokens,
-        "spent_usd": state["spent_usd"] + outcome.cost_usd,
+        "spent_cny": state["spent_cny"] + outcome.cost_cny,
     }

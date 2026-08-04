@@ -137,10 +137,11 @@ jobs:
           # 来的默认值。
           AIFIX_REPRODUCER_THINKING: ${{ vars.AIFIX_REPRODUCER_THINKING || 'false' }}
 
-          # 抬到 config 的默认值。实测（2026-07-30，issue #2）复现这一步用 pro
-          # 跑这个仓库要 $0.21 以上，而 0.50 × 0.4 = $0.20 —— 差一点点，两轮都被
-          # 自己的闸掐在门口。这个数字随**目标仓库规模**走，不是通用值。
-          AIFIX_BUDGET_USD: ${{ vars.AIFIX_BUDGET_USD || '2.0' }}
+          # 抬到 config 的默认值。实测（2026-07-30，issue #2，当时的币种是美元）
+          # 复现这一步用 pro 跑这个仓库要 0.21 以上，而 0.50 × 0.4 = 0.20 ——
+          # 差一点点，两轮都被自己的闸掐在门口。这个数字随**目标仓库规模**走，
+          # 不是通用值。单位是**人民币**（旧名 AIFIX_BUDGET_USD 仍按美元读）。
+          AIFIX_BUDGET_CNY: ${{ vars.AIFIX_BUDGET_CNY || '15.0' }}
           AIFIX_BUDGET_WALL_SECONDS: "3600"
 
       # 崩了才最需要它。`if: always()` 不是可选的 —— job 失败时不上传，等于

@@ -104,7 +104,7 @@ baseline：跑了 214 个，红 3 个（1:07）
   补丁：src/shopcart/cart.py（+3 −1）
   判定：已修复（52s）
 ...
-完成：修复 2 / 3 · $0.14（238,070 tokens）
+完成：修复 2 / 3 · ¥1.0080（238,070 tokens）
 ```
 
 （具体渲染以实际输出为准 —— 上面是示意。）
@@ -186,7 +186,7 @@ aifix replay a1b2c3d4 --step 7 --full
 | jsonl 有半截坏行（被 kill 的 run 会留下） | 只计数不抛异常，在头部说明「有 N 行解析不了，已跳过」。半截文件也得看得到前半截 |
 | 目录在、`events.jsonl` 不在 | 说清楚缺的是什么，然后**把还在的事实照常渲染出来** —— 用户要找的很可能正是那几条（比如中止原因） |
 | 事件里有没见过的类型 | 原样打印 data，不崩。**诊断工具在数据比自己新的时候应该退化，不应该崩** |
-| 没配价格表 | 印「未知」而不是 `$0.00`。而且**不带原因** —— 这一层看到的只是某条事件里 cost 是 0，它不知道价格表配没配。说错原因比不说原因更糟 |
+| 没配价格表 | 印「未知」而不是 `¥0.00`。而且**不带原因** —— 这一层看到的只是某条事件里 cost 是 0，它不知道价格表配没配。说错原因比不说原因更糟 |
 | 老产物（事件不带 failure/attempt 标记） | 说明这批数据没有可靠的逐步对应关系，事实按自身归属分组列在时间轴之后。**硬按顺序猜能拼出一条看着精确、实则编出来的时间轴** |
 
 ---
@@ -220,7 +220,8 @@ aifix stats  --repo /path/to/repo
 CREATE TABLE runs (
     run_id TEXT PRIMARY KEY, started_at TEXT, adapter TEXT, branch TEXT,
     baseline_failures INTEGER, fixed INTEGER,
-    spent_tokens INTEGER, spent_usd REAL, abort TEXT, abort_kind TEXT
+    spent_tokens INTEGER, spent_cny REAL, spent_usd REAL,
+    abort TEXT, abort_kind TEXT
 );
 CREATE TABLE facts (run_id TEXT, failure TEXT, attempt INTEGER, key TEXT, value TEXT);
 ```
@@ -231,7 +232,7 @@ CREATE TABLE facts (run_id TEXT, failure TEXT, attempt INTEGER, key TEXT, value 
    （三类信号的 value 就是列表）。一列里混着裸值和 JSON 之后没人能安全地解它。
    代价是查询时必须按 JSON 解 —— `WHERE value='better'` 永远匹配不到，库里是 `"better"`
    （带引号）。
-3. **取不到的字段一律存 NULL，不填 0、不填空串。** 花了 token 却记 $0.00 这种假数字，比缺
+3. **取不到的字段一律存 NULL，不填 0、不填空串。** 花了 token 却记 ¥0.00 这种假数字，比缺
    一列难查得多。
 
 ### `aifix stats` 印什么
@@ -334,7 +335,7 @@ aifix stats
 |---|---|
 | `adapter` / `branch` | 每次 run 收尾 |
 | `baseline_failures` / `baseline_failure_ids` | baseline 之后 |
-| `fixed` / `spent_tokens` / `spent_usd` | 收尾。`spent_usd` 为 `null` 是**有意的事实**：「花了钱，但这次不知道花了多少」 |
+| `fixed` / `spent_tokens` / `spent_cny` | 收尾。`spent_cny` 为 `null` 是**有意的事实**：「花了钱，但这次不知道花了多少」。`spent_usd` 是换币种之前的老列，只有那时的 run 才有值，新 run 一律写 `spent_cny` |
 | `abort` / `abort_kind` | 中止时 |
 | `crash` | 运行异常 |
 | `dry_run` | `--dry-run` |

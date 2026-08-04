@@ -46,7 +46,7 @@ from .tools.search import GrepTool
 #                     reasoning_content 里然后被截断，正文永远等不到
 #   truncated      —— 流在某一步中途断了，这次调用没跑完。**静默**：consume 的
 #                     async-for 正常退出、ok 为 True，看起来像模型答歪了
-#   cost_capped    —— 撞上我们自己的美元闸。事件签名与 truncated 一模一样，
+#   cost_capped    —— 撞上我们自己的成本闸。事件签名与 truncated 一模一样，
 #                     必须先判它，否则会报成「端点在掐流」——一句假话
 #
 # 这四类是实测逼出来的：2026-07-30 第一次真跑（issue #1）沿用 fixer 的 25 步，
@@ -62,7 +62,7 @@ KIND_EMPTY_ANSWER = "empty_answer"
 # 流在某一步中途断了。与 unparseable 分开：那一类是模型答歪了，这一类是这次
 # 调用**根本没跑完** —— 下一步是重试或查端点，不是改 prompt。
 KIND_TRUNCATED = "truncated"
-# 撞上**我们自己**的美元闸。与 truncated 的事件签名一模一样（都没有
+# 撞上**我们自己**的成本闸。与 truncated 的事件签名一模一样（都没有
 # RunFinished），但原因和下一步完全不同 —— 那一类要查端点，这一类要调预算。
 KIND_COST_CAPPED = "cost_capped"
 
@@ -82,7 +82,8 @@ class ReproduceOutcome:
     reason: str = ""
     kind: str = KIND_OK
     tokens: int = 0
-    cost_usd: float = 0.0
+    # 人民币（折算发生在 agents.runner.consume，见 money.py）
+    cost_cny: float = 0.0
     events: list[Any] = field(default_factory=list)
     # 与 `events` 一一对应的到达时刻（见 agents.runner.AgentOutcome）。
     # **必须一路带过来**：复现是这条流水线里最长的几段之一（实测一次真跑
@@ -343,17 +344,18 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
         )
         prompt = build_prompt(issue_title, issue_body, adapter.test_dirs(),
                               max_steps=config.reproducer_max_steps)
-        # 美元闸：复现最多用掉整份预算的 reproducer_budget_share。
+        # 成本闸：复现最多用掉整份预算的 reproducer_budget_share。
         # 不设的话它能把修复那一步饿死（见 config 里那段实测）。
-        # budget_usd 为 0 时传 None —— 那是「不设闸」，与「额度已扣光」不同，
+        # budget_cny 为 0 时传 None —— 那是「不设闸」，与「额度已扣光」不同，
         # 而 `0.0 * 0.4 or None` 求值成 None 恰好把两者混掉（fix_node 里同款坑）。
-        cap = (config.budget_usd * config.reproducer_budget_share
-               if config.budget_usd else None)
-        outcome = await consume(loop.run(prompt), cost_cap=cap)
+        cap = (config.budget_cny * config.reproducer_budget_share
+               if config.budget_cny else None)
+        outcome = await consume(loop.run(prompt), cost_cap=cap,
+                                money=config.money)
     finally:
         await sandbox.close()
 
-    common = dict(tokens=outcome.tokens, cost_usd=outcome.cost_usd,
+    common = dict(tokens=outcome.tokens, cost_cny=outcome.cost_cny,
                   events=outcome.events, event_times=outcome.event_times)
     if not outcome.ok:
         # `outcome.ok is False` 意味着**循环自己没跑完**（步数耗尽、token 超限、
@@ -383,13 +385,13 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
         # 里同样没有 RunFinished —— 两者的签名一模一样，而原因相反。实测
         # （2026-07-30，issue #2）两轮的累计成本是 $0.2179 / $0.2070，闸是
         # $0.50 × 0.4 = $0.20，被上一版报成了「查端点是不是在掐流」。
-        cap = config.budget_usd * config.reproducer_budget_share
+        cap = config.budget_cny * config.reproducer_budget_share
         return ReproduceOutcome(
             None,
-            f"复现这一步撞上了**它自己的美元闸**（上限 ${cap:.4f} = "
-            f"AIFIX_BUDGET_USD × {config.reproducer_budget_share}）。\n"
+            f"复现这一步撞上了**它自己的成本闸**（上限 ¥{cap:.4f} = "
+            f"AIFIX_BUDGET_CNY × {config.reproducer_budget_share}）。\n"
             "  不是模型的问题，也不是端点的问题 —— 是这次给它的钱不够走完。\n"
-            "  下一步：调大 `AIFIX_BUDGET_USD`、或调大 "
+            "  下一步：调大 `AIFIX_BUDGET_CNY`、或调大 "
             "`AIFIX_REPRODUCER_BUDGET_SHARE`、或把这一步换成便宜的模型"
             "（`AIFIX_FIXER__MODEL`）。",
             kind=KIND_COST_CAPPED, **common)

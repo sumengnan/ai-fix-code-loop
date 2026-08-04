@@ -9,12 +9,16 @@ from harness.events import (Event, ModelUsage, RunError, TextDelta,
                             ToolFinished, ToolStarted)
 from harness.types import ToolCall, ToolResult
 
+from ..money import Money
+
 
 @dataclass
 class AgentOutcome:
     text: str = ""
     tokens: int = 0
-    cost_usd: float = 0.0
+    # **人民币**，不是事件里那个数。折算就发生在下面 consume 的累加处，
+    # 这是全项目唯一一处（见 money.py）。
+    cost_cny: float = 0.0
     error: str | None = None
     events: list[Event] = field(default_factory=list)
     # 每条事件**到达时**的 epoch 秒，与 `events` 一一对应、同序同长。
@@ -45,12 +49,19 @@ class AgentOutcome:
 async def consume(
         stream: AsyncIterator[Event],
         cost_cap: float | None = None,
+        money: Money | None = None,
         on_tool: Callable[[ToolCall], None] | None = None,
         on_tool_done: Callable[[ToolCall, ToolResult], None] | None = None,
 ) -> AgentOutcome:
     """消费整条事件流。保留全部事件供 trace 使用。
 
-    cost_cap：累计成本越过该值即停止消费并关闭生成器。
+    cost_cap：累计成本越过该值即停止消费并关闭生成器。**单位是人民币**，
+    与 `AgentOutcome.cost_cny` 同币种 —— 一边人民币一边价表货币的话，
+    美元价表下这道闸会在 7 倍于设定值的地方才拦，而它看起来一直在工作。
+
+    money：价表货币 → 人民币的折算规则，默认按 `Money()`（美元价表 + 默认
+    汇率）。产品路径一律传 `config.money`；留默认值是给直接构造事件流的单测
+    用的。
 
     on_tool / on_tool_done：工具调用的开始与结束各回调一次，给进度显示用。
     两个都要，因为它们答的是两个问题：
@@ -78,6 +89,7 @@ async def consume(
     那一次调用必然已经花掉。超支上界因此是可陈述的：一次模型调用。
     """
     parts: list[str] = []
+    money = money or Money()
     out = AgentOutcome()
     # 发起过的调用，供结束事件按 id 认领自己的参数
     calls: dict[str, ToolCall] = {}
@@ -99,8 +111,11 @@ async def consume(
             parts.append(ev.text)
         elif isinstance(ev, ModelUsage):
             out.tokens += ev.usage.total_tokens
-            out.cost_usd += ev.cost_usd or 0.0
-            if cost_cap is not None and out.cost_usd >= cost_cap:
+            # 框架给的 `cost_usd` 是**按价表算出来的数**，币种由价表决定
+            # （字段名是框架的，改不了）。这里折成人民币，此后全项目再无
+            # 第二处折算 —— 折两次的数字看起来完全正常。
+            out.cost_cny += money.to_cny(ev.cost_usd or 0.0)
+            if cost_cap is not None and out.cost_cny >= cost_cap:
                 out.cost_capped = True
                 break
         elif isinstance(ev, RunError):

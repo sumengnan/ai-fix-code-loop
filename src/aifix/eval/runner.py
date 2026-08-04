@@ -132,7 +132,7 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
     # 误记成挖掘任务的，恰好抵消掉按来源分行统计的意义。
     blank = TaskResult(task_id=task.task_id, model=model, locate_hit=False,
                        suspect_file=None, verdict="same", attempts=0,
-                       tokens=0, cost_usd=0.0, violations=0,
+                       tokens=0, cost_cny=0.0, violations=0,
                        origin=task.origin)
 
     prepare_task_repo(task, dest)
@@ -210,7 +210,7 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
         # 回落到 0 恰好表达「没轮到」的含义，与「平均尝试」的计数基数一致。
         attempts=(row["attempts"] if row
                   else max(state.get("attempt", 0) - 1, 0)),
-        tokens=state["spent_tokens"], cost_usd=state["spent_usd"],
+        tokens=state["spent_tokens"], cost_cny=state["spent_cny"],
         violations=violations,
         signals=signals,
         abort_reason=(row or {}).get("abort_reason") or state.get("abort"),
@@ -227,7 +227,7 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
         # 任务在同一台机器上抢 CPU 跑全量 pytest，墙钟耗尽的概率远高于
         # --parallel 1。记成模型的失败，就等于「只改并行度就能改变修复
         # 成功率」，直接违背跨模型对比的前提 —— 所以走 error，不进比率
-        # 分母。token / 美元预算相反：同一批任务同一个上限，谁先烧完谁差，
+        # 分母。token / 金额预算相反：同一批任务同一个上限，谁先烧完谁差，
         # 那是被测系统的真实成绩，仍记 verdict=same。
         return result.model_copy(update={
             "error": f"评测的墙钟预算耗尽（评测故障，非模型失败）："
@@ -244,7 +244,7 @@ def _blank(task_id: str, model: str, error: str, origin: str) -> TaskResult:
     # 理由（被跳过/出错的变异任务落回默认 mined，统计上被并进挖掘任务）。
     return TaskResult(task_id=task_id, model=model, locate_hit=False,
                       suspect_file=None, verdict="same", attempts=0,
-                      tokens=0, cost_usd=0.0, violations=0, error=error,
+                      tokens=0, cost_cny=0.0, violations=0, error=error,
                       origin=origin)
 
 
@@ -253,17 +253,17 @@ async def run_suite(tasks: list[Task], config: AifixConfig, model: str,
                     detector_client: Any = None,
                     fixer_client: Any = None,
                     on_done=None,
-                    total_usd: float | None = None) -> list[TaskResult]:
+                    total_cny: float | None = None) -> list[TaskResult]:
     """并行跑整个任务集。返回顺序与传入顺序一致。
 
-    total_usd：整批的美元上限。检查发生在**派发之前**，已经在跑的任务
+    total_cny：整批的人民币上限。检查发生在**派发之前**，已经在跑的任务
     放它们跑完 —— 它们的结果是有效数据，中途掐掉等于白花已经花掉的钱。
 
     `spent` 记的不是「已经花掉」而是「已经发出去的最大可能花销」：算出
     `cap` 的同一把锁内立即把 `cap` 预留进 `spent`，任务跑完后再回填差额
-    `cost_usd - cap`。若只在任务跑完后才累加（预留之前的写法），
+    `cost_cny - cap`。若只在任务跑完后才累加（预留之前的写法），
     parallel=N 时 N 个并发槽位会在派发前全部读到同一个旧 `spent`，各自
-    以为还有整批上限那么多额度可花 —— 实测 `total_usd=1.0`、每任务花
+    以为还有整批上限那么多额度可花 —— 实测（当时的币种是美元）`total=1.0`、每任务花
     `1.0`、4 个任务：parallel=1 正确地只花 $1.0，parallel=4 却花掉
     $4.0，4 倍超支，且 parallel=4 正是 `aifix eval` 的默认并发度。预留
     之后，整批的超支只可能来自「每个在跑的任务超出它自己那份额度的
@@ -271,7 +271,7 @@ async def run_suite(tasks: list[Task], config: AifixConfig, model: str,
     用）。因此整批超支上界 = 并发数 × 一次模型调用的成本。
 
     这个上界有一个前提：**任务要么正常跑完、要么在没花钱之前就炸**。
-    下面的异常路径按成本 0 全额退回预留（`r.cost_usd` 是 0.0，回填
+    下面的异常路径按成本 0 全额退回预留（`r.cost_cny` 是 0.0，回填
     `0.0 - cap`）；若某个任务是花过钱之后才抛，那笔已经花掉的钱在
     `spent` 里就消失了，后续任务会拿着「以为还剩」的额度继续派发，整批
     实际花销可以超出上界，超出量正是丢掉的那部分。要收紧就得让
@@ -284,7 +284,7 @@ async def run_suite(tasks: list[Task], config: AifixConfig, model: str,
     async def one(t: Task) -> TaskResult:
         nonlocal spent
         async with sem:
-            if total_usd is not None:
+            if total_cny is not None:
                 skipped = False
                 async with lock:
                     # 读 left、算 cap、预留进 spent 必须在同一把锁内一次
@@ -293,11 +293,11 @@ async def run_suite(tasks: list[Task], config: AifixConfig, model: str,
                     # 是否跳过，不做任何回调 —— on_done 是用户提供的 I/O
                     # 回调（CLI 里是 print），锁内调用会把整批调度阻塞在
                     # 一次 I/O 上，且与正常/异常两条路径的回调时机不一致。
-                    left = total_usd - spent
+                    left = total_cny - spent
                     if left <= 0:
                         skipped = True
                     else:
-                        cap = min(config.budget_usd, left)
+                        cap = min(config.budget_cny, left)
                         spent += cap
                 if skipped:
                     # 记成 error 而不是失败的 verdict：这是评测的调度
@@ -308,7 +308,7 @@ async def run_suite(tasks: list[Task], config: AifixConfig, model: str,
                         on_done(r)
                     return r
                 task_config = config.model_copy(
-                    update={"budget_usd": cap})
+                    update={"budget_cny": cap})
             else:
                 task_config = config
                 cap = None
@@ -319,11 +319,11 @@ async def run_suite(tasks: list[Task], config: AifixConfig, model: str,
             except Exception as e:      # 一个任务炸掉不能带走整个 suite
                 r = _blank(t.task_id, model, repr(e), origin=t.origin)
             if cap is not None:
-                # 回填预留与实际花销的差额。异常路径 r.cost_usd 是
+                # 回填预留与实际花销的差额。异常路径 r.cost_cny 是
                 # 0.0，回填 0.0 - cap 会把预留原样退回，是对的 ——
                 # 否则预留会永久占住额度，把后续任务全部饿死。
                 async with lock:
-                    spent += r.cost_usd - cap
+                    spent += r.cost_cny - cap
             if on_done:
                 on_done(r)
             return r

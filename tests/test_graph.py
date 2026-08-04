@@ -35,8 +35,8 @@ def test_route_after_verify_reports_when_done():
 def test_render_report_lists_outcomes():
     md = render_report({
         "run_id": "r1", "branch": "aifix/r1", "adapter_names": ["pytest"],
-        "baseline_ids": ["a", "b"], "spent_usd": 0.23, "spent_tokens": 12345,
-        "abort": None,
+        "baseline_ids": ["a", "b"], "spent_cny": 0.23, "spent_tokens": 12345,
+        "abort": None, "config": _CFG,
         "results": [
             {"test_id": "a", "verdict": "better", "attempts": 1, "abort_reason": None},
             {"test_id": "b", "verdict": "same", "attempts": 3,
@@ -45,14 +45,14 @@ def test_render_report_lists_outcomes():
     })
     assert "aifix/r1" in md
     assert "1 / 2" in md
-    assert "$0.23" in md
+    assert "¥0.23" in md
     assert "max_attempts" in md
 
 
 def test_render_report_shows_abort():
     md = render_report({
         "run_id": "r1", "branch": "", "adapter_names": [],
-        "baseline_ids": [], "spent_usd": 0.0, "spent_tokens": 0,
+        "baseline_ids": [], "spent_cny": 0.0, "spent_tokens": 0,
         "results": [], "abort": "工作区不干净",
     })
     assert "工作区不干净" in md
@@ -68,14 +68,14 @@ def test_render_report_keeps_delivered_work_when_aborted_midrun():
     """
     md = render_report({
         "run_id": "r1", "branch": "aifix/r1", "adapter_names": ["pytest"],
-        "baseline_ids": ["a", "b"], "spent_usd": 0.06, "spent_tokens": 19678,
-        "abort": "美元预算耗尽：$0.06 / $0.001",
+        "baseline_ids": ["a", "b"], "spent_cny": 0.06, "spent_tokens": 19678,
+        "abort": "预算耗尽：¥0.06 / ¥0.001",
         "results": [
             {"test_id": "a", "verdict": "better", "attempts": 1,
              "abort_reason": None},
         ],
     })
-    assert "美元预算耗尽" in md
+    assert "预算耗尽" in md
     assert "1 / 2" in md, "已修好的那个必须出现在报告里"
     assert "`a`" in md
     assert "git merge aifix/r1" in md, "分支上有成果就要给出合并命令"
@@ -91,7 +91,7 @@ def test_render_report_survives_a_legacy_checkpoint_signals_dict():
     """
     md = render_report({
         "run_id": "r1", "branch": "aifix/r1", "adapter_names": ["pytest"],
-        "baseline_ids": ["a"], "spent_usd": 0.0, "spent_tokens": 0,
+        "baseline_ids": ["a"], "spent_cny": 0.0, "spent_tokens": 0,
         "abort": None,
         "results": [{"test_id": "a", "verdict": "better", "attempts": 1,
                      "abort_reason": None}],
@@ -108,7 +108,7 @@ def test_render_report_still_renders_well_formed_signal_entries():
     """区分度：形状检查不能顺手把正常的信号条目也跳掉。"""
     md = render_report({
         "run_id": "r1", "branch": "aifix/r1", "adapter_names": ["pytest"],
-        "baseline_ids": ["a"], "spent_usd": 0.0, "spent_tokens": 0,
+        "baseline_ids": ["a"], "spent_cny": 0.0, "spent_tokens": 0,
         "abort": None,
         "results": [{"test_id": "a", "verdict": "better", "attempts": 1,
                      "abort_reason": None}],
@@ -131,7 +131,7 @@ def test_render_report_does_not_invite_a_merge_of_an_empty_branch():
     """
     md = render_report({
         "run_id": "r1", "branch": "aifix/r1", "adapter_names": ["pytest"],
-        "baseline_ids": ["a"], "spent_usd": 0.0, "spent_tokens": 0,
+        "baseline_ids": ["a"], "spent_cny": 0.0, "spent_tokens": 0,
         "abort": None,
         "results": [{"test_id": "a", "verdict": "same", "attempts": 3,
                      "abort_reason": "max_attempts"}],
@@ -147,9 +147,37 @@ def test_render_report_says_nothing_was_delivered_on_a_dry_run():
     """--dry-run 一个模型都不调，分支必然是空的。"""
     md = render_report({
         "run_id": "r1", "branch": "aifix/r1", "adapter_names": ["pytest"],
-        "baseline_ids": ["a", "b"], "spent_usd": 0.0, "spent_tokens": 0,
+        "baseline_ids": ["a", "b"], "spent_cny": 0.0, "spent_tokens": 0,
         "abort": None, "results": [],
     })
 
     assert "git merge" not in md, md
     assert "没有任何提交" in md, md
+
+
+def test_report_says_which_exchange_rate_it_used():
+    """人民币金额必须跟着汇率一起印。
+
+    这个汇率是**写死的约数**（见 money.DEFAULT_USD_TO_CNY），不印的话会被
+    当成实时汇率折的 —— 差别要到对账的时候才暴露，那时已经晚了。
+    """
+    md = _report_with(AifixConfig(usd_to_cny=7.5))
+    assert "¥0.23" in md
+    assert "1 USD = 7.5 CNY" in md, md
+
+
+def test_report_has_no_rate_note_when_the_price_table_is_already_cny():
+    """价表本来就是人民币时没有汇率可言 —— 印一个出来就是无中生有。"""
+    md = _report_with(AifixConfig(price_currency="CNY"))
+    assert "¥0.23" in md
+    assert "USD" not in md, md
+
+
+def _report_with(cfg: AifixConfig) -> str:
+    return render_report({
+        "run_id": "r1", "branch": "aifix/r1", "adapter_names": ["pytest"],
+        "baseline_ids": ["a"], "spent_cny": 0.23, "spent_tokens": 12345,
+        "abort": None, "config": cfg,
+        "results": [{"test_id": "a", "verdict": "better", "attempts": 1,
+                     "abort_reason": None}],
+    })

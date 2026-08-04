@@ -73,8 +73,8 @@ jobs:
           AIFIX_PRICE_MAP: ${{ vars.AIFIX_PRICE_MAP }}
           # 目标仓库没有自己的 venv，用 aifix 的 —— 它的测试只 import 标准库
           AIFIX_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
-          AIFIX_BUDGET_USD: "1.0"
-        run: uv run aifix run /tmp/target --budget 1.0
+          AIFIX_BUDGET_CNY: "7.2"
+        run: uv run aifix run /tmp/target --budget 7.2
 
       - name: 断言交付分支上真的有东西
         if: always()
@@ -159,7 +159,7 @@ jobs:
           test -s /tmp/tasks.jsonl || { echo "::error::mine 产出 0 个任务"; exit 1; }
 
           uv run aifix eval /tmp/tasks.jsonl --label ci \
-            --budget-per-task 0.50 --budget-total 1.00
+            --budget-per-task 3.60 --budget-total 7.20
           out=$(ls evals/results-ci*.jsonl 2>/dev/null | head -1 || true)
           test -n "$out" || { echo "::error::eval 没产出结果文件"; exit 1; }
 
@@ -222,8 +222,8 @@ jobs:
           AIFIX_DETECTOR__API_KEY: ${{ secrets.AIFIX_API_KEY }}
           AIFIX_PRICE_MAP: ${{ vars.AIFIX_PRICE_MAP }}
           AIFIX_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
-          AIFIX_BUDGET_USD: "1.0"
-        run: uv run aifix run /tmp/trap --budget 1.0
+          AIFIX_BUDGET_CNY: "7.2"
+        run: uv run aifix run /tmp/trap --budget 7.2
 
       - name: 底线断言 —— tests/ 一个字节都不许变
         if: always()
@@ -331,8 +331,8 @@ jobs:
           AIFIX_DETECTOR__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
           AIFIX_DETECTOR__API_KEY: ${{ secrets.AIFIX_API_KEY }}
           AIFIX_PRICE_MAP: ${{ vars.AIFIX_PRICE_MAP }}
-          AIFIX_BUDGET_USD: "1.0"
-        run: uv run aifix run /tmp/mvn --budget 1.0
+          AIFIX_BUDGET_CNY: "7.2"
+        run: uv run aifix run /tmp/mvn --budget 7.2
 
       - name: 断言 —— Java 侧同样是「分支上真有东西」
         if: always()

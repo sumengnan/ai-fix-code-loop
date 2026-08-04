@@ -195,11 +195,11 @@ async def test_untracked_test_artifacts_do_not_count_as_changes(buggy_repo):
         assert out["abort_reason"] == "empty_diff"
 
 
-async def test_fix_stops_when_failure_usd_budget_exhausted(buggy_repo):
-    """单 failure 的美元额度用完 —— 不再发起新的模型调用。"""
+async def test_fix_stops_when_failure_cost_budget_exhausted(buggy_repo):
+    """单 failure 的金额额度用完 —— 不再发起新的模型调用。"""
     with Worktree(buggy_repo, run_id="r1") as wt:
         st = _state(buggy_repo, wt, price_map={"gpt-4o-mini": [1000.0, 1000.0]})
-        st["failure_usd_budget"] = 0.001      # 一次调用就必然越线
+        st["failure_cny_budget"] = 0.001      # 一次调用就必然越线
         client = _Scripted([_text("我想想"),
                             _tool("apply_patch", json.dumps({"diff": _PATCH})),
                             _text("改好了")])
@@ -208,16 +208,16 @@ async def test_fix_stops_when_failure_usd_budget_exhausted(buggy_repo):
         assert out["cost_capped"] is True
 
 
-async def test_zero_usd_budget_is_a_closed_gate_not_an_absent_one(buggy_repo):
+async def test_zero_cost_budget_is_a_closed_gate_not_an_absent_one(buggy_repo):
     """额度恰好为 0.0 = 已经扣光，一次调用都不许发起 —— 不是「不设闸」。
 
-    旧写法是 `state.get("failure_usd_budget") or None`，而 `0.0 or None`
+    旧写法是 `state.get("failure_cny_budget") or None`，而 `0.0 or None`
     求值成 None，于是闸最该拦住的那一刻反而完全不拦。0.0 不是理论边界：
     额度按「扣掉 detect 的花费之后的剩余」算，detect 恰好花光时就是 0.0。
     """
     with Worktree(buggy_repo, run_id="r1") as wt:
         st = _state(buggy_repo, wt, price_map={"gpt-4o-mini": [1000.0, 1000.0]})
-        st["failure_usd_budget"] = 0.0
+        st["failure_cny_budget"] = 0.0
         client = _Scripted([_tool("apply_patch", json.dumps({"diff": _PATCH})),
                             _text("已修复")])
         out = await fix_node(st, client=client)
@@ -226,11 +226,11 @@ async def test_zero_usd_budget_is_a_closed_gate_not_an_absent_one(buggy_repo):
         assert out["diff_lines"] == 0
 
 
-async def test_fix_without_usd_budget_runs_normally(buggy_repo):
-    """未分配额度（None）才是「不设美元闸」—— 与上面的 0.0 是两回事。"""
+async def test_fix_without_cost_budget_runs_normally(buggy_repo):
+    """未分配额度（None）才是「不设成本闸」—— 与上面的 0.0 是两回事。"""
     with Worktree(buggy_repo, run_id="r1") as wt:
         st = _state(buggy_repo, wt)
-        assert st["failure_usd_budget"] is None, (
+        assert st["failure_cny_budget"] is None, (
             "new_state 的默认必须是 None：build_graph 那条路径不填这个字段，"
             "默认成 0.0 会被读成「额度已扣光」，fix 从此一次调用都发不出去")
         client = _Scripted([_tool("apply_patch", json.dumps({"diff": _PATCH})),

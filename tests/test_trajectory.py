@@ -222,15 +222,15 @@ def test_value_一律存成_JSON_文本(repo: Path) -> None:
             "WHERE run_id='r_guard' AND key='rollback'").fetchone()[0]) is True
 
 
-def test_没配价格表时_spent_usd_存_NULL_而不是零(repo: Path) -> None:
-    """花了 token 却记 $0.00 是这个项目栽过两次的假数字。"""
+def test_没配价格表时_spent_cny_存_NULL_而不是零(repo: Path) -> None:
+    """花了 token 却记 ¥0.00 是这个项目栽过两次的假数字。"""
     trajectory.ingest(repo)
     with _db(repo) as con:
-        tokens, usd = con.execute(
-            "SELECT spent_tokens, spent_usd FROM runs "
+        tokens, cny = con.execute(
+            "SELECT spent_tokens, spent_cny FROM runs "
             "WHERE run_id='r_fix'").fetchone()
     assert tokens == 45          # 3 次假调用 × 15 token
-    assert usd is None
+    assert cny is None
 
 
 def test_runs_行的字段取自真实产物(repo: Path) -> None:
@@ -260,7 +260,7 @@ def test_五列各有一条_fact(repo: Path) -> None:
     with _db(repo) as con:
         keys = {r[0] for r in con.execute(
             "SELECT key FROM facts WHERE run_id='r_fix'")}
-    assert {"adapter", "branch", "fixed", "spent_tokens", "spent_usd"} <= keys
+    assert {"adapter", "branch", "fixed", "spent_tokens", "spent_cny"} <= keys
 
 
 def test_五列取自_fact_而不是解_report_md(repo: Path) -> None:
@@ -285,15 +285,15 @@ def test_五列取自_fact_而不是解_report_md(repo: Path) -> None:
     assert fix["fixed"] == 1
     assert fix["spent_tokens"] == 45
     # 没配价格表 —— 这一列必须是 NULL，不能因为改走 fact 就变回假的 0.0
-    assert fix["spent_usd"] is None
+    assert fix["spent_cny"] is None
     # 对照组：没修好的那个是 0，不是 1（fixed 恒等于 baseline 的实现也会全绿）
     assert guard["fixed"] == 0
 
 
-def test_配了价格表时_spent_usd_是真金额(tmp_path: Path) -> None:
+def test_配了价格表时_spent_cny_是真金额(tmp_path: Path) -> None:
     """配了价格表就必须落下真实金额 —— 而且同样不靠 report.md。
 
-    没有这一条，一个「spent_usd 永远写 None」的实现也能让上面几条全绿：
+    没有这一条，一个「spent_cny 永远写 None」的实现也能让上面几条全绿：
     那批产物恰好都没配价格表，None 是对的答案。
     """
     repo = _make_repo(tmp_path / "priced")
@@ -308,12 +308,13 @@ def test_配了价格表时_spent_usd_是真金额(tmp_path: Path) -> None:
 
     assert trajectory.ingest(repo) == 1
     with _db(repo) as con:
-        tokens, usd = con.execute(
-            "SELECT spent_tokens, spent_usd FROM runs "
+        tokens, cny = con.execute(
+            "SELECT spent_tokens, spent_cny FROM runs "
             "WHERE run_id='r_priced'").fetchone()
     assert tokens == 45
-    # 每次假调用 10 输入 + 5 输出、每 1k 各 $1.0 = $0.015，三次共 $0.045
-    assert usd == pytest.approx(0.045)
+    # 每次假调用 10 输入 + 5 输出、每 1k 各 $1.0 = $0.015，三次共 $0.045；
+    # 价表是美元，落库前按默认汇率折成人民币
+    assert cny == pytest.approx(0.045 * AifixConfig().usd_to_cny)
 
 
 def test_没有_fact_的老产物回退解_report_md(tmp_path: Path) -> None:
@@ -338,7 +339,9 @@ def test_没有_fact_的老产物回退解_report_md(tmp_path: Path) -> None:
     assert row["branch"] == "aifix/old"
     assert row["fixed"] == 1
     assert row["spent_tokens"] == 1200
+    # 老报告写的是美元，落进老列、**不折算** —— 当时用的汇率无从考证
     assert row["spent_usd"] == 0.1234
+    assert row["spent_cny"] is None
 
 
 def test_query_stats_按_adapter_聚合_run_数与修复数(repo: Path) -> None:
@@ -477,3 +480,42 @@ def test_无事可灌时不删已有的库(tmp_path: Path) -> None:
     with _db(tmp_path) as con:
         assert con.execute(
             "SELECT run_id FROM facts").fetchall() == [("r1",)]
+
+
+def test_老库能被灌进去_而不是撞上缺列(tmp_path: Path) -> None:
+    """换币种加了一列，而 `CREATE TABLE IF NOT EXISTS` 对已建好的表什么都不做。
+
+    不补 ALTER 的话，老库上每一次 ingest 都以「no such column: spent_cny」
+    炸掉 —— 而这张表是长期资产，重建一个空的等于把历史扔了。这条用例造的
+    正是换币种之前那张表：只有 spent_usd，没有 spent_cny。
+    """
+    db = tmp_path / ".aifix" / "trajectory.db"
+    db.parent.mkdir(parents=True)
+    con = sqlite3.connect(db)
+    con.executescript("""
+    CREATE TABLE runs (
+        run_id TEXT PRIMARY KEY, started_at TEXT, adapter TEXT, branch TEXT,
+        baseline_failures INTEGER, fixed INTEGER,
+        spent_tokens INTEGER, spent_usd REAL, abort TEXT, abort_kind TEXT);
+    CREATE TABLE facts (run_id TEXT, failure TEXT, attempt INTEGER,
+                        key TEXT, value TEXT);
+    """)
+    con.execute("INSERT INTO runs(run_id, adapter, spent_usd) "
+                "VALUES ('ancient', 'pytest', 0.42)")
+    con.commit()
+    con.close()
+
+    d = tmp_path / ".aifix" / "runs" / "new"
+    d.mkdir(parents=True)
+    d.joinpath("facts.jsonl").write_text(
+        json.dumps({"run_id": "new", "key": "spent_cny", "value": 3.5}) + "\n",
+        encoding="utf-8")
+
+    assert trajectory.ingest(tmp_path) == 1
+    with _db(tmp_path) as con:
+        con.row_factory = sqlite3.Row
+        rows = {r["run_id"]: r for r in con.execute("SELECT * FROM runs")}
+    assert rows["new"]["spent_cny"] == pytest.approx(3.5)
+    # 老行原样留着：那是美元，按一个不可考的汇率折出来只会得到一个假数字
+    assert rows["ancient"]["spent_usd"] == pytest.approx(0.42)
+    assert rows["ancient"]["spent_cny"] is None

@@ -54,6 +54,6 @@ def test_running_out_of_budget_is_not_a_failed_run():
     躺在交付分支上。把它算成失败，等于让每一次「钱花完了」都在流水线里报警，
     而那会让人很快把整个退出码判据关掉。
     """
-    for kind in ("budget_tokens", "budget_usd", "budget_wall", "needs_input"):
+    for kind in ("budget_tokens", "budget_cny", "budget_wall", "needs_input"):
         assert kind not in _FAILED_RUN_KINDS, kind
         assert kind not in _ENV_ABORTS, kind

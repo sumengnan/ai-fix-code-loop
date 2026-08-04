@@ -245,7 +245,7 @@ def _fake_run_once(monkeypatch, target: str, **over):
     import aifix.eval.runner as runner
 
     state = {"baseline_ids": [target], "results": [], "attempt": 2,
-             "spent_tokens": 1234, "spent_usd": 0.0, "abort": None,
+             "spent_tokens": 1234, "spent_cny": 0.0, "abort": None,
              "abort_kind": None}
     state.update(over)
 
@@ -383,10 +383,10 @@ def _fake_run_task(seen: list, caps: list, cost: float):
     """
     async def fake(task, config, model, workdir, **kw):
         seen.append(task.task_id)
-        caps.append(config.budget_usd)
+        caps.append(config.budget_cny)
         return TaskResult(task_id=task.task_id, model=model, locate_hit=True,
                           suspect_file="a.py", verdict="better", attempts=1,
-                          tokens=100, cost_usd=cost, violations=0)
+                          tokens=100, cost_cny=cost, violations=0)
     return fake
 
 
@@ -397,8 +397,8 @@ async def test_suite_budget_stops_dispatching(monkeypatch, tmp_path):
     seen, caps = [], []
     monkeypatch.setattr(R, "run_task", _fake_run_task(seen, caps, cost=1.0))
     tasks = [_bare_task(f"t{i}") for i in range(4)]
-    rs = await R.run_suite(tasks, AifixConfig(budget_usd=5.0), "假模型",
-                           tmp_path, parallel=1, total_usd=2.0)
+    rs = await R.run_suite(tasks, AifixConfig(budget_cny=5.0), "假模型",
+                           tmp_path, parallel=1, total_cny=2.0)
 
     assert seen == ["t0", "t1"], "花满 2.0 之后不该再派发"
     assert [r.task_id for r in rs] == ["t0", "t1", "t2", "t3"], "顺序必须保持"
@@ -414,8 +414,8 @@ async def test_skipped_tasks_do_not_count_as_failures(monkeypatch, tmp_path):
     seen, caps = [], []
     monkeypatch.setattr(R, "run_task", _fake_run_task(seen, caps, cost=1.0))
     rs = await R.run_suite([_bare_task(f"t{i}") for i in range(3)],
-                           AifixConfig(budget_usd=5.0), "假模型", tmp_path,
-                           parallel=1, total_usd=1.0)
+                           AifixConfig(budget_cny=5.0), "假模型", tmp_path,
+                           parallel=1, total_cny=1.0)
     s = summarize(rs)
     assert s.tasks == 1, "只有真跑过的进分母"
     assert s.errors == 2
@@ -429,8 +429,8 @@ async def test_per_task_cap_is_clamped_to_remaining(monkeypatch, tmp_path):
     seen, caps = [], []
     monkeypatch.setattr(R, "run_task", _fake_run_task(seen, caps, cost=1.0))
     await R.run_suite([_bare_task(f"t{i}") for i in range(3)],
-                      AifixConfig(budget_usd=5.0), "假模型", tmp_path,
-                      parallel=1, total_usd=1.5)
+                      AifixConfig(budget_cny=5.0), "假模型", tmp_path,
+                      parallel=1, total_cny=1.5)
     assert caps == [1.5, 0.5], "第一个被整批剩余压到 1.5，第二个只剩 0.5"
 
 
@@ -454,14 +454,14 @@ async def test_suite_budget_gate_holds_under_concurrency(monkeypatch, tmp_path):
         await asyncio.sleep(0.05)  # 强迫 4 个协程的派发窗口互相交错
         return TaskResult(task_id=task.task_id, model=model, locate_hit=True,
                           suspect_file="a.py", verdict="better", attempts=1,
-                          tokens=100, cost_usd=1.0, violations=0)
+                          tokens=100, cost_cny=1.0, violations=0)
 
     monkeypatch.setattr(R, "run_task", fake)
     tasks = [_bare_task(f"t{i}") for i in range(4)]
-    rs = await R.run_suite(tasks, AifixConfig(budget_usd=5.0), "假模型",
-                           tmp_path, parallel=4, total_usd=1.0)
+    rs = await R.run_suite(tasks, AifixConfig(budget_cny=5.0), "假模型",
+                           tmp_path, parallel=4, total_cny=1.0)
 
-    total_spent = sum(r.cost_usd for r in rs)
+    total_spent = sum(r.cost_cny for r in rs)
     ran = sum(1 for r in rs if r.error is None)
     assert ran == 1, (
         f"整批上限 $1.0 只够跑 1 个花 $1.0 的任务，实际跑了 {ran} 个："
@@ -504,10 +504,10 @@ async def test_on_done_is_never_called_while_holding_the_lock(
         locked_at_call.append(captured[0].locked())
 
     tasks = [_bare_task(f"t{i}") for i in range(3)]
-    # total_usd 只够第一个任务，逼第 2、3 个任务走跳过分支；三个任务都
+    # total_cny 只够第一个任务，逼第 2、3 个任务走跳过分支；三个任务都
     # 会各触发一次 on_done，凑齐「正常 + 跳过」两条路径。
-    await R.run_suite(tasks, AifixConfig(budget_usd=5.0), "假模型", tmp_path,
-                      parallel=1, total_usd=1.0, on_done=on_done)
+    await R.run_suite(tasks, AifixConfig(budget_cny=5.0), "假模型", tmp_path,
+                      parallel=1, total_cny=1.0, on_done=on_done)
 
     assert len(locked_at_call) == 3, "三个任务都应该各触发一次 on_done"
     assert not any(locked_at_call), (
@@ -522,10 +522,10 @@ async def test_skipped_tasks_keep_their_origin(monkeypatch, tmp_path):
     monkeypatch.setattr(R, "run_task", _fake_run_task([], [], cost=1.0))
     tasks = [_bare_task("t0", origin="mutated"),
             _bare_task("t1", origin="mutated")]
-    # total_usd=0.0：派发前 left <= 0，两个任务都直接进跳过分支，
+    # total_cny=0.0：派发前 left <= 0，两个任务都直接进跳过分支，
     # 不必依赖 run_task 的桩真的跑起来。
-    rs = await R.run_suite(tasks, AifixConfig(budget_usd=5.0), "假模型",
-                           tmp_path, parallel=1, total_usd=0.0)
+    rs = await R.run_suite(tasks, AifixConfig(budget_cny=5.0), "假模型",
+                           tmp_path, parallel=1, total_cny=0.0)
     assert all("未运行" in (r.error or "") for r in rs)
     assert all(r.origin == "mutated" for r in rs), (
         f"跳过的结果没有带上任务的 origin：{[r.origin for r in rs]}")
@@ -552,7 +552,7 @@ async def test_no_suite_budget_leaves_config_untouched(monkeypatch, tmp_path):
     seen, caps = [], []
     monkeypatch.setattr(R, "run_task", _fake_run_task(seen, caps, cost=99.0))
     rs = await R.run_suite([_bare_task(f"t{i}") for i in range(3)],
-                           AifixConfig(budget_usd=5.0), "假模型", tmp_path,
+                           AifixConfig(budget_cny=5.0), "假模型", tmp_path,
                            parallel=1)
     assert seen == ["t0", "t1", "t2"]
     assert caps == [5.0, 5.0, 5.0], "没有整批闸时不该压低每任务额度"

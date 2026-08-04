@@ -126,17 +126,17 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
     # 优先用本轮分配到的额度；未分配（如单测直接调用）时退回全局剩余。
     # 当前 RunBudget.for_failure 有 FLOOR_TOKENS 下限，永远取不到 0，`or` 逻
     # 辑无害。改成 is None 判定是为了不给后人留一个「看起来能用 `or`」的坏样板
-    # —— 同类的美元闸已改成严格的 is None 判定（见下方），形状要一致。
+    # —— 同类的成本闸已改成严格的 is None 判定（见下方），形状要一致。
     failure_token = state.get("failure_token_budget")
     remaining = (max(cfg.budget_tokens - state["spent_tokens"], 10_000)
                  if failure_token is None else failure_token)
-    # 本轮 failure 分到的美元额度。**只有 None**（未分配）才表示不设美元闸、
+    # 本轮 failure 分到的人民币额度。**只有 None**（未分配）才表示不设成本闸、
     # 退回 token 闸；0.0 表示「额度已经扣光」，是一个要拦死的真实取值。
     # 必须用 is None 判，不能写 `state.get(...) or None`：`0.0 or None` 求值
     # 成 None，于是「额度已被扣成 0」会被读成「不设闸」—— 恰好把闸最该拦住
     # 的那一刻变成完全不拦。额度是按「扣掉 detect 的花费之后的剩余」算的，
     # 0.0 是常见值而不是理论边界。
-    usd_alloc = state.get("failure_usd_budget")
+    cny_alloc = state.get("failure_cny_budget")
     cost_capped = False
     touched: set[str] = set()
     guard_hits: list[str] = []
@@ -200,7 +200,7 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
         for _ in range(cfg.fix_guard_retries + 1):
             # 额度是**整个 failure** 的，不是每轮的：守卫重试是同一次修复
             # 尝试的延续，各轮分别给一份额度等于把上限悄悄放大数倍。
-            round_cap = None if usd_alloc is None else usd_alloc - cost
+            round_cap = None if cny_alloc is None else cny_alloc - cost
             if round_cap is not None and round_cap <= 0:
                 cost_capped = True
                 break
@@ -212,10 +212,11 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
 
             outcome = await consume(loop.run(messages=list(messages)),
                                     cost_cap=round_cap,
+                                    money=cfg.money,
                                     on_tool=_started,
                                     on_tool_done=reporter.finished)
             tokens += outcome.tokens
-            cost += outcome.cost_usd
+            cost += outcome.cost_cny
             if outcome.cost_capped:
                 cost_capped = True
             # 每一轮都记：守卫重试时，模型「一字未改」的那一轮恰恰
@@ -298,7 +299,7 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
 
     return {
         "spent_tokens": state["spent_tokens"] + tokens,
-        "spent_usd": state["spent_usd"] + cost,
+        "spent_cny": state["spent_cny"] + cost,
         "touched": sorted(touched),
         "guard_hits": guard_hits,
         "diff_lines": lines,
