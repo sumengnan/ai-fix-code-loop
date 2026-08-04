@@ -46,7 +46,8 @@ ADAPTERS: dict[str, type[ProjectAdapter]] = {
 # 返回类型是协议而不是某个具体适配器：注册表里现在有两个实现，写死其中
 # 一个会让另一个在类型上「碰巧也能用」。
 def adapter_for(name: str, python: str | None = None,
-                parallel: str | None = None) -> ProjectAdapter:
+                parallel: str | None = None,
+                repo: Path | None = None) -> ProjectAdapter:
     """按名字取适配器。python 是跑测试用的解释器，None 表示各实现自己的默认。
 
     注入走构造参数而不是改协议：`full_test_command()` 不接参数是协议里写死
@@ -56,8 +57,13 @@ def adapter_for(name: str, python: str | None = None,
 
     parallel 同理 —— 它是 pytest-xdist 的 worker 数，Maven 侧收下但不用
     （surefire 的并行是 pom 里配的，不是命令行参数）。
+
+    repo 是**源仓库**（不是 worktree），同样只有一个实现真用：VitestAdapter
+    拿它探 `package.json` 在哪个子目录，以及 `prepare()` 时从哪里借
+    `node_modules`。给的是源仓库因为 worktree 里那两样都没有 —— 它只含被 git
+    跟踪的文件。
     """
-    return ADAPTERS[name](python=python, parallel=parallel)
+    return ADAPTERS[name](python=python, parallel=parallel, repo=repo)
 
 
 def adapters_from_state(state: AifixState) -> list[ProjectAdapter]:
@@ -81,7 +87,8 @@ def adapters_from_state(state: AifixState) -> list[ProjectAdapter]:
     # xdist，而只有 state 同时握着配置与源仓库。探测带缓存（见
     # pytest_adapter.has_xdist），四个节点各调一次不会各起一个子进程。
     parallel = resolve_test_parallel(python, state["config"].test_parallel)
-    return [adapter_for(n, python=python, parallel=parallel)
+    return [adapter_for(n, python=python, parallel=parallel,
+                        repo=Path(state["repo"]))
             for n in state["adapter_names"]]
 
 
@@ -415,6 +422,8 @@ async def _rm_reports(sb: LocalSandbox, adapter: ProjectAdapter,
 
 async def _run_one_full(worktree: Path, adapter: ProjectAdapter,
                         timeout: float, require_report: bool) -> FailureSet:
+    # 补上 git 带不过去的东西（vitest 的 node_modules）。幂等且便宜，见协议。
+    adapter.prepare(worktree)
     sb = LocalSandbox(workspace=str(worktree))
     await sb.start()
     try:
@@ -488,6 +497,8 @@ def _dispatch(test_ids: list[str], adapters: Sequence[ProjectAdapter],
 async def _run_one_scoped(worktree: Path, adapter: ProjectAdapter,
                           test_ids: list[str], timeout: float,
                           require_report: bool) -> FailureSet:
+    # 复跑也要 —— 红检走的就是这条路，而那时还没跑过全量。
+    adapter.prepare(worktree)
     sb = LocalSandbox(workspace=str(worktree))
     await sb.start()
     try:

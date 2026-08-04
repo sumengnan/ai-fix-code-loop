@@ -195,4 +195,15 @@ class ProjectAdapter(Protocol):
     # `文件::用例`，surefire 靠 `类#方法`。
     def cases_under(self, file_id: str, test_ids: frozenset[str]) -> set[str]: ...
 
+    # 跑测试之前，在 worktree 里补上 git 带不过去的东西。
+    #
+    # worktree 只含**被跟踪**的文件，而各语言的依赖目录都不被跟踪：
+    # `node_modules` / `.venv` / `~/.m2`。pytest 与 Maven 各有现成的解法
+    # （前者用 worktree 之外的绝对路径解释器，后者用本机仓库），vitest 没有 ——
+    # 它按 cwd 向上找 `node_modules`，而 worktree 里那条路上一个都没有。
+    #
+    # 必须**幂等且便宜**：`run_full_suite` 与 `run_scoped` 各调一次，而一次
+    # run 里它们要跑好几轮。
+    def prepare(self, worktree: Path) -> None: ...
+
     def locate_source(self, failure: Failure, repo: Path) -> list[SourceCandidate]: ...

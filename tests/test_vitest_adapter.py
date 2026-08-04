@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from aifix.adapters.junit import parse_junit
-from aifix.adapters.vitest_adapter import VitestAdapter
+from aifix.adapters.vitest_adapter import VitestAdapter, find_pkg_dir
 
 _REAL_XML = '''<?xml version="1.0" encoding="UTF-8" ?>
 <testsuites name="vitest tests" tests="5" failures="3" errors="0" time="0">
@@ -397,3 +397,138 @@ def test_the_built_selector_really_selects_exactly_that_one_case(tmp_path):
         subprocess.run(cmd, cwd=tmp_path, capture_output=True, timeout=180)
         fs = parse_junit(a.report_paths(tmp_path, scoped=True), a.make_test_id)
         assert fs.ran == {f"src/a.test.ts::{want}"}, sorted(fs.ran)
+
+
+# --------------------------------------------------- package.json 在哪
+
+def _pkg(d: Path, *, vitest: bool = True) -> None:
+    d.mkdir(parents=True, exist_ok=True)
+    deps = {"vitest": "^2"} if vitest else {"jest": "^29"}
+    (d / "package.json").write_text(json.dumps({"devDependencies": deps}),
+                                    encoding="utf-8")
+
+
+def test_pkg_dir_is_found_at_the_root(tmp_path):
+    _pkg(tmp_path)
+    assert find_pkg_dir(tmp_path) == ""
+
+
+def test_pkg_dir_is_found_one_level_down(tmp_path):
+    """**前后端同仓的真实形状。** ai-learning-helper 的前端就在 `web/` 下。
+
+    只看根目录的话，`AIFIX_ADAPTERS=pytest,vitest` 配了也白配 —— 探测说这里
+    没有前端，而那与真的没有前端完全无法区分。
+    """
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n",
+                                             encoding="utf-8")
+    _pkg(tmp_path / "web")
+    assert find_pkg_dir(tmp_path) == "web"
+    assert VitestAdapter.detect(tmp_path) is True
+
+
+def test_node_modules_is_never_walked_into(tmp_path):
+    """`node_modules` 里每个包都有自己的 package.json，其中不少也依赖 vitest ——
+    走进去必然认错，而认错的表现是 `--root node_modules` 跑了个空。"""
+    _pkg(tmp_path / "node_modules" / "some-pkg")
+    assert find_pkg_dir(tmp_path) is None
+
+
+def test_a_frontend_without_vitest_is_not_claimed(tmp_path):
+    """依赖里是 jest 不是 vitest —— 不认领。认错的后果是 baseline 去跑一个
+    不存在的二进制，报告写「测试进程没能正常跑完」。"""
+    _pkg(tmp_path / "web", vitest=False)
+    assert find_pkg_dir(tmp_path) is None
+    assert VitestAdapter.detect(tmp_path) is False
+
+
+def test_the_subdir_choice_is_reproducible(tmp_path):
+    """两个子目录都有前端时按名字排序取第一个。
+
+    不定死顺序的话，同一个仓库在两台机器上可能选中不同的前端，而两边都不报错。
+    """
+    _pkg(tmp_path / "zui")
+    _pkg(tmp_path / "app")
+    assert find_pkg_dir(tmp_path) == "app"
+
+
+# ------------------------------------------------------------- prepare
+
+def test_prepare_borrows_node_modules_into_the_worktree(tmp_path):
+    """worktree 只含被 git 跟踪的文件，而 `node_modules` 当然不被跟踪 ——
+    不借的话 `node_modules/.bin/vitest` 根本不存在。"""
+    repo, tree = tmp_path / "repo", tmp_path / "tree"
+    (repo / "node_modules" / "react").mkdir(parents=True)
+    (repo / "node_modules" / ".bin").mkdir()
+    tree.mkdir()
+
+    VitestAdapter(repo=repo).prepare(tree)
+    assert (tree / "node_modules").is_dir()
+    assert not (tree / "node_modules").is_symlink(), \
+        "必须是真目录 —— 整个软链过去的话缓存会写进源仓库"
+    assert (tree / "node_modules" / "react").is_symlink()
+    assert (tree / "node_modules" / ".bin").is_symlink()
+
+
+def test_prepare_is_idempotent(tmp_path):
+    """`run_full_suite` 与 `run_scoped` 各调一次，而一次 run 里它们要跑好几轮。"""
+    repo, tree = tmp_path / "repo", tmp_path / "tree"
+    (repo / "node_modules" / "react").mkdir(parents=True)
+    tree.mkdir()
+    a = VitestAdapter(repo=repo)
+    a.prepare(tree)
+    a.prepare(tree)          # 第二次不该抛
+    assert (tree / "node_modules" / "react").is_symlink()
+
+
+def test_prepare_does_nothing_without_a_source(tmp_path):
+    """源仓库里也没有 node_modules 时什么都不做、不报错 —— 那时正确的动作是
+    让 vitest 自己以「找不到命令」失败，那句报错比我们编一句准确。"""
+    repo, tree = tmp_path / "repo", tmp_path / "tree"
+    repo.mkdir()
+    tree.mkdir()
+    VitestAdapter(repo=repo).prepare(tree)
+    assert not (tree / "node_modules").exists()
+
+
+def test_prepare_handles_the_subdir_layout(tmp_path):
+    repo, tree = tmp_path / "repo", tmp_path / "tree"
+    (repo / "web" / "node_modules" / "react").mkdir(parents=True)
+    _pkg(repo / "web")
+    (tree / "web").mkdir(parents=True)
+
+    a = VitestAdapter(repo=repo)
+    assert a.pkg_dir == "web", "构造时应当自己探到"
+    a.prepare(tree)
+    assert (tree / "web" / "node_modules" / "react").is_symlink()
+
+
+@_vitest_skip()
+def test_the_dependency_cache_lands_in_the_worktree_not_the_source(tmp_path):
+    """**这条是逐个子项软链存在的全部理由。**
+
+    实测：vitest 跑完会在 `node_modules/.vite` 下写依赖预构建缓存。整个
+    `node_modules` 软链过去的话，那些写**落在源仓库里** —— 而这个项目的地基是
+    「agent 的一切改动都发生在 worktree，主工作区绝不被触碰」。
+    """
+    repo, tree = tmp_path / "repo", tmp_path / "tree"
+    repo.mkdir()
+    subprocess.run(["npm", "install", "--offline", "--no-audit", "--no-fund",
+                    "--silent", "vitest"], cwd=repo, check=True,
+                   capture_output=True, timeout=180)
+    (repo / "package.json").write_text(
+        json.dumps({"private": True, "type": "module",
+                    "devDependencies": {"vitest": "^2"}}), encoding="utf-8")
+    (tree / "src").mkdir(parents=True)
+    (tree / "src" / "a.test.ts").write_text(
+        "import { it, expect } from 'vitest'\n"
+        "it('绿的', () => { expect(1).toBe(1) })\n", encoding="utf-8")
+
+    a = VitestAdapter(repo=repo)
+    a.prepare(tree)
+    subprocess.run(a.full_test_command(), cwd=tree, capture_output=True,
+                   timeout=180)
+
+    assert (tree / a.REPORT_NAME).is_file(), "报告要写出来，说明真跑了"
+    assert (tree / "node_modules" / ".vite").exists(), "缓存该落在 worktree"
+    assert not (repo / "node_modules" / ".vite").exists(), \
+        "源仓库被写进去了 —— worktree 隔离被击穿"

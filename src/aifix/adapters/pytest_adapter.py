@@ -458,8 +458,13 @@ class PytestAdapter:
     name = "pytest"
 
     def __init__(self, python: str | None = None,
-                 parallel: str | None = None) -> None:
+                 parallel: str | None = None,
+                 repo: Path | str | None = None) -> None:
         """python：跑测试用的解释器；None 表示退回 `sys.executable`。
+
+        repo 收下不用：pytest 侧的依赖来自那个**worktree 之外**的解释器，
+        worktree 里不需要补任何东西（见 prepare）。接它是接口对齐的代价 ——
+        `adapter_for` 对注册表里每个实现用的是同一行调用。
 
         做成构造参数而不是 `full_test_command(python=...)` 那样的方法参数，
         是为了不动 `ProjectAdapter` 协议：核心循环有四个节点各自取一次适配器，
@@ -540,6 +545,13 @@ class PytestAdapter:
 
     def test_dirs(self) -> list[str]:
         return ["tests", "test"]
+
+    def prepare(self, worktree: Path) -> None:
+        """什么都不用做。
+
+        依赖来自**worktree 之外**的那个解释器（绝对路径，见
+        `resolve_test_python`），worktree 里本来就不需要有 `.venv`。
+        """
 
     def is_test_path(self, path: str) -> bool:
         """pytest 的测试住在目录里，判据就是「在不在测试目录之下」。

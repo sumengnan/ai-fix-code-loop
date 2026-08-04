@@ -30,8 +30,9 @@ class MavenAdapter:
     name = "maven"
 
     def __init__(self, python: str | None = None,
-                 parallel: str | None = None) -> None:
-        """两个参数都收下、都不用 —— `mvn` 是外部命令，不走 Python 解释器。
+                 parallel: str | None = None,
+                 repo: Path | str | None = None) -> None:
+        """三个参数都收下、都不用 —— `mvn` 是外部命令，不走 Python 解释器。
 
         接它们是接口对齐的代价，不是遗漏：`adapter_for` 对注册表里的每个实现
         用的是同一行 `ADAPTERS[name](python=..., parallel=...)`，这里不收的话，
@@ -82,6 +83,9 @@ class MavenAdapter:
 
     def test_dirs(self) -> list[str]:
         return ["src/test"]
+
+    def prepare(self, worktree: Path) -> None:
+        """什么都不用做 —— 依赖在本机的 `~/.m2`，与 worktree 无关。"""
 
     def is_test_path(self, path: str) -> bool:
         """Maven 标准布局把测试关在 `src/test` 下，判据就是目录。

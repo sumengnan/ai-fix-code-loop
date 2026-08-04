@@ -60,11 +60,66 @@ def _escape(text: str) -> str:
     return _JS_META.sub(lambda m: "\\" + m.group(0), text)
 
 
+# 找 `package.json` 时跳过的目录。`node_modules` 是硬需求：里面每个包都有自己的
+# package.json，而其中不少也依赖 vitest —— 走进去必然认错。
+_SKIP_DIRS = frozenset({"node_modules", "dist", "build", "coverage",
+                        "target", ".git", "vendor"})
+
+
+def _has_vitest(pkg: Path) -> bool:
+    """这份 package.json 的依赖里**直接**列了 vitest 吗。
+
+    只翻 dependencies / devDependencies，不翻 scripts：`"test": "vitest run"`
+    当然也是证据，但反过来 `"test": "jest"` 的工程如果依赖里有 vitest（被别的包
+    传递依赖进来），按 scripts 判会漏、按依赖判会误认。依赖里**直接**列了才是
+    「这个工程用 vitest」的可靠信号。
+    """
+    try:
+        data = json.loads(pkg.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        # 读不动 / 不是合法 JSON 就当没有。抛异常的话，异常会从 preflight 或
+        # baseline 里钻出来，而那只说明这个 package.json 坏了。
+        return False
+    if not isinstance(data, dict):
+        return False
+    deps: dict = {}
+    for key in ("dependencies", "devDependencies"):
+        section = data.get(key)
+        if isinstance(section, dict):
+            deps.update(section)
+    return "vitest" in deps
+
+
+def find_pkg_dir(repo: Path) -> str | None:
+    """vitest 工程在这个仓库的哪个目录下；没有则 None。`""` 表示仓库根。
+
+    先看根目录，再看**一层**子目录。前后端同仓时前端几乎总是 `web/` /
+    `frontend/` / `client/` 这类一级目录，而不写死名字是因为那份名单永远不全，
+    漏掉一个的表现是「这个仓库没有前端」—— 与真的没有前端完全无法区分。
+
+    只下一层，不递归：再深就更可能是 monorepo 的某个 package，而那时「哪个才是
+    要跑的那套」不是一个探测能回答的问题（`AIFIX_ADAPTERS` 也表达不了），
+    猜一个出来只会让另外几个被静默跳过。
+
+    子目录按名字排序后取第一个命中的，让结果**可复现** —— 不定死顺序的话，同一个
+    仓库在两台机器上可能选中不同的前端，而两边都不报错。
+    """
+    if _has_vitest(repo / "package.json"):
+        return ""
+    for child in sorted(p for p in repo.iterdir() if p.is_dir()):
+        if child.name in _SKIP_DIRS or child.name.startswith("."):
+            continue
+        if _has_vitest(child / "package.json"):
+            return child.name
+    return None
+
+
 class VitestAdapter:
     name = "vitest"
 
     def __init__(self, python: str | None = None,
-                 parallel: str | None = None, pkg_dir: str = "") -> None:
+                 parallel: str | None = None, pkg_dir: str = "",
+                 repo: Path | str | None = None) -> None:
         """`python` / `parallel` 都收下、都不用 —— 与 MavenAdapter 同一条理由。
 
         `adapter_for` 对注册表里每个实现用的是同一行
@@ -74,46 +129,42 @@ class VitestAdapter:
 
         （vitest 本来就默认多线程并行跑，没有对应 `-n` 的东西要传。）
 
-        `pkg_dir`：`package.json` 所在的子目录，`""` 表示仓库根。**注册表目前
-        不会传它** —— `adapter_for` 的签名里没有这一项，而加进去要连同「一个 run
-        允许有多个适配器」一起改（那是下一步）。留着它不是预留接口：ai-learning-helper
-        这类前后端同仓的工程，前端就在 `web/` 下，而它正是这个适配器最终要服务的
-        形状。有测试直接构造 `VitestAdapter(pkg_dir="web")` 覆盖这条路径。
+        `pkg_dir`：`package.json` 所在的子目录，`""` 表示仓库根。给了 `repo`
+        而没给 `pkg_dir` 时**自己去探**（见 find_pkg_dir）—— 前后端同仓的工程
+        前端在 `web/` 下，而 `adapter_for` 没有办法替它猜。
+
+        `repo`：**源仓库**，不是 worktree。两处要用：探 `pkg_dir`，以及
+        `prepare()` 从这里把 `node_modules` 借给 worktree（worktree 里没有它，
+        它没被 git 跟踪）。收下不用的适配器同样要接这个参数 —— 与 `python` /
+        `parallel` 同一条理由，见 `adapter_for`。
         """
-        self.pkg_dir = pkg_dir.strip("/")
+        self.repo = Path(repo) if repo is not None else None
+        if pkg_dir:
+            self.pkg_dir = pkg_dir.strip("/")
+        elif self.repo is not None:
+            self.pkg_dir = (find_pkg_dir(self.repo) or "").strip("/")
+        else:
+            self.pkg_dir = ""
 
     @staticmethod
     def detect(repo: Path) -> bool:
-        """根目录有 `package.json`，且依赖里点名了 vitest。
+        """根目录**或某个一级子目录**下有依赖 vitest 的 `package.json`。
 
-        判据刻意具体。只看 `package.json` 存在就认领是不行的：带一点前端工具链
-        （eslint、prettier、一个构建脚本）的 Python / Java 工程也有它，而认错的
-        后果不是报错 —— baseline 会去跑一个不存在的 vitest，或者跑出 0 个用例，
-        报告写「这个仓库没问题」。
+        判据刻意具体（见 `_has_vitest`）。只看 `package.json` 存在就认领是不行
+        的：带一点前端工具链（eslint、prettier、一个构建脚本）的 Python / Java
+        工程也有它，而认错的后果不是报错 —— baseline 会去跑一个不存在的 vitest，
+        或者跑出 0 个用例，报告写「这个仓库没问题」。
 
-        只翻 dependencies / devDependencies，不翻 scripts：`"test": "vitest run"`
-        当然也是证据，但反过来 `"test": "jest"` 的工程如果依赖里有 vitest（被别的
-        包传递依赖进来），按 scripts 判会漏、按依赖判会误认。依赖里**直接**列了
-        vitest 才是「这个工程用 vitest」的可靠信号。
+        要看子目录，是因为前后端同仓的工程前端几乎总在 `web/` 这类一级目录下 ——
+        只看根目录的话，`AIFIX_ADAPTERS=pytest,vitest` 配了也白配：探测说这里
+        没有前端，而那与真的没有前端完全无法区分。
         """
-        pkg = Path(repo) / "package.json"
-        if not pkg.is_file():
-            return False
         try:
-            data = json.loads(pkg.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            # 读不动 / 不是合法 JSON 就当没有。这里抛异常的话，异常会从
-            # preflight 或 baseline 里钻出来，而那只说明这个仓库的 package.json
-            # 坏了，不说明它是个 vitest 工程。
+            return find_pkg_dir(Path(repo)) is not None
+        except OSError:
+            # 目录读不动（权限、仓库路径根本不存在）就当没有 —— 抛出去的话
+            # 异常会从 preflight 里钻出来，而那只说明这个路径有问题。
             return False
-        if not isinstance(data, dict):
-            return False
-        deps = {}
-        for key in ("dependencies", "devDependencies"):
-            section = data.get(key)
-            if isinstance(section, dict):
-                deps.update(section)
-        return "vitest" in deps
 
     REPORT_NAME = ".aifix-report.xml"
     SCOPED_REPORT_NAME = ".aifix-recheck.xml"
@@ -139,6 +190,48 @@ class VitestAdapter:
 
     def _root(self) -> list[str]:
         return ["--root", self.pkg_dir] if self.pkg_dir else []
+
+    def prepare(self, worktree: Path) -> None:
+        """把源仓库的 `node_modules` **借**给 worktree。
+
+        worktree 是从 HEAD 建的，只含被 git 跟踪的文件 —— 而 `node_modules`
+        当然没被跟踪。不做这一步，`node_modules/.bin/vitest` 根本不存在，表现是
+        「测试进程没能正常跑完」，一句指向目标项目的话。
+
+        **建真目录 + 逐个子项软链，不是软链整个 node_modules。** 这不是洁癖：
+        实测（2026-08-04）vitest 跑完会在 `node_modules/.vite` 下写依赖预构建
+        缓存。整个目录软链过去的话，那些写**落在源仓库里** —— 而这个项目的地基
+        是「agent 的一切改动都发生在 worktree，主工作区绝不被触碰」
+        （见 delivery.py 开头那句）。逐个子项软链之后，读走源仓库、写落在
+        worktree：已实测 `.vite` 出现在 worktree 侧，源仓库侧没有。
+
+        比 `npm ci` 便宜得多：255 个软链是毫秒级，而 `npm ci` 实测 12 秒
+        （还得有缓存或网络）。一次 run 要跑好几遍全量，但 prepare 只做一次。
+
+        **幂等**：目录已经在了就什么都不做。`run_scoped` 与 `run_full_suite`
+        各调一次，而一次 run 里它们要跑好几轮。
+
+        源仓库里也没有 `node_modules` 时**什么都不做，不报错**：那时正确的
+        动作是让 vitest 自己以「找不到命令」失败 —— 那句报错比我们编一句准确。
+        """
+        if self.repo is None:
+            return
+        src = self.repo / self.pkg_dir / "node_modules" if self.pkg_dir \
+            else self.repo / "node_modules"
+        dst = Path(worktree) / self.pkg_dir / "node_modules" if self.pkg_dir \
+            else Path(worktree) / "node_modules"
+        if dst.exists() or not src.is_dir():
+            return
+        try:
+            dst.mkdir(parents=True, exist_ok=True)
+            for entry in src.iterdir():
+                link = dst / entry.name
+                if not link.exists():
+                    link.symlink_to(entry)
+        except OSError:
+            # 借不成就算了（权限、文件系统不支持软链）。硬失败在这里没有价值：
+            # 下一步 vitest 会以「找不到命令」失败，而那句话更准确。
+            return
 
     def full_test_command(self) -> list[str]:
         return [self._bin(), "run", *self._root(),
