@@ -13,6 +13,7 @@ from ..agents.detector import Diagnosis
 from ..agents.fixer import (build_initial_messages, build_registry,
                             locate_hint, system_prompt)
 from ..agents.runner import consume
+from ..config import AifixConfig
 from ..graph import AifixState, progress_of, trace_of
 from ..progress import StepReporter
 from ..tools.ask import Pending
@@ -110,6 +111,36 @@ async def _rollback(sandbox: LocalSandbox) -> None:
     await sandbox.exec(["git", "clean", "-fd"], 60.0)
 
 
+def fixer_route(cfg: AifixConfig, attempt: int):
+    """这一轮 fixer 实际使用的模型路由 —— 只有思考模式随轮次变。
+
+    默认第 1 轮关掉推理：修 bug 的活大多是机械的（读代码、改几行、跑测试），
+    而推理按输出 token 计费。实测复现那一步有一轮的输出预算被推理全部吃掉、
+    正文一个字没吐，fixer 走同一个端点、同一个风险。
+
+    第 `fixer_thinking_after_attempt` 轮起升级成开。判据是 attempt 而不是
+    「撞了几次守卫」：attempt 只在 verify 判了 not-better 之后才递增，含义
+    精确地就是**上一轮写出来的代码没通过验证** —— 那才是值得花更多钱去想的
+    时刻。守卫重试（空 diff / 巨型 diff）不递增 attempt，也就不触发升级：
+    那是「没写出代码」，要的补救是把话说清楚，不是更强的推理。
+
+    基准是 None（不发这个参数、随端点默认）时**升级仍然生效**：「不表态」不
+    等于「不许升级」，而升级恰恰是要在这一刻明确表态。
+
+    `model_copy` 而不是就地改：`cfg.fixer` 是整个 run 共用的一份，就地写进
+    `llm_extra_body` 会让第 2 轮的升级泄漏到后面每一个 failure 上 —— 而那是
+    静默的，报告里只会显示「这次比上次贵」。
+    """
+    after = cfg.fixer_thinking_after_attempt
+    escalated = bool(after) and attempt >= after
+    thinking = True if escalated else cfg.fixer_thinking
+    if thinking is None:
+        return cfg.fixer
+    return cfg.fixer.model_copy(update={
+        "llm_extra_body": {**cfg.fixer.llm_extra_body,
+                           "enable_thinking": thinking}})
+
+
 async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
     """跑 Fixer，并在其结束后检查改动是否合理。
 
@@ -145,6 +176,12 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
     cost = 0.0
     lines = 0
 
+    # 本轮是第几次修复尝试。**思考模式按它升级**（见 fixer_route）——
+    # attempt 只在 verify 判了 not-better 之后才递增，所以它的含义精确地就是
+    # 「前面有几轮写出来的代码没通过验证」。缺省 1：绕过核心循环直接调这个
+    # 节点的路径（图那条、测试夹具）该走最便宜的那一档。
+    attempt = state.get("attempt") or 1
+
     trace = trace_of(state)
     prog = progress_of(state)
     sandbox = LocalSandbox(workspace=state["worktree_path"])
@@ -164,7 +201,7 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
 
     try:
         loop = AgentLoop(
-            client=client or OpenAICompatibleClient(cfg.fixer),
+            client=client or OpenAICompatibleClient(fixer_route(cfg, attempt)),
             registry=build_registry(sandbox, adapter,
                                     known_ids=set(state["baseline_ids"]),
                                     touched=touched, pending=pending,

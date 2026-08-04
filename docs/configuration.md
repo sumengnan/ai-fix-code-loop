@@ -345,6 +345,24 @@ token 那一层有一个下限 `FLOOR_TOKENS = 10_000`（再紧也要给一次�
 | `AIFIX_LOOP_DETECT_WINDOW` | 3 | 框架的打转检测窗口 |
 | `AIFIX_TOOL_RESULT_MAX_CHARS` | 8000 | 单次工具返回喂给模型的字符上限 |
 | `AIFIX_DETECTOR_MAX_TOKENS` | 20,000 | 诊断那一步的 token 上限 |
+| `AIFIX_FIXER_THINKING` | false | fixer 思考模式的**基准值**（会被下面那条升级盖过） |
+| `AIFIX_FIXER_THINKING_AFTER_ATTEMPT` | 2 | 从第几轮起把思考模式升级成开；0 = 永不升级 |
+
+### 思考模式：默认关，验证不过就升级
+
+修 bug 的活大多是机械的（读代码、改几行、跑测试），而推理**按输出 token 计费**。
+实测复现那一步有一轮的输出预算被推理全部吃掉、正文一个字没吐 —— fixer 走同一个端点、
+同一个风险。所以第 1 轮走便宜的那一档。
+
+第 2 轮起自动开。**判据是 `attempt` 而不是别的**，因为它的含义精确：`attempt` 只在
+verify 判了 not-better **之后**才递增，所以 `attempt≥2` 就是「上一轮写出来的代码没通过
+验证」—— 那才是值得花更多钱去想的时刻。
+
+守卫重试（空 diff / 巨型 diff）**刻意不递增 `attempt`**，也就不会触发升级：那是「没写出
+代码」，要的补救是把话说清楚（守卫的反馈文案），不是更强的推理。两者要的东西完全不同。
+
+`AIFIX_FIXER_THINKING=`（空串）= 不发这个参数、随端点默认。**升级仍然生效** —— 「不表态」
+不等于「不许升级」，而升级恰恰是要在这一刻明确表态。
 | `AIFIX_ASK_USER` | true | 允不允许模型停下来问人 |
 
 ### `fix_guard_retries` 与 `guard_giveup_limit` 是咬在一起的
@@ -514,6 +532,8 @@ ask_user                       True
 max_diff_lines                 300
 necessity_check                True             # 交付前的补丁必要性反查
 necessity_max_units            10               # 超过就整体跳过反查
+fixer_thinking                 False            # 第 1 轮关推理
+fixer_thinking_after_attempt   2                # 第 2 轮起升级成开
 reviewer_check                 False            # 交付前让裁判模型复审（要花钱）
 reviewer_max_tokens            20_000
 fix_guard_retries              2

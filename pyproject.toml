@@ -8,7 +8,7 @@
 #                                      产物目录 `.aifix/`、全部文档都是这个词。
 # 与 scikit-learn → sklearn 同一个形状。
 name = "aifix-code"
-version = "0.3.2"
+version = "0.4.0"
 description = "测试失败驱动的自我修复 agentic loop：红着的测试进去，一条验证过的补丁分支出来"
 readme = "README.md"
 requires-python = ">=3.11"

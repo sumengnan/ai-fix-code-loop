@@ -110,7 +110,7 @@ class AifixConfig(BaseSettings):
     # 空字符串当没设。GitHub Actions 里 `env: X: ${{ vars.Y }}` 在 Y 未设置时
     # 会把 X 设成**空串**而不是不设 —— 不接这一手，任何没配这个 variable 的仓库
     # 都会在启动时因为「'' 不是合法的 bool」而拒绝启动。
-    @field_validator("reproducer_thinking", mode="before")
+    @field_validator("reproducer_thinking", "fixer_thinking", mode="before")
     @classmethod
     def _empty_means_unset(cls, v):
         if isinstance(v, str) and v.strip().lower() in ("", "null", "none"):
@@ -400,6 +400,26 @@ class AifixConfig(BaseSettings):
     # 落到线上是 harness 的 `_adapt_thinking`：模型名含 deepseek 时翻成
     # `thinking={"type": "disabled"}`；Qwen/百炼那边原样发 enable_thinking。
     reproducer_thinking: bool | None = False
+
+    # fixer 的思考模式**基准值**，默认关。修 bug 的活大多是机械的（读代码、
+    # 改几行、跑测试），而推理是按输出 token 计费的 —— 实测复现那一步有一轮
+    # 的输出预算被推理全部吃掉、正文一个字没吐，fixer 走同一个端点、同一个
+    # 风险。None = 不发这个参数、随端点默认。
+    #
+    # **但它只是基准**：验证不通过之后会被下面那条升级规则盖过去。
+    fixer_thinking: bool | None = False
+    # 从第几轮 attempt 起把思考模式**升级成开**。0 = 永不升级。
+    #
+    # 判据用 attempt 而不是别的，是因为它的含义精确：`attempt` 只在 verify
+    # 判了 not-better **之后**才递增（见 verify_node），所以 attempt≥2 就是
+    # 「上一轮写出来的代码没通过验证」。守卫重试（空 diff / 巨型 diff）刻意
+    # **不**递增 attempt，也就不会触发升级 —— 那是「没写出代码」，不是「写的
+    # 代码没通过验证」，两者要的补救完全不同：前者要的是把话说清楚（守卫的
+    # 反馈文案），后者要的才是更强的推理。
+    #
+    # 默认 2：第 1 轮便宜地试一次，不成再上贵的。默认 max_attempts=3 时这样
+    # 有两轮带推理，比只留最后一轮多一次机会。
+    fixer_thinking_after_attempt: int = 2
     detector_max_tokens: int = 20_000
 
     # 交付前让裁判模型复审一遍补丁（agents/reviewer.py）。**只出信号，不改判
