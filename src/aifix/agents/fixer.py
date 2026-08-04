@@ -166,7 +166,9 @@ def format_answer(question: str, choice: str) -> str:
 def build_initial_messages(failure: Failure,
                            diagnosis: Diagnosis | None,
                            locate: str | None = None,
-                           answer: str | None = None) -> list[Message]:
+                           answer: str | None = None,
+                           retry_note: str | None = None,
+                           invariant: str | None = None) -> list[Message]:
     """把失败信息与诊断组装成 Fixer 的初始上下文。
 
     diagnosis 为 None 时降级：直接把原始 traceback 交给 Fixer 自行判断。
@@ -199,8 +201,21 @@ def build_initial_messages(failure: Failure,
             "这份分析仅供参考，请自己读代码确认后再动手。")
     if locate:
         body += "\n\n" + locate
+    # 复现那一步对「这条测试钉的是什么规则」的说法。要照规则改，不是照那一个
+    # 样本改 —— 后者写出来的补丁只对这一条用例成立。
+    #
+    # 标明它是模型写的：不标的话会被当成规格来读，而它和上面那份诊断是同一档
+    # 证据强度（那边同样写着「仅供参考」）。
+    if invariant:
+        body += (f"\n\n这条测试钉的规则（写复现的那一步给的说法，仅供参考，"
+                 f"请自己读代码确认）：\n  {invariant}\n"
+                 "请按这条规则修，不要只让这一条用例通过。")
     # 答复放在**最后**：它是这一轮里最新、最确定的一条信息，而上面那份诊断
     # 是模型自己上一轮猜的。顺序反了的话，人给的答案会被一段猜测压在下面。
     if answer:
         body += "\n\n" + answer
+    # 退回重写的理由放在**最末**：它讲的是上一轮具体错在哪，比上面那份诊断
+    # （模型自己猜的）确定得多，压在下面会被当成背景噪音。
+    if retry_note:
+        body += "\n\n" + retry_note
     return [Message(role=Role.USER, content=body)]

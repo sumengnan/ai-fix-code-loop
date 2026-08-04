@@ -221,7 +221,8 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
         messages = build_initial_messages(
             failure, diagnosis,
             locate=await locate_hint(sandbox, adapter, diagnosis),
-            answer=answer)
+            answer=answer, retry_note=state.get("retry_note"),
+            invariant=state.get("invariant"))
 
         last_guard: str | None = None
         guard_repeats = 0
@@ -341,6 +342,9 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
         "guard_hits": guard_hits,
         "diff_lines": lines,
         "abort_reason": abort_reason,
+        # 读完即弃：留着的话它会跟到后面每一轮，而那几轮被退回的理由未必是同
+        # 一条（甚至根本没被退回）—— 一段过期的「你上一轮错在哪」比没有更糟。
+        "retry_note": None,
         "abort": None,      # AgentLoop 的错误不中止整个 run，交给 verify 判定
         "cost_capped": cost_capped,
         # 有值就表示这一轮停在了「等人回答」上。run_once 据此收尾整个 run：

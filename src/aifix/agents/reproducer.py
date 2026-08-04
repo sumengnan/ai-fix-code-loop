@@ -52,6 +52,9 @@ import 或自己定义——`pytest` 也一样。用到别的测试文件里那�
 - test_code: 完整的测试文件内容。**自包含**：用到的每个名字都在这份代码里
   import 或定义过（包括 pytest），不依赖任何既有测试文件
 - target_test_id: 这条用例的完整标识，格式与本项目其余用例一致
+- invariant: 一句话说清这条测试钉的是**什么规则**。写规则，不要写这一条用例
+  ——「返回值必须是两个入参之和，与具体取值无关」是规则，「add(2,3) 要等于 5」
+  只是复述了那条用例。修复的人照着规则改才不会只对这一个输入成立
 - missing_info: 字符串数组。can_reproduce 为 false 时，逐条列出还缺什么
 
 硬约束：
@@ -73,6 +76,12 @@ class Reproduction(BaseModel):
     test_code: str | None = None
     target_test_id: str | None = None
     missing_info: list[str] = []
+    # 这条测试钉的是什么规则（一句话）。给 fixer 和读报告的人看，**不进判定**
+    # ——判定只看测试结果，让模型写的一句话参与判定就是把判定权交回给模型。
+    #
+    # 缺省空串而不是必填：少写一句话就把一条能用的复现整个丢掉，是拿一个有价值
+    # 的产出去换一个装饰性的字段。
+    invariant: str = ""
 
 
 def build_prompt(issue_title: str, issue_body: str, test_dirs: list[str],

@@ -101,7 +101,8 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                    only_test: str | None = None,
                    dry_run: bool = False,
                    progress: Any = None,
-                   answer: str | None = None) -> AifixState:
+                   answer: str | None = None,
+                   invariant: str | None = None) -> AifixState:
     """按状态图的语义顺序执行一次完整 run。
 
     M1 直接手工驱动节点，节点顺序与路由和 build_graph() 的图一致——把
@@ -121,6 +122,9 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
     state = new_state(repo, config, run_id=run_id)
     # 人对上一轮 ask_user 的答复。带着它跑时 `ask_user` 不再注册（见 fix_node）
     state["answer"] = answer
+    # 复现那一步对「这条测试钉的是什么规则」的说法。只进 fixer 的开场白与
+    # 报告，**不进判定** —— 它是模型写的一句话。
+    state["invariant"] = invariant
     # 侧信道，与 _trace 同一套约定：fix_node 要在**循环内部**逐步出声，
     # 从这里一路传参数下去等于每加一处出声点就改一遍调用链
     state["_progress"] = prog

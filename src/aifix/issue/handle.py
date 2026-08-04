@@ -439,6 +439,7 @@ async def handle(
     _say(f"── 开始修复：{r.target_test_id}")
     state = await run_fn(repo, run_config, run_id=run_id,
                          only_test=r.target_test_id, answer=answer_text,
+                         invariant=getattr(r, "invariant", "") or None,
                          progress=TerminalProgress())
 
     # ------------------------------------------------- 停在「等人回答」上

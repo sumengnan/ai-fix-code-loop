@@ -69,6 +69,12 @@ class AifixState(TypedDict, total=False):
     # 有值时 `ask_user` 不再注册 —— 答案就在开场白里，再问一次同样的问题是
     # 这条路上最贵的失败方式。
     answer: str | None
+    # 复现那一步给的「这条测试钉的是什么规则」。整个 run 不变，只进 fixer 的
+    # 开场白与报告 —— 模型写的一句话，不参与任何判定。
+    invariant: str | None
+    # 上一轮补丁被退回重写的理由，拼成给模型看的一段话。verify 写、fix 读，
+    # 读完即弃（每轮由 verify 重新决定要不要有）。
+    retry_note: str | None
 
     touched: list[str]
     guard_hits: list[str]

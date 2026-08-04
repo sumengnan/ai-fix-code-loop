@@ -479,25 +479,49 @@ def cart_repo(tmp_path: Path) -> Path:
     return repo
 
 
-async def _run_cart(repo: Path, run_id: str, patch: str):
+async def _run_cart(repo: Path, run_id: str, patch: str, **cfg):
     return await run_once(
-        repo, AifixConfig(), run_id=run_id,
+        repo, AifixConfig(**cfg), run_id=run_id,
         detector_client=_Scripted([_text(_HARDCODE_DIAG)]),
         fixer_client=_Scripted([_tool("apply_patch", json.dumps({"diff": patch})),
                                 _text("已修复")]))
 
 
-async def test_hardcoded_special_case_is_caught(cart_repo):
+async def test_hardcoded_special_case_is_sent_back(cart_repo):
+    """这一形状不再直接交付，而是回滚重写（`test_fitting_retry`，默认开）。
+
+    脚本化的「模型」不会改写，所以它一路撞到额度用尽 —— 这里要钉的是它**没有
+    被悄悄交付**，以及退回的理由被记了下来。
+    """
     state = await _run_cart(cart_repo, "hc1", _HARDCODE_PATCH)
 
-    assert state["results"][0]["verdict"] == "better"   # 测试确实转绿了
     keys = _fact_keys(cart_repo, "hc1")
-    assert "hardcoded_literal" in keys
+    assert "rejected_test_fitting" in keys
+    assert state["results"][0]["verdict"] != "better", "不能悄悄交付"
     # 前三类一条都不亮 —— 这正是加第四类的理由
     assert "removed_public_symbol" not in keys
     assert "new_module_state" not in keys
     assert "files_outside_suspect" not in keys
     # 必要性反查也抓不到它：撤掉这个分支目标就红，按「有没有贡献」判它必要
+    assert "unnecessary_hunk" not in keys
+
+
+async def test_hardcoded_special_case_is_still_flagged_when_the_gate_is_off(
+        cart_repo):
+    """关掉退回之后的行为：照常交付，但那条信号必须出现在 facts 与报告里。
+
+    与上面那条不重复 —— 上面钉的是「拦住了」，这条钉的是「拦不住时也说得出
+    来」。这一列是这个仓库对规格套利唯一的发声渠道，两头都不能哑。
+    """
+    state = await _run_cart(cart_repo, "hc3", _HARDCODE_PATCH,
+                            test_fitting_retry=False)
+
+    assert state["results"][0]["verdict"] == "better"   # 测试确实转绿了
+    keys = _fact_keys(cart_repo, "hc3")
+    assert "hardcoded_literal" in keys
+    assert "removed_public_symbol" not in keys
+    assert "new_module_state" not in keys
+    assert "files_outside_suspect" not in keys
     assert "unnecessary_hunk" not in keys
     assert "目标测试里的字面量" in state["report_md"]
 

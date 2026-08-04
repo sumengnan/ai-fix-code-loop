@@ -19,7 +19,15 @@ _SIGNAL_CN = [
     # 反查自己的覆盖面，不是补丁的毛病。列出来是因为**没有结论**和「查过、
     # 是必要的」在结果里长得一样，不点名的话上面那份名单看起来就是完整的。
     ("necessity_skipped", "反查没能把它单独撤下来，对它没有结论"),
+    # 只有在 attempt 用尽、补丁仍被交付时才会出现（还有额度就退回重写了）。
+    ("metamorphic_diverged", "把测试里的字面量换个序，这个补丁就不成立了"),
 ]
+
+# 变形复跑那一条的注脚。它比前面几类都硬：报出来之前跑过对照组（同一个变形
+# 在未打补丁的代码上仍然红），所以不是「可能有问题」而是「这个形状确实没修」。
+_METAMORPHIC_NOTE = (
+    "变形那一条**带对照组**：同一个变形在未打补丁的代码上仍然红，"
+    "说明它依然测得到那个缺陷 —— 所以补丁在这个形状下确实没修好。")
 
 # 必要性反查那一条的注脚。单独一条是因为它的判据和前三条不是一回事：前三条
 # 是纯 AST 的**静态**信号，这一条要真跑测试，且**只跑目标那一条用例** ——
@@ -158,6 +166,8 @@ def _signal_section(signals: list[dict[str, Any]]) -> list[str]:
     if any(e.get("necessity_skipped") or _over_cap_line(e)
            for e in entries_all):
         tail += ["", _NECESSITY_PARTIAL_NOTE]
+    if any(e.get("metamorphic_diverged") for e in entries_all):
+        tail += ["", _METAMORPHIC_NOTE]
     if any(e.get("reviewer_note") for e in entries_all):
         tail += ["", _REVIEWER_NOTE]
     return lines + tail

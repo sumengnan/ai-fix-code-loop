@@ -11,10 +11,24 @@ from ..agents.reviewer import build_prompt as build_review_prompt
 from ..agents.reviewer import parse_review
 from ..delivery import Worktree
 from ..graph import AifixState, trace_of
+from ..metamorphic import Metamorphic, diverging_mutations
 from ..necessity import Necessity, unnecessary_changes
 from ..signals import analyze
 from ..verify import compare
 from .baseline import adapters_from_state, run_full_suite, run_scoped
+
+
+_REFIT_NOTE = """你上一轮的补丁被退回了，改动已回滚。
+
+测试确实转绿了，但你新增的判断里用到了那条测试自己的字面量：
+
+{conds}
+
+照着一条用例的具体输入开后门，只能让那一条用例通过。真实调用换个输入、
+换个顺序、多一条少一条，缺陷原样还在——而测试再也发现不了它。
+
+请从产品代码的角度重写：先弄清这段逻辑**本该**遵守的规则（数据是怎么产生的、
+上下游怎么用它），再按那条规则改。判断条件里不要出现测试里的那些具体值。"""
 
 
 def _worktree(state: AifixState) -> Worktree:
@@ -188,6 +202,53 @@ async def verify_node(state: AifixState,
                   suspect_anchored=state.get("suspect_anchored", True),
                   test_source=test_source)
 
+    # 贴着测试写的补丁：判 BETTER，但新增的判断里用了目标测试的字面量。
+    #
+    # 必须排在必要性反查、裁判、commit **之前**：那三层只对要交付的补丁负责，
+    # 而这个补丁马上要被回滚重写，跑它们是白花钱（裁判还要花模型调用）。
+    #
+    # 只在还有 attempt 额度时退回。额度用尽仍然交付并照旧标注 —— 一条永远拦死
+    # 的闸会把「唯一能修好的那个补丁」也扔掉，比交付一个被标注过的可疑补丁更糟。
+    # 变形复跑与它同一条通路：两者回答的是同一个问题（这补丁只对那一个例子
+    # 成立吗），只是判据不同 —— 一个看补丁里有没有测试的字面量，一个直接扰动
+    # 测试再跑。都带对照/可证伪，都不是模型的看法。
+    #
+    # 只在字面量那一条没报时才跑：报了就已经要退回，再花两次重跑买不到新结论。
+    meta = Metamorphic()
+    if (verdict is Verdict.BETTER and cfg.metamorphic_check
+            and not sig.hardcoded_literals and test_file):
+        try:
+            meta = await diverging_mutations(
+                worktree_path, test_file,
+                {p: (wt.file_at_head(p), _now(p)) for p in touched},
+                target=target, rerun=_rerun,
+                max_mutations=cfg.metamorphic_max_mutations)
+        except Exception as e:      # noqa: BLE001 —— 这一层坏了不该挡住交付
+            trace.fact("metamorphic_failed", str(e))
+
+    refit = ([f"  - {c}" for c in sig.hardcoded_literals]
+             + [f"  - 变形之后就不成立了：{d.label}" for d in meta.diverged])
+    if (verdict is Verdict.BETTER and cfg.test_fitting_retry and refit
+            and state["attempt"] < cfg.max_attempts):
+        trace.fact("verdict", verdict.value)
+        if sig.hardcoded_literals:
+            trace.fact("rejected_test_fitting", sig.hardcoded_literals)
+        if meta.diverged:
+            trace.fact("rejected_metamorphic", [d.label for d in meta.diverged])
+        wt.rollback()
+        return {
+            "verdict": verdict.value,
+            "attempt": state["attempt"] + 1,
+            "results": list(state["results"]),
+            "diagnosis": None,
+            "retry_note": _REFIT_NOTE.format(conds="\n".join(refit)),
+            "spent_tokens": state["spent_tokens"],
+            "spent_cny": state["spent_cny"],
+            "flaky_filtered": sorted(flaky),
+            "confirmed_regressions": sorted(confirmed),
+            "signals": list(state.get("signals") or []),
+        }
+
     # 必要性反查：逐个 hunk 反向、只重跑目标用例，撤掉之后目标照样绿的报出来。
     # 与静态信号同一层（只给人看、不改判定），但它要**动工作区**，所以位置有
     # 两条硬约束：
@@ -322,6 +383,10 @@ async def verify_node(state: AifixState,
             trace.fact("necessity_unit_skipped", nec.skipped)
         if nec.over_cap:
             trace.fact("necessity_over_cap", nec.over_cap)
+        # 额度用尽仍然交付的那条路会走到这里。结论不能丢：报告里必须写明
+        # 「这个补丁扛不住扰动」，否则人看到的就只是一句「已修复」。
+        if meta.diverged:
+            trace.fact("metamorphic_diverged", [d.label for d in meta.diverged])
         # 裁判**判 plausible 时一个字都不写**。一条「裁判认为没问题」的 fact 会
         # 被当成背书，而这一层没有资格背书任何东西 —— 它只在看出问题时开口。
         # 同样不进 `_SIGNAL_KEYS`：那一列的口径是零模型调用的静态信号，掺进一
@@ -330,7 +395,7 @@ async def verify_node(state: AifixState,
         if review is not None and review.is_suspicious:
             trace.fact("reviewer_suspicious", review.reason)
         if (not sig.is_empty() or nec.unnecessary or nec.skipped
-                or nec.over_cap
+                or nec.over_cap or meta.diverged
                 or (review is not None and review.is_suspicious)):
             # 带上 test_id：多 failure 的 run 里，报告只给一份并集的话，人分
             # 不清是哪一次改动删的符号。这个 key 是**追加**不是替换 ——
@@ -340,6 +405,8 @@ async def verify_node(state: AifixState,
                                                   for f in nec.unnecessary],
                             "necessity_skipped": nec.skipped,
                             "necessity_over_cap": nec.over_cap,
+                            "metamorphic_diverged": [d.label
+                                                     for d in meta.diverged],
                             "reviewer_note": (review.reason if review is not None
                                               and review.is_suspicious else "")})
     elif not sig.is_empty():
