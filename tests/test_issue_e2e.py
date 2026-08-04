@@ -317,3 +317,65 @@ async def test_the_allowlist_lets_an_outsider_through(buggy_repo, tmp_path):
 
     assert res.exit_code == 0 and res.path == "delivered", res
     assert gh.prs
+
+
+async def test_an_unfixed_run_comments_instead_of_opening_a_pr(
+        buggy_repo, tmp_path):
+    """复现写出来了、修没修好 —— **不开 PR**，回帖说清楚。
+
+    以前这条路照样开 PR（标题标「未修复」）。理由是「一条红着的复现测试本身
+    就是产出」—— 那句仍然成立，所以**分支照推**，丢掉它等于扔掉这次 run 里
+    唯一有价值的东西（它是真花了钱写出来的）。
+
+    改的是 PR 那一步：一个永远合不进去的 PR 会堆在列表里，而 PR 的语义是
+    「这些改动请你合」。没修好时该说的是「我走到哪儿、卡在哪儿、东西在哪个
+    分支上」，那是一条评论的形状，不是一个 PR 的形状。
+    """
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+    _git(buggy_repo, "remote", "add", "origin", str(bare))
+    _git(buggy_repo, "push", "-q", "origin", "main")
+
+    gh = _Gh()
+    reproducer = _Scripted([_text(_REPRO_JSON)])
+    # 修复侧只说话不改文件 —— 撞空 diff 守卫，最后判「未改善」
+    fixer = _Scripted([_text("我看了一下，感觉没什么要改的")])
+
+    async def _reproduce(repo, adapter, config, title, body, client=None):
+        from aifix.reproduce import reproduce
+        return await reproduce(repo, adapter, config, title, body,
+                               client=reproducer)
+
+    async def _run(repo, config, run_id, only_test=None, **k):
+        from aifix.cli import run_once
+        return await run_once(repo, config, run_id=run_id, only_test=only_test,
+                              detector_client=_Scripted([_text(_DIAG)]),
+                              fixer_client=fixer)
+
+    res = await handle(
+        _payload("add 算错了", "add(2, 3) 返回 -1，期望 5。"),
+        buggy_repo, AifixConfig(budget_tokens=100_000, max_attempts=1), gh,
+        reproduce_fn=_reproduce, run_fn=_run,
+        publish=lambda repo, run_id, **k: False)
+
+    # 一个 PR 都没开
+    assert gh.prs == [], gh.prs
+    assert res.pr_url is None
+    assert res.path == "unfixed", res
+    assert res.exit_code == 0, res      # 没修好是正常收场，不是故障
+
+    # 但分支推上去了，复现测试在里面 —— 那是这次唯一的产出
+    branch = f"aifix/{res.run_id}"
+    tree = _git(bare, "ls-tree", "-r", "--name-only", branch)
+    assert "tests/test_issue_42.py" in tree, tree
+
+    # 回帖必须说清楚三件事：没修好、东西在哪、怎么接手
+    said = "\n".join(gh.statuses + gh.comments)
+    assert "没能修好" in said, said
+    assert branch in said, said
+    assert "git fetch" in said, said        # 给出接手的命令
+    # 报告照常带上（判定、尝试次数、成本都在里面）。
+    # 分母不写死：buggy_repo 自带一个失败用例，加上这条复现测试是 2 个 ——
+    # 而这条测试要钉的是「报告有没有跟着回帖出去」，不是夹具里有几个红。
+    assert "修复：**0 /" in said, said
+    assert "未改善" in said, said

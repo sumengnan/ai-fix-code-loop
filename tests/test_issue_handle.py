@@ -164,21 +164,41 @@ async def test_the_repro_test_is_committed_before_the_loop_runs(tmp_path):
     assert committed and pushed and committed[0] < pushed[0]
 
 
-async def test_an_unfixed_bug_still_gets_a_pr_but_says_so(tmp_path):
-    """一条红着的复现测试本身就是产出 —— 人可以直接接手。丢掉它等于丢掉
-    这次 run 里唯一有价值的东西。"""
+async def test_an_unfixed_bug_pushes_the_branch_but_opens_no_pr(tmp_path):
+    """没修好：分支照推，PR 不开。
+
+    推分支不能省 —— 一条红着的复现测试本身就是产出，人可以直接接手，而它是
+    真花了钱写出来的，runner 一结束就没了。
+
+    不开 PR 是 0.3.1 改的（此前开一个标题带「未修复」的 PR）：PR 的语义是
+    「这些改动请你合」，而这条路上没有任何改动值得合 —— 补丁全被回滚了，分支
+    与 HEAD 的差别只剩那条复现测试。一个永远合不进去的 PR 会堆在列表里。
+    """
     st = _state(report_md="# 报告\n\n修复 0/1",
                 results=[{"test_id": "tests/test_issue_1.py::test_x",
                           "verdict": "same", "attempts": 3,
                           "abort_reason": "max_attempts"}])
-    res, gh, _ = await _handle(_payload(), tmp_path, state=st)
-    assert res.path == "delivered" and gh.prs
-    assert "未修复" in gh.prs[0]["title"]
+    res, gh, calls = await _handle(_payload(), tmp_path, state=st)
+
+    assert res.path == "unfixed"
+    assert gh.prs == []
+    assert res.exit_code == 0          # 没修好是正常收场，不是故障
+    # 分支仍然推了出去
+    assert [c for c in calls["git"] if "push" in c], calls["git"]
+    # 回帖给出接手的命令，光说「在某个分支上」不够。
+    # 这个桩存的是 (issue, body) 元组，取 body
+    said = "\n".join(b for _, b in gh.statuses + gh.comments)
+    assert "没能修好" in said and "git fetch" in said, said
+    assert "# 报告" in said, said      # 报告照常带上
 
 
-async def test_a_fixed_bug_does_not_say_unfixed(tmp_path):
-    """反向对照：标题里那个标记必须真的随判定变，不能是常量。"""
+async def test_a_fixed_bug_opens_a_pr_without_the_unfixed_marker(tmp_path):
+    """反向对照：修好了才开 PR，且标题里没有那个旧标记。
+
+    没有这一条，上面那条在「PR 这一步整个坏掉」时也会绿。
+    """
     res, gh, _ = await _handle(_payload(), tmp_path)
+    assert res.path == "delivered" and gh.prs
     assert "未修复" not in gh.prs[0]["title"]
 
 
@@ -596,3 +616,27 @@ def test_the_old_usd_budget_variable_still_arms_the_same_gate(
     with pytest.raises(SystemExit) as e:
         _cmd_issue(args)
     assert "价格表" in str(e.value)
+
+
+async def test_the_unfixed_comment_carries_what_only_the_pr_body_had(tmp_path):
+    """没修好时那两段**只存在于 PR 正文里**的东西不能跟着 PR 一起消失。
+
+    一是复现那一步的花销：它在 run_once 之外发起调用，报告里的成本不含它 ——
+    不单独写出来，这笔钱在任何一份产物里都不存在。
+    二是「baseline 里本来就有别的红」那句告警：它说明这次的对照组本身是脏的。
+
+    这条路上已经没有 PR 了，回帖就是唯一的产物。只贴 report_md 的话两段全丢。
+    """
+    st = _state(report_md="# 报告\n\n修复 0/1",
+                baseline_ids=["tests/test_issue_1.py::test_x",
+                              "tests/test_other.py::test_y"],
+                results=[{"test_id": "tests/test_issue_1.py::test_x",
+                          "verdict": "same", "attempts": 3,
+                          "abort_reason": "max_attempts"}])
+    res, gh, _ = await _handle(_payload(), tmp_path, state=st)
+
+    assert res.path == "unfixed" and not gh.prs
+    said = "\n".join(b for _, b in gh.statuses + gh.comments)
+    assert "写复现测试花了" in said, said            # 复现的花销
+    assert "tests/test_other.py::test_y" in said, said   # baseline 杂音
+    assert "关联 issue：#" in said, said

@@ -5,11 +5,17 @@
 | 情形 | 产出 |
 |---|---|
 | 写不出复现（含红检不过） | 只回帖，列出缺什么。不建分支、不开 PR |
-| 写出了复现、没修好 | 照样开 PR，标题标明「未修复」 |
+| 写出了复现、没修好 | **推分支 + 回帖**（给出接手命令）。不开 PR |
 | 修好了 | 开 PR，报告写进正文 |
 
-第二条的理由：一条红着的复现测试**本身就是产出**，人可以直接接手。丢掉它
-等于丢掉这次 run 里唯一有价值的东西。
+第二条推分支的理由：一条红着的复现测试**本身就是产出**，人可以直接接手。
+丢掉它等于丢掉这次 run 里唯一有价值的东西 —— 它是真花了钱写出来的，而
+runner 一结束就没了。
+
+第二条不开 PR 的理由（0.3.1 改的，此前是开一个标题带「未修复」的 PR）：
+PR 的语义是「这些改动请你合」，而这条路上没有任何改动值得合 —— 补丁全被
+回滚了，分支与 HEAD 的差别只剩那条复现测试。一个永远合不进去的 PR 会堆在
+列表里，而 PR 列表是团队里最不该被噪音填满的地方：用一次就学会跳过它。
 """
 from __future__ import annotations
 
@@ -42,8 +48,14 @@ from .github import GitHubClient
 @dataclass
 class HandleResult:
     exit_code: int
-    path: str                    # ignored / refused / no_repro / delivered / crashed
+    # ignored / refused / no_repro / delivered / unfixed / crashed …
+    path: str
     pr_url: str | None = None
+    # 这次 run 的 id（交付分支是 `aifix/<run_id>`）。**没修好那条路上没有
+    # pr_url**，而调用方仍然要能指认这次 run 的产物在哪 —— 靠解析回帖文本去
+    # 拿分支名是把一句给人看的话当成接口用。走不到核心循环的那几条路
+    # （拒绝、写不出复现）是 None：那时确实没有 run。
+    run_id: str | None = None
 
 
 # 「这次没跑成」的四种中止。口径必须与 `aifix run` 的退出码一致（见
@@ -364,7 +376,7 @@ async def handle(
             "答复之后会**重新跑一遍**，不是从断点继续。", "",
             marker,
         ]))
-        return HandleResult(0, "needs_input")
+        return HandleResult(0, "needs_input", run_id=run_id)
 
     # run_once 内部已经保证「报告先落地再返回」（见 cli.run_once 的 except），
     # 所以这里不再包一层 try —— 包了只会把它已经处理好的结果再吞一次。
@@ -384,7 +396,7 @@ async def handle(
         # 一段调用栈 —— 而 run_once 已经把报告准备好了，那里面写着到底出了什么事。
         gh.comment(ev.number,
                    f"**这次 run 没能开始。**\n\n{state.get('report_md') or ''}")
-        return HandleResult(code, "aborted")
+        return HandleResult(code, "aborted", run_id=run_id)
 
     # 推不上去（没配远端、认证过期、远端拒绝）不能裸抛：与空分支那条是同一个
     # 失联 —— 异常穿出去就没有 PR、没有说明，issue 里最后一条还停在那个 👀。
@@ -399,10 +411,29 @@ async def handle(
                    f"分支还在这次 run 的本地仓库里（`{branch}`），但 runner "
                    f"结束后它就没了。下面是这次的报告：\n\n"
                    f"{state.get('report_md') or ''}")
-        return HandleResult(1, "push_failed")
+        return HandleResult(1, "push_failed", run_id=run_id)
 
-    title = (f"fix: {ev.title} (#{ev.number})" if fixed
-             else f"[复现已就位，未修复] {ev.title} (#{ev.number})")
+    # ---------------------------------------------------- 没修好：回帖，不开 PR
+    # 分支已经推上去了 —— **那一步不能省**：复现测试是这次 run 真花了钱写出来
+    # 的产出，runner 结束就没了。「一条红着的复现测试本身就是产出」这句仍然
+    # 成立，改的只是它以什么形状交出去。
+    #
+    # 为什么不开 PR：PR 的语义是「这些改动请你合」，而这条路上没有任何改动值
+    # 得合（补丁全被回滚了，分支与 HEAD 的差别只有那条复现测试）。一个永远合
+    # 不进去的 PR 会堆在列表里，而 PR 列表是团队里最不该被噪音填满的地方 ——
+    # 用一次就学会跳过它。没修好时该说的是「走到哪儿、卡在哪儿、东西在哪个
+    # 分支上」，那是一条评论的形状。
+    #
+    # 仍然退 0：没修好是**正常收场**，不是故障。这与 `_ENV_ABORTS` 那条判据
+    # 是同一套口径 —— 环境坏了才退 1。
+    if not fixed and not crashed:
+        _say("── 未修复，回帖（不开 PR）")
+        archived = _archive(publish, repo, run_id)
+        gh.upsert_status(ev.number,
+                         _unfixed_status(state, branch, body) + archived)
+        return HandleResult(code, "unfixed", run_id=run_id)
+
+    title = f"fix: {ev.title} (#{ev.number})"
     try:
         _say("── 开 PR")
         url = gh.create_pr(head=branch, title=title, body=body)
@@ -428,16 +459,52 @@ async def handle(
     #
     # **失败不能影响交付**：补丁已经推上去、PR 已经开了，为了一次归档失败把
     # 整个 job 弄红，等于让人以为修复没成功。出声但不改结果。
-    archived = ""
-    try:
-        if publish(repo, run_id):
-            archived = f"\n- trace：`{TRACES_BRANCH}` 分支的 `runs/{run_id}/`"
-    except Exception as e:                      # noqa: BLE001 —— 见上
-        archived = f"\n- trace 归档失败（不影响本次交付）：{type(e).__name__}：{e}"
+    archived = _archive(publish, repo, run_id)
 
     gh.upsert_status(ev.number,
                      _status(state, fixed, crashed, url) + archived)
-    return HandleResult(code, "crashed" if crashed else "delivered", url)
+    return HandleResult(code, "crashed" if crashed else "delivered", url,
+                        run_id=run_id)
+
+
+def _archive(publish: Callable[..., bool], repo: Path, run_id: str) -> str:
+    """把 trace 推到孤儿分支上，返回报告里那一行。
+
+    **失败不能影响交付**：补丁可能已经推上去了，为了一次归档失败把整个 job
+    弄红，等于让人以为修复没成功。出声但不改结果。
+    """
+    try:
+        if publish(repo, run_id):
+            return f"\n- trace：`{TRACES_BRANCH}` 分支的 `runs/{run_id}/`"
+    except Exception as e:                      # noqa: BLE001 —— 见上
+        return f"\n- trace 归档失败（不影响本次交付）：{type(e).__name__}：{e}"
+    return ""
+
+
+def _unfixed_status(state: dict[str, Any], branch: str, body: str) -> str:
+    """没修好时的回帖。
+
+    必须给出**接手的命令**，不能只说「东西在 xx 分支上」：这条路的读者刚被
+    告知「我没做到」，再让他自己去想怎么把那条复现测试取下来，多半的结果是
+    这次 run 的产出没有人碰。
+
+    折叠里放的是 `_pr_body` 而不是裸的 `report_md`。差别是两段**只存在于
+    PR 正文里**的东西：复现那一步的花销（它在 run_once 之外发起调用，报告的
+    成本不含它），以及 baseline 里本来就有别的红时那句告警。这条路上没有 PR
+    了 —— 回帖就是唯一的产物，那两段跟着 PR 一起消失的话，它们在**任何地方
+    都不存在**（见 `_pr_body` 的 docstring）。
+    """
+    return (f"### 🤖 aifix\n\n"
+            f"复现测试已就位，但**没能修好**。没有开 PR —— 分支上除了那条"
+            f"复现测试没有别的改动，一个合不进去的 PR 只会堆在列表里。\n\n"
+            f"- 分支：`{branch}`（那条复现测试在里面，跑起来是**红的**）\n"
+            f"- 接手：\n"
+            f"  ```bash\n"
+            f"  git fetch origin {branch} && git checkout {branch}\n"
+            f"  ```\n"
+            f"- 再试一次：在这条 issue 下回复 `{COMMAND}`\n\n"
+            f"<details><summary>报告（判定、尝试次数、成本都在里面）</summary>"
+            f"\n\n{body}\n\n</details>")
 
 
 def _status(state: dict[str, Any], fixed: int, crashed: bool,
