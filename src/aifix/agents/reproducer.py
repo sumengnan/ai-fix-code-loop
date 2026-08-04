@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import builtins
 import json
 import re
 from pathlib import PurePosixPath
@@ -21,6 +23,14 @@ SYSTEM_PROMPT = """你是一个把缺陷报告翻译成可执行测试的工程�
 先读代码，确认模块路径、函数名和调用签名——凭报告里的措辞猜 import 是最
 常见的失败方式，写出来的测试会以 ImportError 收场，那不叫复现。
 
+**你写的测试会落进一个新文件——全新的、空的。** test_file 指向一个已存在的路径也没关系
+（撞名会自动改名），但那意味着：既有测试文件里的 import、辅助类、fixture，
+你一个都用不上。读它们只能用来抄 import 路径和调用写法，不能直接引用。
+
+所以 test_code 必须**自包含**：它引用的每一个名字，都要在这份代码里自己
+import 或自己定义——`pytest` 也一样。用到别的测试文件里那个顺手的辅助类，
+就把它抄一份进来。
+
 **但读够就停下作答。** 你的步数是有限的，用完还没作答的话，这一轮什么都不
 产出——那比给出一个不完美的答案糟得多。判断「够了」的标准只有一条：能不能
 写出正确的 import 和调用。
@@ -39,7 +49,8 @@ SYSTEM_PROMPT = """你是一个把缺陷报告翻译成可执行测试的工程�
 只输出一个 JSON 对象，字段如下：
 - can_reproduce: 布尔。信息足够写出复现测试时为 true
 - test_file: 新测试文件的路径（相对 repo 根）。必须落在测试目录之下
-- test_code: 完整的测试文件内容（含必要的 import）
+- test_code: 完整的测试文件内容。**自包含**：用到的每个名字都在这份代码里
+  import 或定义过（包括 pytest），不依赖任何既有测试文件
 - target_test_id: 这条用例的完整标识，格式与本项目其余用例一致
 - missing_info: 字符串数组。can_reproduce 为 false 时，逐条列出还缺什么
 
@@ -118,6 +129,66 @@ def _path_is_safe(p: str, is_test: Callable[[str], bool]) -> bool:
     return is_test(p)
 
 
+# 模块级本就该有的名字，`dir(builtins)` 里没有它们。
+_MODULE_DUNDERS = frozenset({"__name__", "__file__", "__doc__", "__package__",
+                             "__spec__", "__loader__", "__builtins__"})
+
+
+def _missing_names(code: str) -> list[str]:
+    """`code` 里引用了、却从未在 `code` 内绑定过的名字（保序去重）。
+
+    复现测试**总是写进一个新文件**：`write_reproduction` 撞名会改名（2026-08-01
+    的事故守卫，见那边的注释）。所以 `test_code` 必须自包含——它不能指望任何
+    既有测试文件里的 import 或 fixture。这个函数就是那条不变量的判据。
+
+    **刻意不做作用域分析**，只问「整份代码里有没有在任何地方绑定过这个名字」。
+    这在方向上是安全的：它只会把「内层函数里绑定的名字」误当成全局已绑定而**漏
+    报**，绝不会反过来误报。漏掉的还有红检那道闸兜着，而误报会把一条完全正确的
+    复现直接打回，且模型无从得知自己错在哪——两种错的代价差着数量级。
+
+    同样的理由，三处一律放行：语法错（那是收集阶段那道闸的活，抢答会把人指向
+    「缺了个名字」而真相是这份代码根本解析不了）、`import *`（绑定了什么已不
+    可知）、以及内建与模块 dunder。
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+
+    bound = set(dir(builtins)) | set(_MODULE_DUNDERS)
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Import, ast.ImportFrom)):
+            for a in n.names:
+                if a.name == "*":
+                    return []
+                bound.add(a.asname or a.name.split(".")[0])
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(n.name)
+        elif isinstance(n, ast.arg):
+            # 位置/关键字/*args/**kwargs 全是 ast.arg —— pytest 的 fixture 正是
+            # 靠参数名注入的，本文件里当然找不到它的定义，那不叫缺失。
+            bound.add(n.arg)
+        elif isinstance(n, ast.Name) and not isinstance(n.ctx, ast.Load):
+            # Store/Del 一律算绑定：赋值、解包、for、推导式、海象、with as
+            # 的目标都是这个形态。
+            bound.add(n.id)
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            bound.add(n.name)               # `except E as e` 的 e 是纯字符串
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            bound.update(n.names)
+        elif isinstance(n, (ast.MatchAs, ast.MatchStar)) and n.name:
+            bound.add(n.name)
+        elif isinstance(n, ast.MatchMapping) and n.rest:
+            bound.add(n.rest)
+
+    out: list[str] = []
+    for n in ast.walk(tree):
+        if (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+                and n.id not in bound and n.id not in out):
+            out.append(n.id)
+    return out
+
+
 def _incoherence(r: Reproduction, is_test: Callable[[str], bool]) -> str:
     """字段之间哪里不自洽 —— 自洽返回空串。
 
@@ -148,6 +219,36 @@ def _incoherence(r: Reproduction, is_test: Callable[[str], bool]) -> str:
     if not _path_is_safe(r.test_file, is_test):
         return (f"test_file `{r.test_file}` 不是一个合法的测试文件路径"
                 "（要相对、不含 `..`、且被适配器认作测试文件）")
+
+    # test_code 必须自包含 —— 复现测试总是落进一个**新**文件。
+    #
+    # 实测（2026-08-04，ai-learning-helper#89）：模型诊断准确、测试语义也准确，
+    # 但它把 test_file 指向了仓库里已有的 tests/app/test_url_blocklist.py，
+    # test_code 只写了个函数体，靠那个文件现成的 import 和 _CountingFetch 吃饭
+    # ——它甚至专门回头读了那个文件的前 10 行去核实这些名字在不在。撞名改名之后
+    # 那些名字全部失效，测试红在自己的 NameError 上，48k tokens 白烧。
+    #
+    # **要钉的是这一头，不是改名那一头**：给 calc.py 的缺陷写测试、挑中
+    # tests/test_calc.py 是任何人都会做的选择，拒绝它等于把常态判成违约。只要
+    # test_code 自包含，改名就无害。
+    #
+    # 这道闸同时接住 2026-08-02 issue #9 那次（`pytest.raises` 没 import，红检
+    # 的第 4 道闸事后才发现，而 fixer 已经对着假靶子烧掉 $1.45 / 468k tokens）。
+    # 放在这里比放在红检更早：那边要真跑一遍测试才知道，这边是纯静态的。
+    #
+    # **按扩展名限定成 Python**：判据是 `ast`，而 aifix 同时吃 maven（Java）和
+    # vitest（TypeScript）。指望 `ast.parse` 撞上 Java 就 SyntaxError 然后放行，
+    # 是「碰巧安全」——一段恰好也是合法 Python 的片段（`x;`、`foo()`）会被判成
+    # 缺名字，而那是一句假话。同一个坑注释里已经记过一次（`::` 是 pytest 的语法，
+    # M5 的裂缝 5 就是把它当通用格式写死栽的）。
+    missing = (_missing_names(r.test_code)
+               if r.test_file.endswith(".py") else [])
+    if missing:
+        names = "、".join(f"`{m}`" for m in missing)
+        return (f"test_code 不是一份自包含的模块：{names} 在这份代码里从未被"
+                "定义或 import 过。复现测试**总是写进一个新文件**（撞名会自动"
+                "改名），既有测试文件里的 import 和 fixture 一个都用不上 —— "
+                "要用就把它们抄进这份代码里")
 
     # target_test_id 要能追溯到 test_file，否则写下去的是 A、跑起来的是 B，
     # 而 B 可能是仓库里本来就红的某个用例 —— 「复现成功」量的成了别人的失败。

@@ -18,11 +18,18 @@ _BODY = "调用 export_csv 导出订单，期望 5 列，实际只有 3 列，�
 
 
 def _ok(**over):
-    """一份合法的复现产出，个别字段可覆盖 —— 每个否定用例只偏离一个字段。"""
+    """一份合法的复现产出，个别字段可覆盖 —— 每个否定用例只偏离一个字段。
+
+    `test_code` 必须**自包含**（见 test_reproduction_self_contained.py）：这里
+    曾经写的是 `assert len(cols) == 5`，而 `cols` 从没绑定过 —— 一份「合法产出」
+    的样板自己过不了那道闸，等于把每个引用它的否定用例都变成假绿。
+    """
     return json.dumps({
         "can_reproduce": True,
         "test_file": "tests/test_issue_42.py",
-        "test_code": "def test_export_csv_columns():\n    assert len(cols) == 5\n",
+        "test_code": ("from exporter import export_csv\n\n\n"
+                      "def test_export_csv_columns():\n"
+                      "    assert len(export_csv()) == 5\n"),
         "target_test_id": "tests/test_issue_42.py::test_export_csv_columns",
         "missing_info": [],
     } | over)
@@ -113,10 +120,17 @@ def test_parse_rejects_a_stem_that_only_looks_like_a_prefix():
     下去的是 A、红检跑的是 B。B 若恰好是仓库里本来就红的用例，红检通过、
     fixer 被派去修它，而 issue 里那个 bug 一个字没动。
     """
-    assert parse_reproduction(json.dumps({
+    # test_code 得是自包含的，否则挡下它的是自包含那道闸，这条用例就不再
+    # 证明词边界判定有效了 —— 断言 is None 会照样通过，但通过得没有意义。
+    from aifix.agents.reproducer import parse_reproduction_ex
+
+    r, why = parse_reproduction_ex(json.dumps({
         "can_reproduce": True, "test_file": "tests/test_a.py",
-        "test_code": "x", "target_test_id": "tests/test_ab.py::test_x",
-        "missing_info": []}), _IS_TEST) is None
+        "test_code": "def test_x():\n    assert False\n",
+        "target_test_id": "tests/test_ab.py::test_x",
+        "missing_info": []}), _IS_TEST)
+    assert r is None
+    assert "target_test_id" in why, why
 
 
 def test_parse_accepts_a_maven_style_selector():
@@ -176,6 +190,27 @@ def test_system_prompt_forbids_verifying_the_test_itself():
     """「再跑一遍确认它红」是模型翻不完文件的一个主要动机 —— 而它既没有
     run_tests，也不需要：红检由确定性代码做。不写死这一条，它会一直找下去。"""
     assert "不需要" in SYSTEM_PROMPT and "确定性代码" in SYSTEM_PROMPT
+
+
+def test_system_prompt_says_the_test_lands_in_a_brand_new_file():
+    """**读既有测试文件是个陷阱，必须在提示词里点破。**
+
+    提示词一边说「凭措辞猜 import 是最常见的失败方式，先读代码确认」，一边
+    只在字段说明里轻描淡写地写「新测试文件」。实测（2026-08-04，
+    ai-learning-helper#89）模型照做了前半句：它去读了仓库里已有的
+    tests/app/test_url_blocklist.py，看到现成的 import 和 _CountingFetch，
+    于是把 test_file 指向那个文件、test_code 只写了个函数体 —— 一个完全合理
+    的推论。而 write_reproduction 撞名改名后那些名字全部失效。
+
+    是提示词自己的指引把它引过去的，所以修也得修在这里：把「文件一定是新建
+    的、既有文件里的 import 和 fixture 一个都用不上」说死。
+
+    `reproduce()` **是一次性的、没有重试**——校验闸只能让这一轮失败得更早更
+    清楚，能让下一轮真正跑通的只有这段话。
+    """
+    assert "新文件" in SYSTEM_PROMPT
+    assert "fixture" in SYSTEM_PROMPT
+    assert "自包含" in SYSTEM_PROMPT
 
 
 def test_system_prompt_gives_a_concrete_give_up_trigger():
@@ -272,7 +307,8 @@ def test_every_example_survives_the_coherence_check():
     raw = json.dumps({
         "can_reproduce": True,
         "test_file": "tests/test_calc.py",
-        "test_code": "x", "target_test_id": example, "missing_info": []})
+        "test_code": "def test_x():\n    assert False\n",
+        "target_test_id": example, "missing_info": []})
     assert parse_reproduction(raw, a.is_test_path) is not None, example
 
 
@@ -301,8 +337,8 @@ def test_a_broken_json_and_incoherent_fields_say_different_things():
 
     bad_id = json.dumps({
         "can_reproduce": True, "test_file": "tests/test_calc.py",
-        "test_code": "x", "target_test_id": "TestCalc.test_add",
-        "missing_info": []})
+        "test_code": "def test_x():\n    assert False\n",
+        "target_test_id": "TestCalc.test_add", "missing_info": []})
     r2, why2 = parse_reproduction_ex(bad_id, a.is_test_path)
     assert r2 is None
     assert "target_test_id" in why2, why2

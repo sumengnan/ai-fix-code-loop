@@ -181,6 +181,37 @@ async def test_red_check_still_accepts_a_plain_assertion_failure(buggy_repo):
     assert ok is True, reason
 
 
+def test_typo_reason_names_the_actual_missing_name():
+    """**成因不能是一句套话。**
+
+    实测（2026-08-04，ai-learning-helper#89）：缺的是 `UrlBlockStore`，而回帖
+    照样写「最常见的成因：用了 `pytest.raises` 却没有 `import pytest`」——
+    照着那句话去查，会去骂模型没写 `import pytest`，而真正的原因是 test_code
+    不自包含（它指着仓库里已有的测试文件写了个片段，撞名改名后名字全失效）。
+
+    这个项目把「指错方向的诊断」看得比崩溃还重，这里就是一处现行。
+    """
+    from pathlib import Path
+
+    from aifix.adapters.base import Failure, SourceCandidate
+    from aifix.reproduce import _typo_reason
+
+    class _Adapter:
+        def locate_source(self, failure, repo):
+            return [SourceCandidate(path="tests/t.py", line=6, frame="test_x",
+                                    origin="traceback")]
+
+    f = Failure(test_id="tests/t.py::test_x", classname="tests.t", name="test_x",
+                message="NameError: name 'UrlBlockStore' is not defined",
+                trace="", file="tests/t.py")
+    reason = _typo_reason(f, Path("."), _Adapter())
+
+    assert reason, "栈只到测试文件的 NameError 仍该被挡下"
+    assert "UrlBlockStore" in reason, "必须点出缺的是哪个名字"
+    assert "import pytest" not in reason, (
+        "缺的不是 pytest，却把成因说成 import pytest —— 指错方向的诊断")
+
+
 def test_typo_guard_passes_when_it_cannot_see_any_frame():
     """没有栈帧时**放行**——「没有证据」不能当成「有罪的证据」。
 

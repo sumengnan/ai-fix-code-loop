@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -286,8 +287,36 @@ def _typo_reason(failure: Failure | None, worktree: Path,
         f"复现测试红在**它自己**的 {exc} 上（`{failure.message.strip()}`）。\n"
         f"  栈帧只到 `{test_file}`，没有穿进任何产品代码——这条测试是因为它"
         "自己写错了名字才红的，不是因为缺陷。放过它，fixer 会对着一个假靶子"
-        "改代码。\n"
-        "  最常见的成因：用了 `pytest.raises` 却没有 `import pytest`。")
+        f"改代码。\n  {_typo_cause(failure.message)}")
+
+
+# `NameError: name 'X' is not defined` / `ModuleNotFoundError: No module named 'X'`
+_QUOTED_NAME = re.compile(r"['\"]([^'\"]+)['\"]")
+
+
+def _typo_cause(message: str) -> str:
+    """按**实际缺的那个名字**给成因，不发套话。
+
+    这里原来无条件写「最常见的成因：用了 `pytest.raises` 却没有 `import
+    pytest`」。那句话来自 2026-08-02 issue #9 的真跑，本身没错，错在无条件。
+
+    实测（2026-08-04，ai-learning-helper#89）缺的是 `UrlBlockStore`：模型把
+    test_file 指向仓库里已有的测试文件、只写了个函数体，靠那个文件现成的
+    import 吃饭，而 write_reproduction 撞名改名后名字全失效。回帖照样是那句
+    pytest —— 照着它去查，会去骂模型没写 `import pytest`。
+
+    这个项目把「指错方向的诊断」看得比崩溃还重，那就不能在这里发套话。
+    """
+    m = _QUOTED_NAME.search(message or "")
+    name = m.group(1) if m else ""
+    if name == "pytest":
+        return "最常见的成因：用了 `pytest.raises` 却没有 `import pytest`。"
+    if not name:
+        return ("最常见的成因：test_code 不是一份自包含的模块 —— 复现测试"
+                "总是写进一个新文件，既有测试文件里的 import 和 fixture 用不上。")
+    return (f"缺的是 `{name}`：这份 test_code 里从没定义或 import 过它。"
+            "复现测试**总是写进一个新文件**（撞名会自动改名），指着既有测试"
+            "文件写片段、靠它现成的 import 和 fixture 吃饭，改名之后就全失效了。")
 
 
 async def red_check(worktree: Path, adapter: ProjectAdapter,
