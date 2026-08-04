@@ -265,7 +265,7 @@ def test_issue_body_starting_with_the_command_triggers():
     """
     d = authorize(_issue_payload())
     assert d.allowed is True, d.reason
-    assert d.event.answer_choice is None
+    assert d.event.choice is None
 
 
 def test_the_command_line_is_stripped_from_the_body_given_to_the_model():
@@ -327,16 +327,15 @@ def test_load_payload_raises_a_readable_error_when_missing(tmp_path):
     assert "GITHUB_EVENT_PATH" in str(e.value)
 
 
-def test_a_malformed_command_speaks_up_instead_of_vanishing():
-    """**写歪了要出声，写的不是命令才闭嘴。**
+def test_the_command_now_takes_free_text_instead_of_refusing_it():
+    """`/aifix <文字>` 从「命令认不出来」变成合法写法。
 
-    实测踩过（2026-08-04）：`/aifix 重跑一下` 这条评论让 workflow 的 `if:`
+    实测踩过（2026-08-04）：`/aifix 重跑一下把 PR 开出来` 让 workflow 的 `if:`
     （用的是 startsWith）**起了 job**、装完全套依赖，然后被静默丢弃 —— 没有
-    评论、没有 reaction，issue 上一点痕迹都没有。写命令的人看到的是「什么都
-    没发生」。
+    评论、没有 reaction。那次的修法是让它出声拒绝；这次是让它真的工作。
 
-    与「没权限的人打了 /aifix 要回帖告诉他」是同一条理由：静默丢弃会让人以为
-    它已经在跑了。
+    词法层只把文字原样带出来，**不判断它是回答还是补充说明** —— 那要看 issue
+    上有没有待答问题，而 authorize 是纯函数，不碰网络（分类见 handle）。
     """
     payload = {
         "action": "created",
@@ -348,9 +347,9 @@ def test_a_malformed_command_speaks_up_instead_of_vanishing():
                     "author_association": "OWNER"},
     }
     d = authorize(payload)
-    assert d.allowed is False
-    assert d.notify is True, "静默丢弃正是这条要消灭的"
-    assert "/aifix" in d.reason and "第一行" in d.reason
+    assert d.allowed is True, d.reason
+    assert d.event.text == "重跑一下把 PR 开出来"
+    assert d.event.choice is None
 
 
 def test_an_ordinary_comment_still_stays_silent():

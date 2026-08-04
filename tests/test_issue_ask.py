@@ -30,21 +30,37 @@ _ASK = {"test_id": "tests/test_issue_1.py::test_x",
 
 # ---------------------------------------------------------------- 授权
 
-@pytest.mark.parametrize("body,expect", [
-    ("/aifix", None), ("/aifix 1", 1), ("/aifix 12", 12),
-    ("/aifix  3", 3), ("/aifix 2\r\n随便说两句", 2),
+@pytest.mark.parametrize("body,text,choice", [
+    ("/aifix", "", None),
+    ("/aifix 1", "1", 1),
+    ("/aifix 12", "12", 12),
+    ("/aifix  3", "3", 3),
+    ("/aifix 2\r\n随便说两句", "2", 2),
+    ("/aifix 空的时候应该抛异常", "空的时候应该抛异常", None),
+    ("/aifix 1 2", "1 2", None),
+    ("/aifix -1", "-1", None),
 ])
-def test_the_answer_form_is_recognised(body, expect):
+def test_the_command_carries_its_text_and_flags_pure_numbers(body, text, choice):
+    """词法只做两件事：把文字原样带出来，标出它是不是纯数字。
+
+    **纯数字要单独认得出来**：那条路走 `pending.choose()`，选的就是模型自己列
+    的第 N 项，审计记录无歧义。`-1` 与 `1 2` 不是纯数字，因此永远到不了
+    `choose` —— 从前挡住负数是为了不让它绕过「从 1 数起」一路走到那里，现在
+    是结构上就到不了。
+    """
     d = authorize(_payload(body))
     assert d.allowed, d.reason
-    assert d.event.answer_choice == expect
+    assert d.event.text == text
+    assert d.event.choice == choice
 
 
-@pytest.mark.parametrize("body", ["/aifix 一", "/aifix -1", "/aifixx 1",
-                                  "/aifix 1 2", "看看 /aifix 1"])
-def test_things_that_only_look_like_an_answer_are_ignored(body):
-    """宽松匹配的代价是把闲聊当成命令。`/aifix -1` 尤其要挡：负数会绕过
-    「从 1 数起」的直觉，一路走到 choose 才被拦。"""
+@pytest.mark.parametrize("body", ["/aifixx 1", "看看 /aifix 1", "/aifixfoo"])
+def test_things_that_only_look_like_the_command_are_ignored(body):
+    """命令后面必须是空白或行尾 —— `/aifixfoo` 只是一个恰好这样开头的词。
+
+    这一类要**静默**忽略：绝大多数评论都不是命令，每条都被机器人怼一句
+    「这不是命令」比不回还糟。
+    """
     assert not authorize(_payload(body)).allowed
 
 

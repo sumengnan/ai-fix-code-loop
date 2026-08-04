@@ -102,6 +102,21 @@ def _repro_failure_comment(out: Any) -> str:
     return f"{head}\n\n{out.reason}"
 
 
+def _with_supplement(body: str, supplement: str) -> str:
+    """把评论里的补充说明接在 issue 正文后面，一起交给复现器。
+
+    issue 的标题和正文常常写不全，而在评论里补一句是人最自然的动作 —— 从前
+    这条路是堵死的，唯一的出路是重开一个 issue。
+
+    **那行「补充说明（来自评论）」是给模型的可读性标注，不是安全边界。**
+    issue 正文里完全可以写一段假的同名小节。它不需要是边界：两个来源都已经
+    被 `_from_comment` 的两道权限判定要求可信了（评论者 + issue 作者）。
+    """
+    if not supplement:
+        return body
+    return f"{body}\n\n---\n补充说明（来自评论）：\n{supplement}".strip()
+
+
 def _say(line: str) -> None:
     """往 stderr 报一句阶段进展。
 
@@ -116,8 +131,13 @@ def _say(line: str) -> None:
     print(line, file=sys.stderr, flush=True)
 
 
-def _trace_reproduce(repo: Path, run_id: str, out: Any) -> None:
+def _trace_reproduce(repo: Path, run_id: str, out: Any,
+                     answer: dict[str, Any] | None = None) -> None:
     """把复现这一步的事件与结论落进 `.aifix/runs/<run_id>/`。
+
+    `answer`：这一轮带着人的答复跑时，把答复原样记下来。**编号形态天然可审计**
+    （选的就是模型自己列的第 N 项），自由回答没有这个性质 —— 不记的话，事后
+    回答不了「人当时到底说了什么」，而那正是复盘一次改歪了的修复要问的第一句。
 
     失败不能影响主流程：这是诊断数据，不是产出。磁盘满、路径没权限都不该让
     一次本来能交付的 run 变成失败。
@@ -128,6 +148,8 @@ def _trace_reproduce(repo: Path, run_id: str, out: Any) -> None:
         try:
             t.fact("reproduce_kind", getattr(out, "kind", "") or "unknown")
             t.fact("reproduce_tokens", int(getattr(out, "tokens", 0) or 0))
+            if answer is not None:
+                t.fact("answer", answer)
             if getattr(out, "events", None):
                 t.record_events(out.events, out.event_times)
         finally:
@@ -223,7 +245,37 @@ async def handle(
     t0 = time.monotonic()
     run_id = uuid.uuid4().hex[:8]
 
-    # ------------------------------------------------- `/aifix <编号>`：答复
+    # ------------------------------------------------------------ 分派
+    #
+    # `/aifix` 后面那段文字（`ev.text`）**是回答还是补充说明，由状态决定**：
+    # issue 上挂着待答问题就是回答，否则就是对本次缺陷的补充。词法在 event.py
+    # 里做完了，语义在这里 —— 因为分类要读一次 GitHub，而那个函数是纯的。
+    #
+    # 状态评论只读一次：两种标记（待答问题、上一次的补充）都在同一条评论里。
+    status = gh.status_body(ev.number)
+    asked = pending_store.decode_marker(status)
+    remembered = pending_store.decode_last(status)
+
+    # 这一次要记住的补充说明。**在任何一次 upsert_status 之前定下来** ——
+    # 状态评论是整条覆盖的，携带什么必须先算好（见 _write_status）。
+    #
+    # 回答那条路不改补充：人是在答问题，不是在改需求，上一次那份要原样传下去。
+    supplement = remembered if (asked and ev.text) else (ev.text or remembered)
+
+    def _write_status(body: str, *extra: str) -> None:
+        """发状态评论，**统一把要携带的隐藏标记附在末尾**。
+
+        `upsert_status` 是整条覆盖的，而这条评论同时是两种状态的持久层。让三个
+        调用点各自记得带标记的话，漏掉任何一个都会让补充说明静默消失 —— 之后
+        光 `/aifix` 退回去读 issue 正文，表面照常工作，实际重跑了另一件事。
+        收进一个地方，漏不掉。
+        """
+        parts = [body, *(e for e in extra if e)]
+        if supplement:
+            parts.append(pending_store.encode_last(supplement))
+        gh.upsert_status(ev.number, "\n\n".join(parts))
+
+    # ------------------------------------------------------------ 答复
     #
     # 走的是**重新跑一遍**，不是从断点恢复 —— Actions 的 job 一次性，上一次的
     # 容器连同磁盘一起没了。所以复现测试也得跟着答复一起活下来：它被原样存在
@@ -232,23 +284,35 @@ async def handle(
     # 不重跑 reproducer：那要再花一次模型调用，而且**它未必写出同一条测试** ——
     # 人回答的是针对上一条测试的问题，换一条就答非所问了。
     answer_text: str | None = None
-    if ev.answer_choice is not None:
-        data = pending_store.decode_marker(gh.status_body(ev.number))
-        if data is None:
-            gh.comment(ev.number,
-                       "这个 issue 上没有待回答的问题。\n"
-                       f"  `{COMMAND} <编号>` 只用来回答 aifix 主动提出的问题；"
-                       f"  要发起一次修复，直接评论 `{COMMAND}`。")
-            return HandleResult(0, "no_pending")
-        try:
-            choice = pending_store.choose(data, ev.answer_choice)
-        except ValueError as e:
-            # 越界当场拒。放过去的话它会静静地按另一个选项去改代码，
-            # 而人以为自己选的是评论里的那一条。
-            gh.comment(ev.number, str(e))
-            return HandleResult(0, "bad_choice")
-        answer_text = format_answer(data.get("question", ""), choice)
-        repro = data.get("repro") or {}
+    answered: dict[str, Any] | None = None
+    if asked and ev.text:
+        choice_no = ev.choice
+        if choice_no is None:
+            # **自由回答。** 原文直接拼进提示词，没有第二次模型调用、没有独立的
+            # 意图解析步骤 —— `format_answer` 对两种形态是同一个函数。
+            #
+            # 从前这条路是被禁的，理由写作「开放式回复要再过一次模型去解析
+            # 意图」。那描述的是一种本代码库里并不存在的实现；而整个系统的前提
+            # 本来就是「读一段自由文本的缺陷报告然后改代码」，issue 正文就是
+            # 自由文本。禁掉它说不通。
+            #
+            # 但 `ask_user` 那边「模型必须给 2-4 个选项」的硬判**保留** —— 那条
+            # 约束真正在防的是提问退化成「我卡住了，救命」，与人怎么回答无关。
+            reply = ev.text
+        else:
+            try:
+                reply = pending_store.choose(asked, choice_no)
+            except ValueError as e:
+                # 越界当场拒。放过去的话它会静静地按另一个选项去改代码，
+                # 而人以为自己选的是评论里的那一条。
+                gh.comment(ev.number, str(e))
+                return HandleResult(0, "bad_choice")
+        answer_text = format_answer(asked.get("question", ""), reply)
+        # 编号形态天然可审计（选的就是模型自己列的第 N 项），自由回答没有这个
+        # 性质。把原文和形态都记下来，否则事后回答不了「人到底说了什么」。
+        answered = {"reply": reply, "free_text": choice_no is None,
+                    "choice": choice_no}
+        repro = asked.get("repro") or {}
         if not repro.get("test_code") or not repro.get("target_test_id"):
             # 标记里没带复现测试（旧版本留下的、或者正文被截断了）。这里裸
             # 构造 Reproduction 的话，test_file 是 None，会一路走到
@@ -260,16 +324,41 @@ async def handle(
             return HandleResult(0, "no_pending")
         r = Reproduction(can_reproduce=True, **repro)
         out = ReproduceOutcome(r)               # 这一步零花销：没调模型
-        gh.upsert_status(
-            ev.number,
-            f"收到答复：**{choice}**\n\n带着它重新跑一次（会再花一次 "
+        # **回显采纳的是哪种解读。** 同一句话在有无待答问题两种状态下含义不同，
+        # 不回显的话人无从知道机器把它当成了什么（见 event._COMMAND_RE 那段）。
+        _write_status(
+            f"收到答复：**{reply}**\n\n带着它重新跑一次（会再花一次 "
             f"baseline 的时间 —— 这是重跑，不是断点恢复）。")
     else:
+        # -------------------------------------------------- 补充说明 / 重跑
+        if ev.choice is not None:
+            # 没有待答问题却打了一个纯数字。当补充说明跑掉是错的：一个光秃秃的
+            # 整数不是缺陷描述，而这一轮要花掉整份预算和几十分钟。这个人几乎
+            # 肯定是在回答一个已经不在了的问题（答过了、或者上一轮重跑放弃了）。
+            gh.comment(ev.number,
+                       "这个 issue 上没有待回答的问题。\n"
+                       f"  `{COMMAND} <编号>` 只用来回答 aifix 主动提出的问题；"
+                       f"  要发起一次修复，直接评论 `{COMMAND}`，"
+                       f"或者用 `{COMMAND} <补充说明>` 把缺陷补充清楚。")
+            return HandleResult(0, "no_pending")
+        if asked:
+            # 挂着问题却光打了一个 `/aifix`：按「上一步出问题了，重试」办 ——
+            # 重跑，并**放弃**那个提问（不带答复跑，模型多半会再问一次）。
+            #
+            # 放弃必须明说。默默丢掉一个人正准备回答的问题，是这条路上最容易
+            # 让人以为「我答过了」的失败方式。
+            _write_status(
+                "收到 `" + COMMAND + "`（没带文字）—— **放弃上一轮那个提问**，"
+                "重新跑一遍。\n\n要回答它的话，请重新触发一次并把答复写在 `"
+                + COMMAND + "` 后面。")
+        elif ev.text:
+            _write_status(f"收到补充说明：\n\n> {ev.text}\n\n带着它跑一遍。")
         # ------------------------------------------------------ 复现
         # 从这里开始计时，一直算到 run_once 之前 —— 红检跑的是真测试，耗时
         # 不是可以忽略的量，只掐模型调用那一段等于漏掉一大半。
         _say(f"── 读 issue #{ev.number}，让模型写一条复现测试……")
-        out = await reproduce_fn(repo, adapter, config, ev.title, ev.body)
+        out = await reproduce_fn(repo, adapter, config, ev.title,
+                                 _with_supplement(ev.body, supplement))
 
     # **复现这一步也要落 trace**，哪怕后面根本走不到 run_once。
     #
@@ -279,7 +368,7 @@ async def handle(
     #
     # 用**同一个 run_id**：RunTrace 以追加模式开文件，随后 run_once 建的那个
     # 会往同一份 events.jsonl 里继续写，一次 run 的证据留在一个目录里。
-    _trace_reproduce(repo, run_id, out)
+    _trace_reproduce(repo, run_id, out, answered)
 
     r = out.reproduction
     if r is None or not r.can_reproduce:
@@ -368,14 +457,14 @@ async def handle(
             "repro": {"test_file": r.test_file, "test_code": r.test_code,
                       "target_test_id": r.target_test_id},
         })
-        gh.upsert_status(ev.number, "\n".join([
+        _write_status("\n".join([
             "## 需要你回答一个问题", "",
             "复现测试已经写好并跑红了，但要继续改下去，得先确认一件事：", "",
             pending_store.render(ask), "",
-            f"回复 `{COMMAND} <编号>`（比如 `{COMMAND} 1`）即可继续。",
-            "答复之后会**重新跑一遍**，不是从断点继续。", "",
-            marker,
-        ]))
+            f"回复 `{COMMAND} <编号>`（比如 `{COMMAND} 1`）即可继续，"
+            f"也可以直接用自己的话答：`{COMMAND} 空的时候应该抛异常`。",
+            "答复之后会**重新跑一遍**，不是从断点继续。",
+        ]), marker)
         return HandleResult(0, "needs_input", run_id=run_id)
 
     # run_once 内部已经保证「报告先落地再返回」（见 cli.run_once 的 except），
@@ -429,8 +518,11 @@ async def handle(
     if not fixed and not crashed:
         _say("── 未修复，回帖（不开 PR）")
         archived = _archive(publish, repo, run_id)
-        gh.upsert_status(ev.number,
-                         _unfixed_status(state, branch, body) + archived)
+        # 走 _write_status 而不是裸的 upsert_status：状态评论是整条覆盖的，
+        # 而它同时是「上一次的补充说明」的持久层。这条路漏掉标记的话，人补充
+        # 过的说明会在这一次静默消失 —— 之后光 `/aifix` 重跑读回的是 issue
+        # 正文，表面照常工作，实际重跑的是另一件事。
+        _write_status(_unfixed_status(state, branch, body) + archived)
         return HandleResult(code, "unfixed", run_id=run_id)
 
     title = f"fix: {ev.title} (#{ev.number})"
@@ -461,8 +553,7 @@ async def handle(
     # 整个 job 弄红，等于让人以为修复没成功。出声但不改结果。
     archived = _archive(publish, repo, run_id)
 
-    gh.upsert_status(ev.number,
-                     _status(state, fixed, crashed, url) + archived)
+    _write_status(_status(state, fixed, crashed, url) + archived)
     return HandleResult(code, "crashed" if crashed else "delivered", url,
                         run_id=run_id)
 
