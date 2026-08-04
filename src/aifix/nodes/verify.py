@@ -7,6 +7,7 @@ from typing import Any
 from ..adapters.base import FailureSet, Verdict
 from ..delivery import Worktree
 from ..graph import AifixState, trace_of
+from ..necessity import unnecessary_changes
 from ..signals import analyze
 from ..verify import compare
 from .baseline import adapters_from_state, run_full_suite, run_scoped
@@ -112,6 +113,36 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
                   suspect=(state.get("diagnosis") or {}).get("suspect_file"),
                   suspect_anchored=state.get("suspect_anchored", True))
 
+    # 必要性反查：逐个 hunk 反向、只重跑目标用例，撤掉之后目标照样绿的报出来。
+    # 与静态信号同一层（只给人看、不改判定），但它要**动工作区**，所以位置有
+    # 两条硬约束：
+    #
+    # 1. 必须在 commit **之前**。反查会短暂地把某个 hunk 撤掉再原样写回；放在
+    #    commit 之后的话，进程若在这中间死掉，交付分支上已经多了一个提交而工
+    #    作区是脏的 —— 放在之前，同样的死法只是「这一轮没交付」。
+    # 2. 只在判 BETTER 时跑。判 SAME / WORSE 的补丁马上要被 rollback 掉，问它
+    #    「哪些改动是多余的」没有意义；而且那时目标用例本来就是红的，反查的
+    #    判据（撤掉之后目标还绿不绿）根本不成立。
+    #
+    # 任何意外都吞掉：它是一条信号，不能挡住一个已经验证通过的补丁交付。
+    # necessity.unnecessary_changes 自己保证工作区逐字还原（连异常路径），所以
+    # 这里接住之后可以照常往下走。
+    #
+    # 新增文件单独传：`git diff` 看不见未跟踪文件，而新建一个源文件是合法的
+    # 修复（同一条理由记在 `Worktree.commit` 的 docstring 里）。
+    unnecessary: list[str] = []
+    if verdict is Verdict.BETTER and cfg.necessity_check:
+        try:
+            unnecessary = await unnecessary_changes(
+                worktree_path, wt.diff(),
+                new_files=[p for p in touched
+                           if wt.file_at_head(p) is None and (
+                               worktree_path / p).is_file()],
+                target=target, rerun=_rerun,
+                max_units=cfg.necessity_max_units)
+        except Exception as e:      # noqa: BLE001 —— 信号不能挡交付
+            trace.fact("necessity_check_failed", str(e))
+
     # commit 提到这里（而不是留在下面的 BETTER 分支里）：**它的返回值参与判
     # 定**，所以必须发生在写 verdict / 信号那几条 fact 之前，否则 facts.jsonl
     # 里会先写下一个随后被推翻的 better，被丢弃的补丁也会被记成交付。
@@ -180,11 +211,19 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
             trace.fact("new_module_state", sig.new_module_state)
         if sig.files_outside_suspect:
             trace.fact("files_outside_suspect", sig.files_outside_suspect)
-        if not sig.is_empty():
+        # 刻意**不**进 `eval/runner._SIGNAL_KEYS`。那一列的口径是「零模型调用
+        # 的静态信号，每个交付的补丁至多 3 条」，而这一条要跑测试、条数没有上
+        # 界（一个补丁能报出 max_units 条），掺进去之后跨模型比的就不是同一把
+        # 尺了 —— 而且历史 run 的 facts 里没有它，新旧数据也不再可比。
+        # 它先以独立的一条存在，攒够数据再决定要不要并进那一列。
+        if unnecessary:
+            trace.fact("unnecessary_hunk", unnecessary)
+        if not sig.is_empty() or unnecessary:
             # 带上 test_id：多 failure 的 run 里，报告只给一份并集的话，人分
             # 不清是哪一次改动删的符号。这个 key 是**追加**不是替换 ——
             # 核心循环对每个 failure 各跑一轮 verify，替换只会剩最后一轮。
-            signals.append({"test_id": target, **asdict(sig)})
+            signals.append({"test_id": target, **asdict(sig),
+                            "unnecessary_hunks": unnecessary})
     elif not sig.is_empty():
         # 换一个**不被 eval 计数**的 key（见 eval/runner._SIGNAL_KEYS）：被丢
         # 弃的尝试仍有诊断价值（模型试过什么是复盘的素材），但它不该出现在任

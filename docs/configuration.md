@@ -435,6 +435,8 @@ budget_wall_seconds            1800.0
 max_attempts                   3
 ask_user                       True
 max_diff_lines                 300
+necessity_check                True             # 交付前的补丁必要性反查
+necessity_max_units            10               # 超过就整体跳过反查
 fix_guard_retries              2
 guard_giveup_limit             2
 consecutive_failure_limit      3

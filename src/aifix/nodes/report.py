@@ -12,7 +12,16 @@ _SIGNAL_CN = [
     ("removed_public_symbols", "补丁删除了公开符号"),
     ("new_module_state", "补丁新增了模块级可变状态"),
     ("files_outside_suspect", "改动落在诊断的嫌疑文件之外"),
+    ("unnecessary_hunks", "撤掉之后目标用例照样绿（对修复没有贡献）"),
 ]
+
+# 必要性反查那一条的注脚。单独一条是因为它的判据和前三条不是一回事：前三条
+# 是纯 AST 的**静态**信号，这一条要真跑测试，且**只跑目标那一条用例** ——
+# 于是「为了不打破别的用例而改的调用点」会被报出来，而它其实是必要的。
+# 不写清楚的话，人会按「多余 = 可以删」去读它，那是这一节最贵的误读。
+_NECESSITY_NOTE = (
+    "「撤掉之后目标用例照样绿」这一条只按**目标用例**判，没有跑全量 —— "
+    "为了不打破**别的**用例而做的改动会出现在这里，那是误报。")
 
 
 def _signal_section(signals: list[dict[str, Any]]) -> list[str]:
@@ -53,8 +62,13 @@ def _signal_section(signals: list[dict[str, Any]]) -> list[str]:
                         f"- {label}："
                         f"{'、'.join('`%s`' % x for x in entry[key])}")
         lines.append("")
-    return lines + ["这些是静态信号，**不改变判定** —— 测试确实转绿了。"
-                    "它们只是说：合并之前值得亲眼看一遍这个 diff。"]
+    tail = ["这些是信号，**不改变判定** —— 测试确实转绿了。"
+            "它们只是说：合并之前值得亲眼看一遍这个 diff。"]
+    # 注脚只在真报了必要性那一条时出现：一条恒定出现的免责声明会连着上面那
+    # 几条一起被当成模板噪音跳过。
+    if any(e.get("unnecessary_hunks") for _, es in groups for e in es):
+        tail += ["", _NECESSITY_NOTE]
+    return lines + tail
 
 
 def count_fixed(results: list[dict[str, Any]]) -> int:
