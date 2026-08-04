@@ -176,21 +176,34 @@ def detect_adapters(repo: Path,
             if cls.detect(Path(repo))]
 
 
-def detect_adapter(repo: Path,
-                   python: str | None = None) -> ProjectAdapter | None:
-    """探测出的**第一个**适配器；没人认领返回 None。
+def detect_adapter(repo: Path, python: str | None = None,
+                   configured: tuple[str, ...] = ()) -> ProjectAdapter | None:
+    """**一个**适配器；没人认领返回 None。
 
     留着单数版本是因为有三个调用点天然只能要一个：`aifix reproduce` 与 issue
     那条路要让模型写**一条**复现测试（一条测试只能是一种语言），`aifix mine`
     挖任务时的路径拆分也只按一套规则走。
 
-    **这是一个已知的窟窿，不是设计**：前后端同仓的工程走这三条路时，只有排在
-    前面的那套体系能被复现/挖掘到。写这条 issue 的人如果报的是另一侧的缺陷，
-    模型会拿错语言写测试，而红检只会说「这条测试没红」——一句指错方向的话。
-    补它要让 reproducer 自己判断该写哪一侧，那需要先有数据说明它判得准不准。
+    `configured` 给了就**按它的顺序取第一个**，而不是按注册表顺序。这不是锦上
+    添花：注册表顺序是按「detect 有多具体」排的（vitest 在 pytest 前），而那与
+    「这个仓库的 issue 多半在报哪一侧的缺陷」毫无关系。ai-learning-helper 就是
+    现成的例子 —— 前端在 `web/` 下被 vitest 认领之后，注册表顺序会让每一条后端
+    缺陷报告都拿到一条 `.ts` 复现测试。人在 `AIFIX_ADAPTERS` 里写下的顺序是他
+    对这个仓库的判断，压过一个通用启发式是应该的。
+
+    **窟窿仍在，只是可控了**：前后端同仓的工程走这三条路时，仍然只有一套体系
+    能被复现/挖掘到。报另一侧的缺陷时模型会拿错语言写测试，而红检只会说「这条
+    测试没红」——一句指错方向的话。补它要让 reproducer 自己判断该写哪一侧，那
+    需要先有数据说明它判得准不准。
     """
     found = detect_adapters(repo, python=python)
-    return found[0] if found else None
+    if not found:
+        return None
+    by_name = {a.name: a for a in found}
+    for name in configured:
+        if name in by_name:
+            return by_name[name]
+    return found[0]
 
 
 # 判据的两个阈值，**同时成立**才中止。分开两条是因为它们防的不是同一件事：

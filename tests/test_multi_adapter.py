@@ -245,3 +245,24 @@ def test_a_configured_but_undetectable_adapter_warns_without_blocking(
     # `"pytest" not in err` 会匹配到那个路径，测的是别的东西。
     assert "里的 vitest 在" in err, err
     assert "探测不到" in err
+
+
+def test_the_configured_order_wins_for_the_single_adapter_paths(tmp_path):
+    """复现 / 挖掘那条路按**配置顺序**取，不按注册表顺序。
+
+    注册表顺序是按「detect 有多具体」排的（vitest 在 pytest 前），而那与
+    「这个仓库的 issue 多半在报哪一侧的缺陷」毫无关系。ai-learning-helper 就是
+    现成的例子：前端在 `web/` 下被 vitest 认领之后，注册表顺序会让**每一条后端
+    缺陷报告**都拿到一条 `.ts` 复现测试 —— 而红检只会说「这条测试没红」。
+
+    这条是回归测试：加子目录探测之前 vitest 认不出 ai-learning-helper，那条路
+    一直落在 pytest 上；加完之后如果不看配置，它会静默换成 vitest。
+    """
+    from aifix.nodes.baseline import detect_adapter
+
+    repo = _git_repo(tmp_path)          # 根上同时有 pyproject 与依赖 vitest 的 package.json
+    assert detect_adapter(repo).name == "vitest", "注册表顺序"
+    assert detect_adapter(repo, configured=("pytest", "vitest")).name == "pytest"
+    assert detect_adapter(repo, configured=("vitest", "pytest")).name == "vitest"
+    # 配了但这个仓库里没有的，跳过去看下一个，而不是返回 None
+    assert detect_adapter(repo, configured=("maven", "pytest")).name == "pytest"

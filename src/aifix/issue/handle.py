@@ -200,7 +200,8 @@ async def handle(
         gh.react(ev.comment_id)
 
     adapter = detect_adapter(
-        repo, python=resolve_test_python(repo, config.test_python))
+        repo, python=resolve_test_python(repo, config.test_python),
+        configured=config.adapters)
     if adapter is None:
         gh.comment(ev.number, "没有适配器认领这个项目（支持 pytest 与 Maven）。")
         return HandleResult(0, "no_repro")

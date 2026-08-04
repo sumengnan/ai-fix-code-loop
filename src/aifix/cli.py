@@ -650,7 +650,8 @@ def _cmd_reproduce(args, client: Any = None) -> None:
 
     config = AifixConfig()
     adapter = detect_adapter(
-        repo, python=resolve_test_python(repo, config.test_python))
+        repo, python=resolve_test_python(repo, config.test_python),
+        configured=config.adapters)
     if adapter is None:
         print(f"没有适配器认领这个项目：{repo}")
         raise SystemExit(1)
@@ -748,7 +749,8 @@ def _cmd_mine(args) -> None:
     # source_suffixes() 只认 `.py`，gold_files 恒空，产出 0 个任务且不报错 ——
     # 与「这个仓库最近没有红转绿的提交」无法区分。走 preflight 用的同一份
     # 探测，新增适配器时不会漏掉这一处。
-    adapter = detect_adapter(repo, python=test_python)
+    adapter = detect_adapter(repo, python=test_python,
+                             configured=AifixConfig().adapters)
     if adapter is None:
         print(f"没有适配器认领这个项目：{repo}")
         raise SystemExit(1)
