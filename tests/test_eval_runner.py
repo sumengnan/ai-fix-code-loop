@@ -557,3 +557,69 @@ async def test_no_suite_budget_leaves_config_untouched(monkeypatch, tmp_path):
     assert seen == ["t0", "t1", "t2"]
     assert caps == [5.0, 5.0, 5.0], "没有整批闸时不该压低每任务额度"
     assert all(r.error is None for r in rs)
+
+
+def _fact_keys(workdir, task) -> list[str]:
+    from aifix.eval.runner import _read_facts, _safe_id
+
+    run_id = _safe_id(task.task_id)
+    return [f["key"] for f in _read_facts(workdir / run_id, run_id)]
+
+
+# 两个单位的补丁：修好 add，外加新建一个谁也没 import 的文件。开着反查时
+# 这一轮必然会跑（单位数 2 > 1），所以「一条 necessity_* 都没有」是一个真
+# 结论，不是「本来就没到条件」。
+def _two_unit_fixer():
+    return _Scripted([
+        _tool("apply_patch", json.dumps({"diff": _PATCH})),
+        _tool("edit_file", json.dumps({
+            "path": "helper.py", "old_text": "", "new_text": "X = 1\n"})),
+        _text("已修复"),
+    ])
+
+
+async def test_eval_turns_the_necessity_check_off(history_repo, tmp_path):
+    """评测里必须关掉必要性反查，**即使配置里显式开着**。
+
+    它的产出是一条只给人看的信号，而评测里没有人在读报告；成本却是每个单位
+    一次 scoped 重跑。墙钟在这条路上不是中性的 —— 耗尽被归为「评测故障」，
+    整个任务从比率分母里摘掉，于是这点开销会**把本来能出成绩的任务变成故
+    障**。与 ask_user 那条同一个形状：评测环境的账不该记到模型头上。
+    """
+    t = _task(history_repo)
+    r = await run_task(t, AifixConfig(necessity_check=True), "假模型",
+                       tmp_path / "w",
+                       detector_client=_Scripted([_text(_DIAG)]),
+                       fixer_client=_two_unit_fixer())
+
+    assert r.error is None, r.error
+    assert r.verdict == "better"
+    keys = _fact_keys(tmp_path / "w", t)
+    assert not [k for k in keys if k.startswith("necessity")], keys
+    assert "unnecessary_hunk" not in keys
+
+
+async def test_the_off_switch_is_not_what_makes_the_task_pass(buggy_repo):
+    """反证：同一个补丁在核心循环（反查开着）里确实会触发反查。
+
+    没有这一条，上面那条测试在「反查压根没接进 run_once」时也照样绿。
+
+    用 buggy_repo 而不是 history_repo：后者的 HEAD 是**已经修好**的那个
+    commit，直接对它跑核心循环没有失败用例可修，队列是空的 —— 那样这条反证
+    测的是空气。history_repo 只有经 run_task 检出 base_commit + 覆盖测试文件
+    之后才是红的。
+    """
+    from aifix.cli import run_once
+
+    state = await run_once(
+        buggy_repo, AifixConfig(necessity_check=True),
+        run_id="nec-eval-control",
+        detector_client=_Scripted([_text(_DIAG)]),
+        fixer_client=_two_unit_fixer())
+
+    run_dir = buggy_repo / ".aifix" / "runs" / "nec-eval-control"
+    keys = [json.loads(ln)["key"] for ln in
+            (run_dir / "facts.jsonl").read_text(encoding="utf-8").splitlines()
+            if ln.strip()]
+    assert state["results"][0]["verdict"] == "better"
+    assert "unnecessary_hunk" in keys        # helper.py 撤掉，目标照样绿

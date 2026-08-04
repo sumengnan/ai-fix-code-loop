@@ -164,7 +164,18 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
         # **评测里没有人能回答。** 留着 `ask_user` 等于给模型一条烧钱的岔路：
         # 它会把一整轮花在一个永远等不到回复的问题上，然后被判成没修好 ——
         # 而那个失分记的是模型的账，实际是评测环境的账。
-        "ask_user": False})
+        "ask_user": False,
+        # **评测里也没有人在读报告。** 必要性反查（necessity.py）的产出是一条
+        # 只给人看的信号，而它的成本是每个多余单位一次 scoped 重跑 —— 在这里
+        # 那是纯粹的墙钟开销，换不到任何进入成绩的东西（`unnecessary_hunk`
+        # 刻意不在 `_SIGNAL_KEYS` 里）。
+        #
+        # 而墙钟在这条路上不是中性的：`--parallel 8` 时几十个任务在同一台机器
+        # 上抢 CPU 跑 pytest，墙钟预算耗尽被归为**评测故障**（见本文件下方
+        # `abort_kind == "wall"` 那一段），整个任务从比率分母里被摘掉。于是多
+        # 出来的这点开销不只是慢，它会**把本来能出成绩的任务变成故障**，样本
+        # 白跑 —— 与 ask_user 那条同一个形状：评测环境的账，记到了模型头上。
+        "necessity_check": False})
     state = await run_once(dest, task_config, run_id=run_id,
                            only_test=task.target_test,
                            detector_client=detector_client,
