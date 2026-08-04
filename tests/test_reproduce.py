@@ -499,3 +499,59 @@ async def test_the_reproduce_step_carries_its_event_timestamps(buggy_repo):
     assert out.event_times, "复现这一步一个时间戳都没有"
     assert len(out.event_times) == len(out.events), \
         "时刻与事件必须一一对应 —— 错位一格，replay 会把耗时算到别的步上"
+
+
+# ------------------------------- 调用失败 ≠ 没在预算内收敛
+
+def test_a_transport_error_is_not_reported_as_non_convergence():
+    """**实测逼出来的**（2026-08-04，百炼专属网关）。
+
+    一次服务端 `AgentServiceGetResultError` 被报成「模型没能在预算内收敛」，
+    下一步写的是「调大 AIFIX_REPRODUCER_MAX_STEPS / MAX_TOKENS」—— 对一个服务端
+    错误，调多少步都没用。指错方向的诊断。
+
+    判据按**我们自己的上限**算，不按错误文本挑：错误文本是框架和端点的，随时会
+    变（上一版拿 `"max_steps" in err` 挑就是这么栽的）。真撞上限时步数或 token
+    必然贴到配置值；没贴到就说明是半路断的。
+    """
+    from aifix.reproduce import KIND_CALL_FAILED, KIND_NO_CONVERGENCE
+
+    assert KIND_CALL_FAILED != KIND_NO_CONVERGENCE
+
+    from aifix.config import AifixConfig
+    from aifix.reproduce import hit_ceiling, steps_used
+
+    cfg = AifixConfig(reproducer_max_steps=25, reproducer_max_tokens=250_000)
+
+    # 半路断的：步数与 token 都远没贴到上限 → 不是没收敛，是调用挂了
+    assert hit_ceiling(3, 4_000, cfg) is False
+    # 真翻满了
+    assert hit_ceiling(25, 4_000, cfg) is True
+    assert hit_ceiling(3, 250_000, cfg) is True
+
+
+def test_steps_are_counted_by_event_type_not_by_error_text():
+    """判据按**我们自己的配置**算，不按错误文本挑 —— 错误文本是框架和端点的，
+    随时会变。上一版拿子串挑，挑不中的全落进另一档，于是 token 超限被报成
+    「输出格式不对」。"""
+    from aifix.reproduce import steps_used
+
+    class _Step:
+        pass
+    _Step.__name__ = "StepStarted"
+
+    class _Other:
+        pass
+
+    assert steps_used([_Step(), _Other(), _Step()]) == 2
+    assert steps_used([]) == 0
+
+
+def test_the_new_kind_has_its_own_headline():
+    """kind 只是个标签，真正给人看的是回帖开头那句。少了映射的话，新增的这一档
+    会以一句空标题出现 —— 而它存在的全部理由就是「话说得对不对」。"""
+    from aifix.issue.handle import _REPRO_HEADLINES
+    from aifix.reproduce import KIND_CALL_FAILED
+
+    assert KIND_CALL_FAILED in _REPRO_HEADLINES
+    assert "调用" in _REPRO_HEADLINES[KIND_CALL_FAILED]

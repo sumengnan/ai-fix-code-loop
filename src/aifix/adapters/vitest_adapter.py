@@ -355,6 +355,14 @@ class VitestAdapter:
             return path
         return f"{path}::{name}"
 
+    def example_test_id(self) -> str:
+        """describe 层级用 ` > ` 连接 —— 与报告里写的一致。
+
+        给的是**报告那一份**而不是 `-t` 认的空格连接版：模型产出的 id 要能
+        与报告里的对得上，翻成选择器是 `scoped_test_command` 的事。
+        """
+        return "src/lib/calc.test.ts::calc > 两数相加"
+
     def is_file_level_id(self, test_id: str) -> bool:
         """文件级 id 就是裸的文件路径，用例 id 一定带 `::`。
 

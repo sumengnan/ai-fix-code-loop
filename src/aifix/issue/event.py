@@ -252,6 +252,25 @@ def _from_comment(payload: dict[str, Any], issue: dict[str, Any],
     if first != COMMAND:
         m = _ANSWER.match(first)
         if m is None:
+            # **写歪了要出声，写的不是命令才闭嘴。** 两者的区别是第一行有没有
+            # 以 `/aifix` 开头 —— 开了头就说明这个人确实在下命令，只是格式不对。
+            #
+            # 实测踩过（2026-08-04）：`/aifix 重跑一下把 PR 开出来` 这条评论让
+            # workflow 的 `if:`（用的是 startsWith）**起了 job**、装完全套依赖，
+            # 然后在这里被静默丢弃 —— 没有评论、没有 reaction，issue 上一点痕迹
+            # 都没有。写命令的人看到的就是「什么都没发生」。
+            #
+            # 这与 aifix.yml 里「没权限的人打了 /aifix 要回帖告诉他」是同一条
+            # 理由：静默丢弃会让人以为它已经在跑了，而那正是本项目栽过十次以上
+            # 的失败形态。
+            if first.startswith(COMMAND):
+                return Decision(
+                    False,
+                    f"`{first}` —— 命令认不出来。\n\n"
+                    f"第一行必须**恰好**是 `{COMMAND}`（重跑一次），"
+                    f"或者 `{COMMAND} <编号>`（回答上一轮的提问）。\n"
+                    f"想说的话写在第二行往后，第一行只放命令。",
+                    notify=True)
             return Decision(False, f"第一行不是 {COMMAND}")
         choice = int(m.group(1))
 

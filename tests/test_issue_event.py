@@ -325,3 +325,46 @@ def test_load_payload_raises_a_readable_error_when_missing(tmp_path):
     with pytest.raises(RuntimeError) as e:
         load_payload(tmp_path / "nope.json")
     assert "GITHUB_EVENT_PATH" in str(e.value)
+
+
+def test_a_malformed_command_speaks_up_instead_of_vanishing():
+    """**写歪了要出声，写的不是命令才闭嘴。**
+
+    实测踩过（2026-08-04）：`/aifix 重跑一下` 这条评论让 workflow 的 `if:`
+    （用的是 startsWith）**起了 job**、装完全套依赖，然后被静默丢弃 —— 没有
+    评论、没有 reaction，issue 上一点痕迹都没有。写命令的人看到的是「什么都
+    没发生」。
+
+    与「没权限的人打了 /aifix 要回帖告诉他」是同一条理由：静默丢弃会让人以为
+    它已经在跑了。
+    """
+    payload = {
+        "action": "created",
+        "issue": {"number": 7, "user": {"login": "o"},
+                  "author_association": "OWNER", "body": "/aifix\n正文"},
+        "repository": {"owner": {"login": "o", "type": "User"}},
+        "comment": {"body": "/aifix 重跑一下把 PR 开出来", "id": 9,
+                    "user": {"login": "o", "type": "User"},
+                    "author_association": "OWNER"},
+    }
+    d = authorize(payload)
+    assert d.allowed is False
+    assert d.notify is True, "静默丢弃正是这条要消灭的"
+    assert "/aifix" in d.reason and "第一行" in d.reason
+
+
+def test_an_ordinary_comment_still_stays_silent():
+    """反向：不以 /aifix 开头的评论一个字都不能回 —— 否则每条闲聊都被机器人
+    怼一句「这不是命令」，比不回还糟。"""
+    payload = {
+        "action": "created",
+        "issue": {"number": 7, "user": {"login": "o"},
+                  "author_association": "OWNER", "body": "/aifix\n正文"},
+        "repository": {"owner": {"login": "o", "type": "User"}},
+        "comment": {"body": "我觉得这个 bug 挺有意思", "id": 9,
+                    "user": {"login": "o", "type": "User"},
+                    "author_association": "OWNER"},
+    }
+    d = authorize(payload)
+    assert d.allowed is False
+    assert d.notify is False
