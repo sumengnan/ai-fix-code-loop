@@ -46,6 +46,25 @@ _OLD_FILE_RE = re.compile(r"^--- a/(.*)$")
 
 
 @dataclass(frozen=True)
+class Necessity:
+    """反查的结论。三个字段回答的是三件**不同**的事。
+
+    合成一个「多余的改动列表」会把后两件静默掉 —— 而它们静默之后的表现和
+    「这个补丁很干净」一模一样，读报告的人无从分辨。这一层的价值全在于它说
+    出来的话可信，所以「我没查」必须和「我查了，没查出东西」分得开。
+
+    - `unnecessary`：撤掉之后目标用例照样绿。这是这层要报的东西。
+    - `skipped`：`git apply -R` 拒绝，撤不下来。**对它们没有结论** ——
+      不在 `unnecessary` 里不代表它们必要。
+    - `over_cap`：单位总数。非 0 表示补丁太大、整层根本没跑（`unnecessary`
+      与 `skipped` 都是空的，但那是「没查」不是「干净」）。
+    """
+    unnecessary: list[str]
+    skipped: list[str]
+    over_cap: int = 0
+
+
+@dataclass(frozen=True)
 class Unit:
     """反查的一个单位。
 
@@ -186,14 +205,17 @@ async def unnecessary_changes(
     target: str,
     rerun: Callable[[list[str]], Awaitable[FailureSet]],
     max_units: int,
-) -> list[str]:
-    """逐个反向，返回「撤掉之后目标用例照样绿」那些单位的标签。
+) -> Necessity:
+    """逐个反向，报出「撤掉之后目标用例照样绿」的那些单位。
 
     rerun：async callable，接收 test_id 列表、返回重跑后的 FailureSet ——
     与 `filter_flaky` 同一个形状，调用方传的是同一个 `run_scoped` 闭包。
     它必须带 `require_report=True`：报告缺失时返回空集合，而空集合在这里会被
     读成「目标绿了」，于是**每一个**单位都被报成不必要。不是没测出来，是把
     没测到当成了正证据。
+
+    返回 `Necessity` 而不是一个裸列表：这层有三种「没话说」（干净 / 撤不下来
+    / 补丁太大没查），只有第一种是好消息，混成一个空列表就分不出来了。
 
     **保证工作区逐字还原**，包括 rerun 抛异常的路径（finally）。差一个字节，
     随后 commit 进交付分支的就不是被验证过的那个补丁，而这件事没有任何一处会
@@ -209,19 +231,32 @@ async def unnecessary_changes(
     # 超过上限整体跳过，不做「只查前 N 个」：半份名单在报告里读起来和完整名单
     # 一模一样，人会以为剩下的都查过且都必要。补丁大到这个地步本身就该亲眼看，
     # 而 `max_diff_lines` 那道守卫管的是更极端的规模。
-    if len(units) <= 1 or len(units) > max_units:
-        return []
+    if len(units) <= 1:
+        return Necessity(unnecessary=[], skipped=[])
+    if len(units) > max_units:
+        # 带上总数往回报。返回一个空的 Necessity 会让「补丁太大所以没查」和
+        # 「查了，很干净」变成同一个结果 —— 那正是这一层最不能有的失效方式。
+        return Necessity(unnecessary=[], skipped=[], over_cap=len(units))
 
     found: list[str] = []
+    skipped: list[str] = []
     for unit in units:
         path = worktree / unit.path
         blob = _snapshot(path)
         try:
             if not _revert(worktree, unit):
+                # 撤不掉就**记下来**，不能默默跳过。对它没有结论 —— 而
+                # 「没结论」和「查过、是必要的」在结果里长得一样，只有把它
+                # 单独列出来，读报告的人才知道这份名单是不完整的。
+                #
+                # 真实成因：模型发的补丁与工作区实际内容有出入（`apply_patch`
+                # 那条路带模糊匹配，落地的内容未必和 diff 逐字一致），或者
+                # 同一个文件被后一轮改动覆盖过。
+                skipped.append(unit.label)
                 continue
             after = await rerun([target])
             if target not in after.ids:
                 found.append(unit.label)
         finally:
             _restore(path, blob)
-    return found
+    return Necessity(unnecessary=found, skipped=skipped)

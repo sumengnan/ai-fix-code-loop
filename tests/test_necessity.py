@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from aifix.adapters.base import Failure, FailureSet
-from aifix.necessity import Unit, plan, unnecessary_changes
+from aifix.necessity import Necessity, Unit, plan, unnecessary_changes
 
 # 两个被改的地方隔了 8 行以上：git diff 默认带 3 行上下文，挨得近的改动会被
 # 并成**一个** hunk，那样这份夹具就问不出「逐个反向」这件事了。
@@ -142,10 +142,11 @@ class _Rerun:
 
 async def test_reports_only_the_unnecessary_hunk(wt: Path):
     rerun = _Rerun(wt / "calc.py", "t::target")
-    labels = await unnecessary_changes(
+    nec = await unnecessary_changes(
         wt, _diff(wt), new_files=[], target="t::target",
         rerun=rerun, max_units=10)
-    assert len(labels) == 1
+    assert len(nec.unnecessary) == 1
+    assert nec.skipped == [] and nec.over_cap == 0
     # 报出来的是 helper 那一处，不是修 add 那一处
     assert rerun.calls == [["t::target"], ["t::target"]]
 
@@ -166,21 +167,23 @@ async def test_worktree_is_restored_byte_for_byte(wt: Path):
 async def test_single_unit_is_not_checked(wt: Path):
     """只有一个单位时不跑：反向它就是把整个补丁撤掉，问不出新东西。"""
     rerun = _Rerun(wt / "calc.py", "t::target")
-    labels = await unnecessary_changes(
+    nec = await unnecessary_changes(
         wt, "", new_files=["helper.py"], target="t::target",
         rerun=rerun, max_units=10)
-    assert labels == []
+    assert nec.unnecessary == []
     assert rerun.calls == []
 
 
 async def test_over_the_cap_skips_entirely(wt: Path):
     """超过上限整体跳过，不做「查前 N 个」——半份名单会被读成完整名单。"""
     rerun = _Rerun(wt / "calc.py", "t::target")
-    labels = await unnecessary_changes(
+    nec = await unnecessary_changes(
         wt, _diff(wt), new_files=[], target="t::target",
         rerun=rerun, max_units=1)
-    assert labels == []
+    assert nec.unnecessary == []
     assert rerun.calls == []
+    # 「没查」必须和「查了、没查出东西」分得开
+    assert nec.over_cap == 2
 
 
 async def test_restores_even_when_rerun_raises(wt: Path):
@@ -211,12 +214,40 @@ async def test_new_file_unit_is_reverted_by_deleting_it(wt: Path):
         seen.append((wt / "helper.py").is_file())
         return _fs()        # 一律绿：两个单位都会被报成不必要
 
-    labels = await unnecessary_changes(
+    nec = await unnecessary_changes(
         wt, _diff(wt), new_files=["helper.py"], target="t::target",
         rerun=_rerun, max_units=10)
     assert False in seen                       # 有一轮它确实不在了
     assert (wt / "helper.py").read_text(encoding="utf-8") == "X = 1\n"
-    assert any("helper.py" in lb for lb in labels)
+    assert any("helper.py" in lb for lb in nec.unnecessary)
+
+
+async def test_units_that_cannot_be_reverted_are_recorded_not_swallowed(wt: Path):
+    """`git apply -R` 拒绝时必须留下痕迹。
+
+    这一条钉的是这层最危险的失效方式：撤不掉就 `continue` 的话，
+    「补丁很干净」和「三个 hunk 一个都没撤下来」在报告里长得一模一样 ——
+    而后者的真实含义是**这次反查什么都没查**。
+    """
+    diff = _diff(wt)
+    # 把工作区换成和 diff 对不上的内容，两个 hunk 都会反向失败
+    (wt / "calc.py").write_text("完全无关的内容\n", encoding="utf-8")
+    rerun = _Rerun(wt / "calc.py", "t::target")
+
+    nec = await unnecessary_changes(wt, diff, new_files=[], target="t::target",
+                                    rerun=rerun, max_units=10)
+
+    assert nec.unnecessary == []
+    assert len(nec.skipped) == 2
+    assert rerun.calls == []            # 一次测试都没跑，因为一处都没撤下来
+    # 撤不掉的那些同样不许弄脏工作区
+    assert (wt / "calc.py").read_text(encoding="utf-8") == "完全无关的内容\n"
+
+
+def test_necessity_is_frozen():
+    n = Necessity(unnecessary=["a:1"], skipped=[], over_cap=0)
+    with pytest.raises(Exception):
+        n.over_cap = 3                         # type: ignore[misc]
 
 
 def test_unit_is_hashable_and_frozen():

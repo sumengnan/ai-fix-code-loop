@@ -7,7 +7,7 @@ from typing import Any
 from ..adapters.base import FailureSet, Verdict
 from ..delivery import Worktree
 from ..graph import AifixState, trace_of
-from ..necessity import unnecessary_changes
+from ..necessity import Necessity, unnecessary_changes
 from ..signals import analyze
 from ..verify import compare
 from .baseline import adapters_from_state, run_full_suite, run_scoped
@@ -130,10 +130,10 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
     #
     # 新增文件单独传：`git diff` 看不见未跟踪文件，而新建一个源文件是合法的
     # 修复（同一条理由记在 `Worktree.commit` 的 docstring 里）。
-    unnecessary: list[str] = []
+    nec = Necessity(unnecessary=[], skipped=[])
     if verdict is Verdict.BETTER and cfg.necessity_check:
         try:
-            unnecessary = await unnecessary_changes(
+            nec = await unnecessary_changes(
                 worktree_path, wt.diff(),
                 new_files=[p for p in touched
                            if wt.file_at_head(p) is None and (
@@ -216,14 +216,23 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
         # 界（一个补丁能报出 max_units 条），掺进去之后跨模型比的就不是同一把
         # 尺了 —— 而且历史 run 的 facts 里没有它，新旧数据也不再可比。
         # 它先以独立的一条存在，攒够数据再决定要不要并进那一列。
-        if unnecessary:
-            trace.fact("unnecessary_hunk", unnecessary)
-        if not sig.is_empty() or unnecessary:
+        if nec.unnecessary:
+            trace.fact("unnecessary_hunk", nec.unnecessary)
+        # 这两条记的是**反查自己的覆盖面**，不是补丁的毛病。分开记是因为它们
+        # 要回答的是「上面那份名单可不可信」：撤不下来的单位没有结论，补丁太
+        # 大时整层根本没跑 —— 两种情况下「没报出东西」都不等于「很干净」。
+        if nec.skipped:
+            trace.fact("necessity_unit_skipped", nec.skipped)
+        if nec.over_cap:
+            trace.fact("necessity_over_cap", nec.over_cap)
+        if not sig.is_empty() or nec.unnecessary or nec.skipped or nec.over_cap:
             # 带上 test_id：多 failure 的 run 里，报告只给一份并集的话，人分
             # 不清是哪一次改动删的符号。这个 key 是**追加**不是替换 ——
             # 核心循环对每个 failure 各跑一轮 verify，替换只会剩最后一轮。
             signals.append({"test_id": target, **asdict(sig),
-                            "unnecessary_hunks": unnecessary})
+                            "unnecessary_hunks": nec.unnecessary,
+                            "necessity_skipped": nec.skipped,
+                            "necessity_over_cap": nec.over_cap})
     elif not sig.is_empty():
         # 换一个**不被 eval 计数**的 key（见 eval/runner._SIGNAL_KEYS）：被丢
         # 弃的尝试仍有诊断价值（模型试过什么是复盘的素材），但它不该出现在任

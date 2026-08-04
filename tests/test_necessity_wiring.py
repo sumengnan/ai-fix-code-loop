@@ -179,10 +179,19 @@ async def test_switch_off_skips_the_whole_layer(repo):
     assert "return 2" in _git(repo, "show", "aifix/nec3:calc.py")
 
 
-async def test_over_the_cap_skips_and_still_delivers(repo):
-    """上限设成 1 时整体跳过 —— 不报，但补丁照常交付。"""
+async def test_over_the_cap_says_so_instead_of_going_quiet(repo):
+    """上限设成 1 时整体跳过 —— 但必须说出来，不能装作查过了。
+
+    「补丁太大所以没查」和「查了，很干净」在报告里长得一样，是这一层最危险
+    的失效方式：人会把沉默读成背书。
+    """
     state = await _run(repo, "nec4", _MIXED_PATCH, necessity_max_units=1)
 
     assert state["results"][0]["verdict"] == "better"
-    assert "unnecessary_hunk" not in _fact_keys(repo, "nec4")
+    keys = _fact_keys(repo, "nec4")
+    assert "unnecessary_hunk" not in keys        # 确实没查出东西
+    assert "necessity_over_cap" in keys          # 但也确实没查
+    assert "整层没有跑" in state["report_md"]
+    assert "没被报出来不等于都必要" in state["report_md"]
+    # 判定与交付照旧
     assert "return a + b" in _git(repo, "show", "aifix/nec4:calc.py")

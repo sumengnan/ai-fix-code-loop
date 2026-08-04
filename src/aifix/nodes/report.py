@@ -13,6 +13,9 @@ _SIGNAL_CN = [
     ("new_module_state", "补丁新增了模块级可变状态"),
     ("files_outside_suspect", "改动落在诊断的嫌疑文件之外"),
     ("unnecessary_hunks", "撤掉之后目标用例照样绿（对修复没有贡献）"),
+    # 反查自己的覆盖面，不是补丁的毛病。列出来是因为**没有结论**和「查过、
+    # 是必要的」在结果里长得一样，不点名的话上面那份名单看起来就是完整的。
+    ("necessity_skipped", "反查没能把它单独撤下来，对它没有结论"),
 ]
 
 # 必要性反查那一条的注脚。单独一条是因为它的判据和前三条不是一回事：前三条
@@ -22,6 +25,23 @@ _SIGNAL_CN = [
 _NECESSITY_NOTE = (
     "「撤掉之后目标用例照样绿」这一条只按**目标用例**判，没有跑全量 —— "
     "为了不打破**别的**用例而做的改动会出现在这里，那是误报。")
+
+# 反查覆盖不全时的注脚。必须和上面那条分开：上面说的是「报出来的可能是错
+# 的」，这一条说的是「**没报出来的**不代表查过」——两句话的方向相反，合成
+# 一段会互相稀释。
+_NECESSITY_PARTIAL_NOTE = (
+    "反查这一层**没有查完**：没被报出来不等于都必要。")
+
+
+def _over_cap_line(entry: dict[str, Any]) -> str | None:
+    """补丁大到整层没跑时的那一行。
+
+    单独一行而不是塞进 _SIGNAL_CN：它的值是个数字不是列表，而且它说的是
+    「这一层根本没开口」，与「这一层报出了什么」不是一类信息。
+    """
+    n = entry.get("necessity_over_cap")
+    return (f"- 补丁拆出 {n} 处改动，超过反查上限，**必要性反查整层没有跑**"
+            if isinstance(n, int) and n > 0 else None)
 
 
 def _signal_section(signals: list[dict[str, Any]]) -> list[str]:
@@ -42,7 +62,8 @@ def _signal_section(signals: list[dict[str, Any]]) -> list[str]:
         # 用户拿到的是一个「全都做完了却在最后一步炸掉」的 run。
         if not isinstance(entry, dict):
             continue
-        if not any(entry.get(k) for k, _ in _SIGNAL_CN):
+        if not any(entry.get(k) for k, _ in _SIGNAL_CN) and not _over_cap_line(
+                entry):
             continue
         test_id = entry.get("test_id") or "—"
         if groups and groups[-1][0] == test_id:
@@ -61,13 +82,20 @@ def _signal_section(signals: list[dict[str, Any]]) -> list[str]:
                     lines.append(
                         f"- {label}："
                         f"{'、'.join('`%s`' % x for x in entry[key])}")
+            over_cap = _over_cap_line(entry)
+            if over_cap:
+                lines.append(over_cap)
         lines.append("")
     tail = ["这些是信号，**不改变判定** —— 测试确实转绿了。"
             "它们只是说：合并之前值得亲眼看一遍这个 diff。"]
-    # 注脚只在真报了必要性那一条时出现：一条恒定出现的免责声明会连着上面那
-    # 几条一起被当成模板噪音跳过。
-    if any(e.get("unnecessary_hunks") for _, es in groups for e in es):
+    # 两条注脚都只在对应的那一类真出现时才加：恒定出现的免责声明会连着上面
+    # 那几条一起被当成模板噪音跳过。
+    entries_all = [e for _, es in groups for e in es]
+    if any(e.get("unnecessary_hunks") for e in entries_all):
         tail += ["", _NECESSITY_NOTE]
+    if any(e.get("necessity_skipped") or _over_cap_line(e)
+           for e in entries_all):
+        tail += ["", _NECESSITY_PARTIAL_NOTE]
     return lines + tail
 
 
