@@ -106,9 +106,6 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
         f = worktree_path / p
         return f.read_text(encoding="utf-8") if f.is_file() else None
 
-    # suspect_anchored 缺省当 True：只有 detect_node 会写这个键，而它写的是
-    # 这一轮的真值。默认 False 会让所有绕过 detect 的路径（图那条、测试夹具）
-    # 悄悄关掉这一列信号——把「没人告诉我」读成「诊断不可信」是反的。
     # 目标测试的源码，供「新增判断用了测试里的字面量」那一类做参照系。
     # 从**工作区**读而不是 HEAD：两者本该逐字相同（改测试文件是被守卫挡死的），
     # 而万一守卫被绕过了，这一列该照着模型眼前那一份来算。
@@ -118,6 +115,9 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
     test_file = getattr(target_failure, "file", None)
     test_source = _now(test_file) if test_file else None
 
+    # suspect_anchored 缺省当 True：只有 detect_node 会写这个键，而它写的是
+    # 这一轮的真值。默认 False 会让所有绕过 detect 的路径（图那条、测试夹具）
+    # 悄悄关掉这一列信号——把「没人告诉我」读成「诊断不可信」是反的。
     sig = analyze({p: (wt.file_at_head(p), _now(p)) for p in touched},
                   suspect=(state.get("diagnosis") or {}).get("suspect_file"),
                   suspect_anchored=state.get("suspect_anchored", True),
@@ -229,7 +229,7 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
         # 尺了 —— 而且历史 run 的 facts 里没有它，新旧数据也不再可比。
         # 它先以独立的一条存在，攒够数据再决定要不要并进那一列。
         if nec.unnecessary:
-            trace.fact("unnecessary_hunk", nec.unnecessary)
+            trace.fact("unnecessary_hunk", [asdict(f) for f in nec.unnecessary])
         # 这两条记的是**反查自己的覆盖面**，不是补丁的毛病。分开记是因为它们
         # 要回答的是「上面那份名单可不可信」：撤不下来的单位没有结论，补丁太
         # 大时整层根本没跑 —— 两种情况下「没报出东西」都不等于「很干净」。
@@ -242,7 +242,8 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
             # 不清是哪一次改动删的符号。这个 key 是**追加**不是替换 ——
             # 核心循环对每个 failure 各跑一轮 verify，替换只会剩最后一轮。
             signals.append({"test_id": target, **asdict(sig),
-                            "unnecessary_hunks": nec.unnecessary,
+                            "unnecessary_hunks": [asdict(f)
+                                                  for f in nec.unnecessary],
                             "necessity_skipped": nec.skipped,
                             "necessity_over_cap": nec.over_cap})
     elif not sig.is_empty():

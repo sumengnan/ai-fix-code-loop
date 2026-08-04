@@ -219,7 +219,7 @@ async def test_new_file_unit_is_reverted_by_deleting_it(wt: Path):
         rerun=_rerun, max_units=10)
     assert False in seen                       # 有一轮它确实不在了
     assert (wt / "helper.py").read_text(encoding="utf-8") == "X = 1\n"
-    assert any("helper.py" in lb for lb in nec.unnecessary)
+    assert any("helper.py" in f.label for f in nec.unnecessary)
 
 
 async def test_units_that_cannot_be_reverted_are_recorded_not_swallowed(wt: Path):
@@ -254,3 +254,42 @@ def test_unit_is_hashable_and_frozen():
     u = Unit(label="a:1-2", path="a", patch="p")
     with pytest.raises(Exception):
         u.label = "b"                          # type: ignore[misc]
+
+
+# —— 标签之外还要给内容：光有 `calc.py:10-13`，人还得自己去翻 diff ——
+
+
+def test_hunk_units_carry_a_preview_of_the_changed_lines(wt: Path):
+    units = plan(_diff(wt), new_files=[])
+    previews = [u.preview for u in units]
+    assert any("+    return a + b" in p for p in previews)
+    assert any("+    return 2" in p for p in previews)
+    # 上下文行不进预览：人要看的是「改了什么」，不是「周围长什么样」
+    assert all("def mul" not in p for p in previews)
+
+
+def test_preview_is_capped(wt: Path):
+    """一个大 hunk 不能把报告那一节撑爆。"""
+    big = "\n".join(f"+第 {i} 行" for i in range(40))
+    diff = ("diff --git a/x.py b/x.py\n"
+            "--- a/x.py\n"
+            "+++ b/x.py\n"
+            "@@ -1,1 +1,41 @@\n"
+            " ctx\n" + big + "\n")
+    unit = plan(diff, new_files=[])[0]
+    assert len(unit.preview.splitlines()) <= 8
+    assert "还有" in unit.preview
+
+
+def test_new_file_unit_has_no_preview():
+    """整个文件都是新增的，标签已经说全了，摘几行反而误导。"""
+    assert plan("", new_files=["helper.py"])[0].preview == ""
+
+
+async def test_findings_carry_label_and_preview(wt: Path):
+    nec = await unnecessary_changes(
+        wt, _diff(wt), new_files=[], target="t::target",
+        rerun=_Rerun(wt / "calc.py", "t::target"), max_units=10)
+    found = nec.unnecessary[0]
+    assert found.label.startswith("calc.py:")
+    assert "+    return 2" in found.preview

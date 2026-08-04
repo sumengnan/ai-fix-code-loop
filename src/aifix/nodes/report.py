@@ -13,6 +13,8 @@ _SIGNAL_CN = [
     ("new_module_state", "补丁新增了模块级可变状态"),
     ("files_outside_suspect", "改动落在诊断的嫌疑文件之外"),
     ("hardcoded_literals", "新增的判断用到了目标测试里的字面量"),
+    # 这一条的值不是字符串列表而是 {label, preview} 的列表，由
+    # `_unnecessary_lines` 单独渲染 —— 见那里。
     ("unnecessary_hunks", "撤掉之后目标用例照样绿（对修复没有贡献）"),
     # 反查自己的覆盖面，不是补丁的毛病。列出来是因为**没有结论**和「查过、
     # 是必要的」在结果里长得一样，不点名的话上面那份名单看起来就是完整的。
@@ -32,6 +34,37 @@ _NECESSITY_NOTE = (
 # 一段会互相稀释。
 _NECESSITY_PARTIAL_NOTE = (
     "反查这一层**没有查完**：没被报出来不等于都必要。")
+
+
+def _unnecessary_lines(entry: dict[str, Any], label: str) -> list[str]:
+    """必要性反查那一条：定位 + 那几行改了什么。
+
+    和别的几类不同 —— 它们的值是一串名字（符号名、路径），一行列完就够了；
+    这一条的值是**代码位置**，只给 `calc.py:10-13` 的话，人拿到报告的下一步
+    必然是打开 diff 去数行。把那几行贴出来，是为了让「值不值得细看」这个判断
+    在报告里就能做完。
+
+    元素既接受 `{label, preview}` 也接受裸字符串：`state["signals"]` 会从旧
+    checkpoint 里恢复，而这个 key 早先存的就是一串标签。少这一层兼容，
+    读一个旧 run 的报告会在 `entry["label"]` 上当场 AttributeError —— 而那时
+    修复早已提交进交付分支。
+    """
+    items = entry.get("unnecessary_hunks") or []
+    lines = [f"- {label}："]
+    for item in items:
+        if isinstance(item, str):
+            lines.append(f"  - `{item}`")
+            continue
+        if not isinstance(item, dict):
+            continue
+        lines.append(f"  - `{item.get('label', '—')}`")
+        preview = item.get("preview") or ""
+        if preview:
+            # 缩进 4 格让代码块留在上一级列表项里；标 diff 让 +/- 有颜色
+            lines.append("    ```diff")
+            lines += [f"    {ln}" for ln in preview.splitlines()]
+            lines.append("    ```")
+    return lines
 
 
 def _over_cap_line(entry: dict[str, Any]) -> str | None:
@@ -79,7 +112,11 @@ def _signal_section(signals: list[dict[str, Any]]) -> list[str]:
         lines += [f"修复 `{test_id}` 的补丁：", ""]
         for entry in entries:
             for key, label in _SIGNAL_CN:
-                if entry.get(key):
+                if not entry.get(key):
+                    continue
+                if key == "unnecessary_hunks":
+                    lines += _unnecessary_lines(entry, label)
+                else:
                     lines.append(
                         f"- {label}："
                         f"{'、'.join('`%s`' % x for x in entry[key])}")

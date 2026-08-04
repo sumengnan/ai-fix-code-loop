@@ -45,6 +45,23 @@ _FILE_RE = re.compile(r"^\+\+\+ b/(.*)$")
 _OLD_FILE_RE = re.compile(r"^--- a/(.*)$")
 
 
+# 预览的两个上限。一个大 hunk 原样贴进报告会把「值得多看一眼」那一节撑爆，
+# 而人只需要认出是哪一处、再去 diff 里看全貌。
+_PREVIEW_MAX_LINES = 6
+_PREVIEW_MAX_CHARS = 100
+
+
+@dataclass(frozen=True)
+class Finding:
+    """报出来的一处多余改动：定位 + 那几行改了什么。
+
+    只有标签（`calc.py:10-13`）时，人拿到报告的下一步必然是打开 diff 去数行 ——
+    而这一节存在的意义就是让人不用先做这一步才知道值不值得看。
+    """
+    label: str
+    preview: str = ""
+
+
 @dataclass(frozen=True)
 class Necessity:
     """反查的结论。三个字段回答的是三件**不同**的事。
@@ -53,13 +70,16 @@ class Necessity:
     「这个补丁很干净」一模一样，读报告的人无从分辨。这一层的价值全在于它说
     出来的话可信，所以「我没查」必须和「我查了，没查出东西」分得开。
 
-    - `unnecessary`：撤掉之后目标用例照样绿。这是这层要报的东西。
+    - `unnecessary`：撤掉之后目标用例照样绿。这是这层要报的东西（`Finding`，
+      带定位和那几行的预览）。
     - `skipped`：`git apply -R` 拒绝，撤不下来。**对它们没有结论** ——
       不在 `unnecessary` 里不代表它们必要。
     - `over_cap`：单位总数。非 0 表示补丁太大、整层根本没跑（`unnecessary`
       与 `skipped` 都是空的，但那是「没查」不是「干净」）。
     """
-    unnecessary: list[str]
+    unnecessary: list[Finding]
+    # 只留标签：撤不下来的单位**没有结论**，贴出它改了什么会让人以为这是一条
+    # 有内容的发现。它要回答的只是「这份名单不完整」。
     skipped: list[str]
     over_cap: int = 0
 
@@ -74,11 +94,26 @@ class Unit:
     label: str          # 给人看的定位，如 `calc.py:12-18`
     path: str           # 仓库相对路径
     patch: str | None   # 可单独 `git apply -R` 的完整补丁；None = 整体新增
+    preview: str = ""   # 这个 hunk 里 +/- 那几行，截断过。整体新增的文件为空
 
 
 def _git(cwd: Path, *args: str, stdin: str | None = None):
     return subprocess.run(["git", *args], cwd=cwd, input=stdin,
                           capture_output=True, text=True)
+
+
+def _preview(hunk: list[str]) -> str:
+    """从 hunk 里摘出 `+` / `-` 那几行。
+
+    上下文行刻意不进预览：人要看的是「改了什么」，把上下文一起贴出来会让每
+    一条都变长三倍，而那几行恰恰是他已经知道的部分。
+    """
+    changed = [ln for ln in hunk[1:] if ln[:1] in ("+", "-")]
+    shown = [ln[:_PREVIEW_MAX_CHARS] for ln in changed[:_PREVIEW_MAX_LINES]]
+    rest = len(changed) - len(shown)
+    if rest > 0:
+        shown.append(f"…（还有 {rest} 行改动）")
+    return "\n".join(shown)
 
 
 def _label(path: str, header: str) -> str:
@@ -138,7 +173,7 @@ def _split_one_file(section: list[str]) -> list[Unit]:
         text = "\n".join([*head, *hunk])
         # 结尾必须有换行：`git apply` 对缺末尾换行的补丁会报 corrupt patch。
         out.append(Unit(label=_label(path, hunk[0]), path=path,
-                        patch=text + "\n"))
+                        patch=text + "\n", preview=_preview(hunk)))
     return out
 
 
@@ -162,6 +197,8 @@ def plan(diff: str, new_files: Sequence[str]) -> list[Unit]:
     if section:
         units += _split_one_file(section)
 
+    # 新增文件不给预览：标签已经把话说完了（「整个文件都是新加的」），摘几行
+    # 出来反而像是「只有这几行是新的」。
     units += [Unit(label=f"{p}（整个新增文件）", path=p, patch=None)
               for p in new_files]
     return units
@@ -238,7 +275,7 @@ async def unnecessary_changes(
         # 「查了，很干净」变成同一个结果 —— 那正是这一层最不能有的失效方式。
         return Necessity(unnecessary=[], skipped=[], over_cap=len(units))
 
-    found: list[str] = []
+    found: list[Finding] = []
     skipped: list[str] = []
     for unit in units:
         path = worktree / unit.path
@@ -256,7 +293,7 @@ async def unnecessary_changes(
                 continue
             after = await rerun([target])
             if target not in after.ids:
-                found.append(unit.label)
+                found.append(Finding(label=unit.label, preview=unit.preview))
         finally:
             _restore(path, blob)
     return Necessity(unnecessary=found, skipped=skipped)

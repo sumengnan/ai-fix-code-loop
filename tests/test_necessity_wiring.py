@@ -195,3 +195,43 @@ async def test_over_the_cap_says_so_instead_of_going_quiet(repo):
     assert "没被报出来不等于都必要" in state["report_md"]
     # 判定与交付照旧
     assert "return a + b" in _git(repo, "show", "aifix/nec4:calc.py")
+
+
+def test_report_shows_the_changed_lines_not_just_a_location():
+    """报告里要给那几行改了什么。
+
+    只给 `calc.py:10-13` 的话，人拿到报告的下一步必然是打开 diff 去数行 ——
+    而这一节存在的意义就是让「值不值得细看」这个判断在报告里就能做完。
+    """
+    from aifix.nodes.report import _signal_section
+
+    md = "\n".join(_signal_section([{
+        "test_id": "t::x",
+        "removed_public_symbols": [], "new_module_state": [],
+        "files_outside_suspect": [], "hardcoded_literals": [],
+        "unnecessary_hunks": [{"label": "calc.py:10-13",
+                               "preview": "-    return 1\n+    return 2"}],
+        "necessity_skipped": [], "necessity_over_cap": 0,
+    }]))
+
+    assert "`calc.py:10-13`" in md
+    assert "+    return 2" in md
+    assert "```diff" in md
+
+
+def test_report_still_renders_labels_from_an_old_checkpoint():
+    """旧 checkpoint 里这个 key 存的是一串裸标签，不能在读报告时炸掉。
+
+    炸掉的时机最坏：修复早已提交进交付分支，用户拿到的是一个「全都做完了却在
+    最后一步崩了」的 run。
+    """
+    from aifix.nodes.report import _signal_section
+
+    md = "\n".join(_signal_section([{
+        "test_id": "t::x",
+        "removed_public_symbols": [], "new_module_state": [],
+        "files_outside_suspect": [], "hardcoded_literals": [],
+        "unnecessary_hunks": ["calc.py:10-13"],
+    }]))
+
+    assert "`calc.py:10-13`" in md
