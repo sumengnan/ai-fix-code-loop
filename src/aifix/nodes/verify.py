@@ -109,9 +109,19 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
     # suspect_anchored 缺省当 True：只有 detect_node 会写这个键，而它写的是
     # 这一轮的真值。默认 False 会让所有绕过 detect 的路径（图那条、测试夹具）
     # 悄悄关掉这一列信号——把「没人告诉我」读成「诊断不可信」是反的。
+    # 目标测试的源码，供「新增判断用了测试里的字面量」那一类做参照系。
+    # 从**工作区**读而不是 HEAD：两者本该逐字相同（改测试文件是被守卫挡死的），
+    # 而万一守卫被绕过了，这一列该照着模型眼前那一份来算。
+    # 读不到就传 None —— 适配器给不出 `Failure.file`（三个都会给，但 JUnit XML
+    # 里那个属性不是必填）、或文件在这一轮被删掉时，这一类不发声而不是报错。
+    target_failure = (state.get("_failures") or {}).get(target)
+    test_file = getattr(target_failure, "file", None)
+    test_source = _now(test_file) if test_file else None
+
     sig = analyze({p: (wt.file_at_head(p), _now(p)) for p in touched},
                   suspect=(state.get("diagnosis") or {}).get("suspect_file"),
-                  suspect_anchored=state.get("suspect_anchored", True))
+                  suspect_anchored=state.get("suspect_anchored", True),
+                  test_source=test_source)
 
     # 必要性反查：逐个 hunk 反向、只重跑目标用例，撤掉之后目标照样绿的报出来。
     # 与静态信号同一层（只给人看、不改判定），但它要**动工作区**，所以位置有
@@ -211,6 +221,8 @@ async def verify_node(state: AifixState) -> dict[str, Any]:
             trace.fact("new_module_state", sig.new_module_state)
         if sig.files_outside_suspect:
             trace.fact("files_outside_suspect", sig.files_outside_suspect)
+        if sig.hardcoded_literals:
+            trace.fact("hardcoded_literal", sig.hardcoded_literals)
         # 刻意**不**进 `eval/runner._SIGNAL_KEYS`。那一列的口径是「零模型调用
         # 的静态信号，每个交付的补丁至多 3 条」，而这一条要跑测试、条数没有上
         # 界（一个补丁能报出 max_units 条），掺进去之后跨模型比的就不是同一把

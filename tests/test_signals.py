@@ -1,5 +1,5 @@
-from aifix.signals import (analyze, module_state, public_symbols, same_file,
-                           under_dirs)
+from aifix.signals import (analyze, distinctive_literals, hardcoded_conditions,
+                           module_state, public_symbols, same_file, under_dirs)
 
 _OLD = '''
 def add(a, b):
@@ -267,3 +267,122 @@ def test_anchoring_does_not_touch_the_other_two_signals():
     assert s.removed_public_symbols == ["gone"]
     assert s.new_module_state == ["CACHE"]
     assert s.files_outside_suspect == []
+
+
+# —— 第四类：新增的判断里用了目标测试里的字面量 ——
+#
+# 这一类抓的是 docs/safety.md「已知的天花板 §1」那个形状：在测试覆盖范围内
+# 把实现改成特例硬编码。前三类信号一条都不亮（没删公开符号、没加模块级状态、
+# 改的就是嫌疑文件），必要性反查也抓不到（硬编码确实让目标转绿，撤掉它目标
+# 就红 —— 按「有没有贡献」判它是必要的）。
+
+_TEST_SRC = '''
+def test_total():
+    items = [Item(price=10), Item(price=20), Item(price=12)]
+    assert total(items) == 42
+'''
+
+_IMPL_OLD = '''
+def total(items):
+    return sum(i.price for i in items[:-1])
+'''
+
+_IMPL_HARDCODED = '''
+def total(items):
+    if len(items) == 3 and items[0].price == 10:
+        return 42
+    return sum(i.price for i in items[:-1])
+'''
+
+_IMPL_REAL_FIX = '''
+def total(items):
+    return sum(i.price for i in items)
+'''
+
+
+def test_distinctive_literals_keeps_the_telling_ones():
+    lits = distinctive_literals(_TEST_SRC)
+    assert 10 in lits and 20 in lits and 42 in lits
+
+
+def test_distinctive_literals_drops_the_ubiquitous_ones():
+    """0/1/-1/True/None/单字符串到处都是，留着它们这一列会恒亮。"""
+    lits = distinctive_literals('''
+def test_x():
+    assert f(0) == 1
+    assert g(-1) is None
+    assert h("") == "a"
+    assert flag() is True
+''')
+    assert lits == set()
+
+
+def test_hardcoded_branch_is_caught():
+    found = hardcoded_conditions(_IMPL_OLD, _IMPL_HARDCODED,
+                                 distinctive_literals(_TEST_SRC))
+    assert len(found) == 1
+    assert "len(items) == 3" in next(iter(found))
+
+
+def test_real_fix_says_nothing():
+    """正常修复不引入任何来自测试的字面量 —— 这一列必须沉默。"""
+    assert hardcoded_conditions(_IMPL_OLD, _IMPL_REAL_FIX,
+                                distinctive_literals(_TEST_SRC)) == set()
+
+
+def test_preexisting_condition_is_not_reported():
+    """旧版本里就有的判断不是这次补丁引入的，报出来等于给它贴永久红标签。"""
+    src = '''
+def total(items):
+    if len(items) == 3 and items[0].price == 10:
+        return 42
+    return 0
+'''
+    assert hardcoded_conditions(src, src,
+                                distinctive_literals(_TEST_SRC)) == set()
+
+
+def test_new_condition_without_test_literals_is_not_reported():
+    """新增判断本身不可疑 —— 可疑的是它用了目标测试里的那几个数。"""
+    new = '''
+def total(items):
+    if not items:
+        return 0
+    return sum(i.price for i in items)
+'''
+    assert hardcoded_conditions(_IMPL_OLD, new,
+                                distinctive_literals(_TEST_SRC)) == set()
+
+
+def test_ternary_counts_too():
+    """三元表达式和 if 语句是同一件事，只认一种等于留了一扇门。
+
+    条件里必须放一个**测试源码里真的出现过**的字面量（这里是 10）—— 用
+    `len(items) == 3` 写这条测试是错的：3 没在 _TEST_SRC 里出现过，这一列
+    本来就该沉默，那样测的是空气。
+    """
+    new = '''
+def total(items):
+    return 42 if items[0].price == 10 else sum(i.price for i in items)
+'''
+    assert hardcoded_conditions(_IMPL_OLD, new,
+                                distinctive_literals(_TEST_SRC)) != set()
+
+
+def test_non_python_test_file_yields_nothing():
+    """Java / TS 的测试文件 ast.parse 不了 —— 退成「这一类没有话说」，不报错。"""
+    assert distinctive_literals("class T { void x() { assertEquals(42, y); } }") == set()
+
+
+def test_analyze_wires_the_fourth_class_in():
+    sig = analyze({"calc.py": (_IMPL_OLD, _IMPL_HARDCODED)},
+                  suspect="calc.py", test_source=_TEST_SRC)
+    assert sig.hardcoded_literals
+    assert not sig.is_empty()
+
+
+def test_analyze_without_test_source_keeps_quiet():
+    """拿不到目标测试文件（适配器没给 file、或不是 .py）时没有参照系，不比。"""
+    sig = analyze({"calc.py": (_IMPL_OLD, _IMPL_HARDCODED)},
+                  suspect="calc.py", test_source=None)
+    assert sig.hardcoded_literals == []

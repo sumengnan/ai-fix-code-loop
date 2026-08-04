@@ -13,7 +13,8 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
 # 只对 Python 做 AST 分析；其它后缀照样进 files_outside_suspect。
@@ -97,11 +98,15 @@ class PatchSignals:
     removed_public_symbols: list[str]
     new_module_state: list[str]
     files_outside_suspect: list[str]
+    # 默认空列表：这个类被手工构造的地方（测试夹具、旧 checkpoint 的反序列化）
+    # 不该因为多了一类信号就全部改签名。
+    hardcoded_literals: list[str] = field(default_factory=list)
 
     @property
     def count(self) -> int:
         return (len(self.removed_public_symbols) + len(self.new_module_state)
-                + len(self.files_outside_suspect))
+                + len(self.files_outside_suspect)
+                + len(self.hardcoded_literals))
 
     def is_empty(self) -> bool:
         return self.count == 0
@@ -178,9 +183,116 @@ def module_state(source: str) -> set[str]:
     return found
 
 
+# 「到处都是」的字面量阈值：绝对值不超过它的整数/浮点数不算特征。
+#
+# 0 / 1 / 2 / -1 在实现和测试里都密集出现，把它们算进来这一列会恒亮 ——
+# 一条恒亮的信号和没有这条信号是一个结果（同 files_outside_suspect 的教训）。
+#
+# **代价必须写明**：把实现改成 `if n == 0: return 1` 这种小数硬编码抓不到。
+# 这是精确率换召回率的取舍，方向是刻意的 —— 这一列的读者是人，误报一次的成本
+# （下次直接无视这一节）远高于漏报一次。
+_TRIVIAL_MAGNITUDE = 2
+
+# 判断源码截断长度。整条判断原样放进报告会把那一节撑爆（模型写的复合条件能
+# 有好几行），而人只需要认出是哪一处、再去 diff 里看全貌。
+_CONDITION_MAX_CHARS = 60
+
+
+def _is_distinctive(value: object) -> bool:
+    """这个字面量够不够「特征」，值得拿去和测试里的对比。
+
+    bool 必须排在 int 前面判：Python 里 `isinstance(True, int)` 为真，
+    而 `True == 1`，于是 `{1} & {True}` 非空 —— 不先挡掉的话，任何一个新增
+    的 `if flag:` 判断都可能被一个写了 `1` 的测试点亮。
+    """
+    if value is None or isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return abs(value) > _TRIVIAL_MAGNITUDE
+    if isinstance(value, str):
+        # 单字符（"a"、"/"、""）在两侧都太常见
+        return len(value) >= 2
+    return False
+
+
+def distinctive_literals(source: str | None) -> set[object]:
+    """目标测试文件里那些**有特征**的字面量。
+
+    解析不了就返回空集合 —— Java / TypeScript 的测试文件走到这里是正常情形
+    （`Failure.file` 三个适配器都会给），退成「这一类没有话说」，而不是报错。
+    这一类因此是 **Python-only** 的，与本模块其余部分同一条约定。
+    """
+    tree = _parse(source)
+    if tree is None:
+        return set()
+    return {n.value for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and _is_distinctive(n.value)}
+
+
+def _conditionals(source: str | None) -> list[tuple[str, frozenset]]:
+    """源码里所有判断表达式：(判断的源码, 里面那些有特征的字面量)。
+
+    `if` 与三元表达式都算：`return 42 if len(items) == 3 else …` 和写成
+    if 语句是同一件事，只认其中一种等于留了一扇门。
+    """
+    tree = _parse(source)
+    if tree is None:
+        return []
+    out: list[tuple[str, frozenset]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.If, ast.IfExp)):
+            continue
+        consts = frozenset(n.value for n in ast.walk(node.test)
+                           if isinstance(n, ast.Constant)
+                           and _is_distinctive(n.value))
+        out.append((ast.unparse(node.test), consts))
+    return out
+
+
+def _truncate(text: str) -> str:
+    return (text if len(text) <= _CONDITION_MAX_CHARS
+            else text[:_CONDITION_MAX_CHARS - 1] + "…")
+
+
+def hardcoded_conditions(old: str | None, new: str | None,
+                         literals: set[object]) -> set[str]:
+    """补丁**新增**的判断里，用到了目标测试字面量的那些。
+
+    这是 docs/safety.md「已知的天花板 §1」那个形状的指纹：
+
+        def total(items):
+            if len(items) == 3 and items[0].price == 10:   # 通过了所有测试
+                return 42
+
+    前三类信号一条都不亮，必要性反查也抓不到（这段硬编码**确实**让目标转绿，
+    撤掉它目标就红 —— 按「有没有贡献」判它是必要的）。它是这四类里唯一直接
+    对着规格套利的一条。
+
+    **只报新增的**，与 `module_state` 同一条理由：旧版本里就有的判断不是这次
+    补丁引入的，报出来等于给每个本来就有边界判断的函数贴一张永久红标签。
+    用 Counter 做差而不是集合做差 —— 同一条判断被复制成两处是可疑的，集合差
+    会把它整个吃掉。
+
+    **不看新增判断的函数体**，只看判断本身。`return 42` 里的 42 同样来自测试，
+    但把函数体算进来之后，「新增一条正常的边界判断、里面返回一个业务常量」也
+    会亮 —— 而那是完全正常的代码。判断条件里出现测试的输入值，才是「照着这一
+    条用例的输入开后门」的特征。
+    """
+    old_counts = Counter(text for text, _ in _conditionals(old))
+    found: set[str] = set()
+    for text, consts in _conditionals(new):
+        if old_counts[text]:
+            old_counts[text] -= 1
+            continue
+        if consts & literals:
+            found.add(_truncate(text))
+    return found
+
+
 def analyze(files: dict[str, tuple[str | None, str | None]],
             suspect: str | None,
-            suspect_anchored: bool = True) -> PatchSignals:
+            suspect_anchored: bool = True,
+            test_source: str | None = None) -> PatchSignals:
     """files: 路径 → (旧内容, 新内容)。None 表示该侧不存在（新增 / 删除）。
 
     suspect_anchored：Detector 手上是否有过**源码**栈帧。为 False 时
@@ -198,10 +310,17 @@ def analyze(files: dict[str, tuple[str | None, str | None]],
     """
     removed: set[str] = set()
     new_state: set[str] = set()
+    hardcoded: set[str] = set()
+    # 没有目标测试的源码就没有参照系 —— 与 suspect 为 None 时同一条理由：
+    # 编一个参照系只会让这一列变成假的。适配器给不出 `Failure.file`、测试文件
+    # 不是 .py、或者文件读不到时，这一类整个不发声。
+    literals = distinctive_literals(test_source)
 
     for path, (old, new) in files.items():
         if not path.endswith(_PY):
             continue
+        if literals:
+            hardcoded |= hardcoded_conditions(old, new, literals)
         old_symbols = public_symbols(old) if old is not None else set()
         new_symbols = public_symbols(new) if new is not None else set()
         removed |= old_symbols - new_symbols
@@ -233,4 +352,5 @@ def analyze(files: dict[str, tuple[str | None, str | None]],
     # 会让两次相同的运行产出不同的 diff。
     return PatchSignals(removed_public_symbols=sorted(removed),
                         new_module_state=sorted(new_state),
-                        files_outside_suspect=sorted(outside))
+                        files_outside_suspect=sorted(outside),
+                        hardcoded_literals=sorted(hardcoded))

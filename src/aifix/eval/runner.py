@@ -62,17 +62,27 @@ def first_attempt_suspect(facts: list[dict[str, Any]]) -> str | None:
 
 
 _SIGNAL_KEYS = frozenset({"removed_public_symbol", "new_module_state",
-                          "files_outside_suspect"})
+                          "files_outside_suspect", "hardcoded_literal"})
 
 
 def count_signals(facts: list[dict[str, Any]]) -> int:
     """「可疑信号」这一列：按 fact 条数记，不按 value 展开。
 
-    verify_node 对三类信号**各写一条** fact，value 是那一类的整个列表。于是
-    每个交付的补丁至多贡献 3 条，单位是「类」不是「个」——删 10 个公开符号
+    verify_node 对四类信号**各写一条** fact，value 是那一类的整个列表。于是
+    每个交付的补丁至多贡献 4 条，单位是「类」不是「个」——删 10 个公开符号
     和删 1 个都记 1，规模留在 value 与报告里。这不是省事：按个数展开的话，
     在一个文件里删 10 个符号的模型记 10、把改动摊到 20 个文件却一个符号没删
     的模型记 1，跨模型比这一列就不是同一把尺。
+
+    第四类 `hardcoded_literal`（新增的判断用了目标测试里的字面量）是后加的。
+    加进来是因为它恰好是这一列想量的那件事最直接的指纹 —— 规格套利。**代价是
+    加它之前与之后的历史数据不可直接比**：老 run 的 facts 里没有这个 key，
+    上界也从 3 变成了 4。与 `locate_hit` 那次修正同一类断代，处理方式也一样：
+    写明，不追溯。
+
+    必要性反查的 `unnecessary_hunk` 刻意**不在**名单里，理由不同 —— 它要真跑
+    测试、条数没有上界（一个补丁能报出 necessity_max_units 条），混进一个按
+    「类」计数的列会让两种单位并存。
 
     `signals_discarded` 刻意不在名单里：那是判 SAME / WORSE 后被 rollback 丢
     弃的尝试留下的，只有诊断价值。把它算进来，「第 1 轮删了公开符号被回滚、

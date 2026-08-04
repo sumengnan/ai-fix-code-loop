@@ -12,6 +12,7 @@ _SIGNAL_CN = [
     ("removed_public_symbols", "补丁删除了公开符号"),
     ("new_module_state", "补丁新增了模块级可变状态"),
     ("files_outside_suspect", "改动落在诊断的嫌疑文件之外"),
+    ("hardcoded_literals", "新增的判断用到了目标测试里的字面量"),
     ("unnecessary_hunks", "撤掉之后目标用例照样绿（对修复没有贡献）"),
     # 反查自己的覆盖面，不是补丁的毛病。列出来是因为**没有结论**和「查过、
     # 是必要的」在结果里长得一样，不点名的话上面那份名单看起来就是完整的。
