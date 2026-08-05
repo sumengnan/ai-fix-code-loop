@@ -326,3 +326,32 @@ async def test_probe_only_never_touches_git(twin_repo, scripted):
                                        client=scripted(_DIVERGING),
                                        run_fn=_boom, do_fix=False)
     assert [o.kind for o in outs] == [KIND_OK]
+
+
+def test_the_probe_does_not_force_json_output():
+    """**不套 `json_output`**：这一轮里模型要先调工具，而强制整轮输出 JSON
+    会和工具调用互相干扰。
+
+    实测（deepseek-v4-pro，第一次真跑）：模型的分析完全正确，但它想调
+    `list_files` 时吐的是厂商私有的 `<｜｜DSML｜｜tool_calls>` 文本格式而不是
+    OpenAI 兼容的 tool_calls 字段 —— 两个候选都以 `unparseable` 收场，
+    4401 tokens 白烧。
+
+    reproduce 那一步早就记下了同一条（见 `reproduce.reproduce` 的 docstring），
+    这里是同一个形状：有工具就不能强制 JSON，容错交给围栏剥离。
+
+    直接考源码而不是行为：这个约束的表现是「跑起来才发现工具调用退化成文本」，
+    没有便宜的运行时判据。
+    """
+    import inspect
+
+    from aifix.discover import probe
+
+    # 判「有没有被调用」而不是「文本里出现过」：解释这条约束的注释里也会
+    # 写到这个名字，按裸子串判会把一条正确的注释算成违规。
+    src = inspect.getsource(probe.probe_twin)
+    assert "with json_output()" not in src, (
+        "probe_twin 套了 json_output —— 这一轮有工具，会把工具调用挤成文本")
+    imports = [ln for ln in src.splitlines()
+               if "import" in ln and "json_output" in ln]
+    assert not imports, f"还 import 着 json_output：{imports}"

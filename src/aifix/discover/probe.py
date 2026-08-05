@@ -59,7 +59,7 @@ async def probe_twin(worktree: Path, adapter: ProjectAdapter, twin: Twin,
     什么（评测的替身、测试的脚本），探一个替身证明不了任何事。
     """
     from harness.context.manager import ContextManager
-    from harness.llm.openai_compat import OpenAICompatibleClient, json_output
+    from harness.llm.openai_compat import OpenAICompatibleClient
     from harness.loop.agent_loop import AgentLoop
     from harness.reliability.budget import BudgetTracker
     from harness.sandbox.local import LocalSandbox
@@ -79,10 +79,14 @@ async def probe_twin(worktree: Path, adapter: ProjectAdapter, twin: Twin,
             model_name=cfg.detector.model,
             price_map=cfg.price_map,
         )
-        with json_output():
-            outcome = await consume(
-                loop.run(build_prompt(twin, list(adapter.test_dirs()))),
-                money=cfg.money)
+        # **不套 `json_output`**：这一轮里模型要先调工具读那两个函数，而强制整轮
+        # 输出 JSON 会和工具调用互相干扰 —— 实测 deepseek-v4-pro 会把工具调用
+        # 吐成厂商私有的文本格式而不是 tool_calls 字段，整轮以「找不到 JSON」
+        # 收场，而模型的分析其实完全正确。
+        # 与 `reproduce.reproduce` 同一条理由，容错交给围栏剥离。
+        outcome = await consume(
+            loop.run(build_prompt(twin, list(adapter.test_dirs()))),
+            money=cfg.money)
     finally:
         await sandbox.close()
 
