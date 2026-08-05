@@ -199,3 +199,25 @@ def history_repo(tmp_path: Path) -> dict:
     return {"path": repo, "base": base, "commit": commit,
             "test_files": ["tests/test_calc.py"], "gold_files": ["calc.py"],
             "target": "tests/test_calc.py::test_add"}
+
+
+@pytest.fixture
+def scripted():
+    """脚本化的模型客户端：给一段正文，它就吐那段正文。
+
+    发现源那几层的测试都要它 —— 各写一份的话，StreamChunk 的形状一变就要
+    改十处，而那种改动漏掉一处的表现是「这条测试还绿着，但它测的已经不是
+    真实形状了」。
+    """
+    from harness.llm.base import StreamChunk
+    from harness.usage import Usage
+
+    class _Scripted:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        async def stream(self, messages, tools):
+            yield StreamChunk(type="text", text=self._text)
+            yield StreamChunk(type="done", usage=Usage(10, 5, 15))
+
+    return _Scripted

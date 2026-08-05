@@ -568,7 +568,78 @@ def build_parser() -> argparse.ArgumentParser:
         description="数据来自 .aifix/trajectory.db，不会自己更新，先跑一次 "
                     "aifix ingest。空表不代表没跑过 run，只代表没灌过库。")
     st.add_argument("--repo", default=".")
+
+    sc = sub.add_parser(
+        "scan", help="扫描代码，找「两处实现同一件事」的候选",
+        description="纯 AST、零模型调用。判据是两个维度同时成立：分支在同一组"
+                    "字符串字面量上（同域）+ 函数名有共同词根（同职责）。"
+                    "**只出候选，不下结论** —— 候选要靠跑一遍看结果一不一致来"
+                    "证伪，一致的应当丢弃。")
+    sc.add_argument("--repo", default=".")
+    sc.add_argument("--min-shared", type=int, default=3, dest="min_shared",
+                    help="两个函数至少共享几个分派键（默认 3）。调低会让"
+                         "「都判过 x == 'a'」也配对，那不说明它们同域。")
+    # 三级递进，每一级都要显式要 —— 三者的代价差着数量级，而候选是**启发式**
+    # 算出来的：不确认就去修，等于对着一堆猜测花钱改代码。
+    sc.add_argument("--probe", action="store_true",
+                    help="每个候选花一次模型调用写对比测试并跑一遍，"
+                         "确认它们到底一不一致。不改任何代码。")
+    sc.add_argument("--fix", action="store_true",
+                    help="确认不一致的那些进修复循环。**会改代码、会提交。**"
+                         "隐含 --probe。")
+    sc.add_argument("--max-probes", type=int, default=5, dest="max_probes",
+                    help="一次最多探几个候选（默认 5）。每个都是一次模型调用，"
+                         "而这一层最常见的结论是「一致，作废」。")
     return parser
+
+
+def _cmd_scan(args) -> None:
+    """列出「两处实现同一件事」的候选。
+
+    刻意**不判定**：这一层给的是「值得去跑一遍比一比的两个地方」，而不是
+    「这里有 bug」。措辞必须写死这一点 —— 一份读起来像 bug 清单的候选清单，
+    人照着查两次发现都是假的，之后整个命令就废了。
+    """
+    from .discover.twins import find_twins
+
+    root = Path(args.repo)
+    twins = find_twins(root, min_shared=args.min_shared)
+    if not twins:
+        print(f"{root} 里没有找到候选。\n"
+              "  这不代表没有问题 —— 这一层只认「两处实现同一件事」这一种形状。")
+        return
+
+    print(f"{len(twins)} 对候选（按可疑度排序）：\n")
+    for t in twins:
+        print(f"  共同词根 {'、'.join(sorted(t.shared_roots))}"
+              f"    分派键 {'、'.join(sorted(t.shared_literals))}")
+        print(f"    A  {t.a.path}:{t.a.lineno}  {t.a.name}")
+        print(f"    B  {t.b.path}:{t.b.lineno}  {t.b.name}\n")
+    if not (args.probe or args.fix):
+        print("这些是**候选，不是结论**：两处共享同一组分派键、名字也对得上，"
+              "说明它们多半在做同一件事。\n"
+              "  下一步是给同一份输入各跑一遍、比结果 —— 不一致才是缺陷，"
+              "一致的应当丢弃。\n"
+              "  `--probe` 让它自己去跑（每个候选一次模型调用）；"
+              "`--fix` 再把确认了的送进修复循环。")
+        return
+
+    import asyncio
+
+    from .discover.probe import KIND_OK
+    from .discover.scan import scan_and_fix
+
+    outs = asyncio.run(scan_and_fix(
+        root, do_fix=args.fix, max_probes=args.max_probes,
+        min_shared=args.min_shared, on_note=print))
+
+    print()
+    confirmed = [o for o in outs if o.kind == KIND_OK]
+    for o in outs:
+        print(f"  [{o.kind}] {o.twin.a.name} ↔ {o.twin.b.name}：{o.reason}")
+    print(f"\n探了 {len(outs)} 个候选，确认不一致 {len(confirmed)} 个。")
+    if confirmed and not args.fix:
+        print("  加 --fix 可以把它们送进修复循环（会改代码、会提交）。")
 
 
 def _dispatch() -> dict[str, Any]:
@@ -582,7 +653,8 @@ def _dispatch() -> dict[str, Any]:
             "reproduce": _cmd_reproduce, "mine": _cmd_mine,
             "mutate": _cmd_mutate, "issue": _cmd_issue,
             "eval": _cmd_eval, "eval-report": _cmd_eval_report,
-            "replay": _cmd_replay, "ingest": _cmd_ingest, "stats": _cmd_stats}
+            "replay": _cmd_replay, "ingest": _cmd_ingest, "stats": _cmd_stats,
+            "scan": _cmd_scan}
 
 
 def main() -> None:
