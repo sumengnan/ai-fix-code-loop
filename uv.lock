@@ -19,7 +19,7 @@ wheels = [
 
 [[package]]
 name = "aifix-code"
-version = "0.7.0"
+version = "0.7.1"
 source = { editable = "." }
 dependencies = [
     { name = "ai-harness-framework" },
