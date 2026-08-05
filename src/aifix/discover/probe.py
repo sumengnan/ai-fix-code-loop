@@ -39,6 +39,34 @@ KIND_BAD_PROBE = "bad_probe"
 KIND_UNPARSEABLE = "unparseable"
 
 
+def _trace_probe(worktree: Path, run_id: str, twin: Twin,
+                 out: "ProbeOutcome", test_code: str = "") -> None:
+    """把这次探测的事件与结论落进 `.aifix/runs/<run_id>/`。
+
+    **失败时才最要紧**：作废与失败的对比测试都会被删掉，不记下来的话现场
+    一点不剩，只能靠猜。`probe_test_code` 尤其不能省 —— 那段代码是「模型到底
+    写了什么」唯一的证据，而 bad_probe 的全部诊断价值就在它身上。
+
+    落盘失败不影响结论：这是诊断数据，不是产出。
+    """
+    from ..observe.trace import RunTrace
+
+    t = RunTrace(Path(worktree) / ".aifix" / "runs" / run_id, run_id=run_id)
+    try:
+        t.fact("probe_kind", out.kind)
+        t.fact("probe_pair", f"{twin.a.path}:{twin.a.name} ↔ "
+                             f"{twin.b.path}:{twin.b.name}")
+        t.fact("probe_tokens", int(out.tokens or 0))
+        if out.reason:
+            t.fact("probe_reason", out.reason)
+        if test_code:
+            t.fact("probe_test_code", test_code)
+        if out.events:
+            t.record_events(out.events)
+    finally:
+        t.close()
+
+
 @dataclass
 class ProbeOutcome:
     twin: Twin
@@ -53,11 +81,39 @@ class ProbeOutcome:
 
 async def probe_twin(worktree: Path, adapter: ProjectAdapter, twin: Twin,
                      config: AifixConfig | None = None,
-                     client: Any = None) -> ProbeOutcome:
+                     client: Any = None,
+                     run_id: str | None = None) -> ProbeOutcome:
     """给一对候选写对比测试并跑一遍。
 
     `client` 注入时不建真客户端 —— 与别处同一条理由：调用方已经决定了模型是
     什么（评测的替身、测试的脚本），探一个替身证明不了任何事。
+
+    `run_id` 给了就落 trace。**统一在这里落，不在每条返回路径上各写一次** ——
+    这个函数有六条返回路径，逐个手接必然漏掉一条，而漏掉的多半正是失败那条
+    （它最不常走、也最需要诊断数据）。
+    """
+    code_seen: list[str] = []
+    try:
+        out = await _probe(worktree, adapter, twin, config, client, code_seen)
+    except BaseException:
+        raise
+    if run_id:
+        try:
+            _trace_probe(worktree, run_id, twin, out,
+                         code_seen[0] if code_seen else "")
+        except Exception:      # noqa: BLE001 —— 诊断数据不能挡住结论
+            pass
+    return out
+
+
+async def _probe(worktree: Path, adapter: ProjectAdapter, twin: Twin,
+                 config: AifixConfig | None,
+                 client: Any,
+                 code_seen: list[str]) -> ProbeOutcome:
+    """`probe_twin` 的主体。拆出来只是为了让 trace 有一个统一出口。
+
+    `code_seen`：模型写的那段测试代码原样带出去 —— 失败与作废两条路都会把
+    文件删掉，不带出来的话「模型到底写了什么」就没有任何证据了。
     """
     from harness.context.manager import ContextManager
     from harness.llm.openai_compat import OpenAICompatibleClient
@@ -104,11 +160,15 @@ async def probe_twin(worktree: Path, adapter: ProjectAdapter, twin: Twin,
 
     r, why = parse_probe(outcome.text, adapter.is_test_path)
     if r is None:
+        # 解析没过时**也要留下模型的原文**：被自包含闸/路径闸拦下的那些，
+        # 它其实已经写出了代码，而 `why` 只说了哪不对、没说它写的是什么。
+        code_seen.append(outcome.text or "")
         return ProbeOutcome(twin, KIND_UNPARSEABLE, why, **common)
     if not r.can_reproduce:
         return ProbeOutcome(twin, KIND_NOT_COMPARABLE,
                             "；".join(r.missing_info), **common)
 
+    code_seen.append(r.test_code or "")
     path = write_reproduction(worktree, r)
     keep = False
     try:

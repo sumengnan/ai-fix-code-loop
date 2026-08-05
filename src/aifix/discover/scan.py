@@ -67,7 +67,11 @@ async def scan_and_fix(
     outs: list[ProbeOutcome] = []
     for twin in twins[:max_probes]:
         say(f"── 探测 {twin.a.name} ↔ {twin.b.name}")
-        out = await probe_twin(r, ad, twin, config=cfg, client=client)
+        # 每个候选一个 run_id：失败的对比测试会被删掉，trace 是唯一留下的现场。
+        probe_id = uuid.uuid4().hex[:8]
+        out = await probe_twin(r, ad, twin, config=cfg, client=client,
+                               run_id=probe_id)
+        say(f"   trace：.aifix/runs/{probe_id}/")
         outs.append(out)
         say(f"   {out.kind}：{out.reason}")
 

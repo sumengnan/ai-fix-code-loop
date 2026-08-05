@@ -383,3 +383,59 @@ def test_the_probe_does_not_force_json_output():
     imports = [ln for ln in src.splitlines()
                if "import" in ln and "json_output" in ln]
     assert not imports, f"还 import 着 json_output：{imports}"
+
+
+# ---------------------------------------------------------------- 诊断
+
+async def test_a_failed_probe_leaves_something_to_look_at(twin_repo, scripted):
+    """探测失败时必须留下可看的东西。
+
+    实测（第一次真跑）：两个候选一个 bad_probe 一个 unparseable，而 probe 不
+    落 trace、失败的对比测试又被 finally 删掉 —— 现场一点不剩，只能靠猜。
+    诊断数据在失败时最有价值，而那正是它此前唯一缺席的时刻。
+    """
+    from aifix.discover.probe import probe_twin
+
+    raw = json.dumps({
+        "can_probe": True,
+        "test_file": "tests/test_twin.py",
+        "test_code": ("import pytest\n\n\n"
+                      "def test_agree():\n"
+                      "    with pytest.raises(ValueError):\n"
+                      "        no_such_name()\n"),
+        "target_test_id": "tests/test_twin.py::test_agree",
+        "not_comparable_why": "",
+    })
+    out = await probe_twin(twin_repo, PytestAdapter(), _TWIN,
+                           client=scripted(raw), run_id="probe1")
+
+    runs = twin_repo / ".aifix" / "runs" / "probe1"
+    assert runs.is_dir(), "没有落 trace 目录"
+    facts = (runs / "facts.jsonl").read_text(encoding="utf-8")
+    assert "probe_kind" in facts
+    # 失败时**那段测试代码**是最要紧的线索：文件已经被删了，不记下来就没了
+    assert "probe_test_code" in facts
+
+
+async def test_the_trace_is_optional(twin_repo, scripted):
+    """不给 run_id 就不落盘 —— 单测与本地试用不该在别人仓库里造目录。"""
+    from aifix.discover.probe import probe_twin
+
+    await probe_twin(twin_repo, PytestAdapter(), _TWIN,
+                     client=scripted(_AGREEING))
+    assert not (twin_repo / ".aifix").exists()
+
+
+async def test_tracing_failure_does_not_break_the_probe(twin_repo, scripted,
+                                                        monkeypatch):
+    """落 trace 失败不能影响结论：这是诊断数据，不是产出。"""
+    from aifix.discover import probe as probe_mod
+
+    def _boom(*a, **k):
+        raise OSError("磁盘满了")
+
+    monkeypatch.setattr(probe_mod, "_trace_probe", _boom)
+    out = await probe_mod.probe_twin(twin_repo, PytestAdapter(), _TWIN,
+                                     client=scripted(_AGREEING),
+                                     run_id="probe2")
+    assert out.kind == KIND_AGREED
