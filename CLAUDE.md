@@ -41,3 +41,17 @@ Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` �
 
 如果你认为哪怕只有 1% 的可能性某个 skill 适用于你正在做的事情，你必须调用该 skill 检查。
 <!-- superpowers-zh:end -->
+
+## 提交署名
+
+提交信息里**绝不出现** AI 协作痕迹：`Co-Authored-By:`、`Claude-Session:`、
+`Generated with`、以及 Claude / Anthropic / AI 字样的署名行。一律只署
+`sumengnan <2499165351@qq.com>`。
+
+`Co-Authored-By: sumengnan` 也不行 —— 那条 trailer 本身就是 AI 协作的标记，
+换个名字仍然是字面命中。
+
+这条此前只写在 `docs/superpowers/plans/` 的历史计划文档里，不是生效指令。
+aifix 自己产出的提交是干净的（`delivery.py` 直接 `-m <标题>`，署名写死
+`aifix <aifix@users.noreply.github.com>`），要防的是**人/会话手写的**提交。
+`.git/hooks/commit-msg` 现在会硬拦，但 hook 不随仓库分发，换机器要重装。
