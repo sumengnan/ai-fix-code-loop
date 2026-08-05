@@ -1,6 +1,6 @@
 """跑目标项目的测试时，剥掉 aifix 自己的配置环境。
 
-**这是实测逼出来的**（2026-07-30，issue #2 的真跑）：workflow 给
+**这是实测逼出来的**：workflow 给
 `aifix issue handle` 设了 `AIFIX_PRICE_MAP` / `AIFIX_BUDGET_CNY` /
 `AIFIX_FIXER__MODEL` 等，它们随进程环境一路传进了**目标项目的 pytest 子进程**。
 目标项目恰好是 aifix 自己，它的 `AifixConfig` 读的正是这些变量 —— baseline 里

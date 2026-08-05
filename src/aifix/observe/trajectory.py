@@ -279,7 +279,7 @@ def query_stats(db_or_repo: Path | str) -> dict[str, Any]:
     - `by_adapter`：{adapter: {"runs": n, "fixed": m, "unknown": k}}。
       `fixed` 可能是 None —— 那一批 run 的报告一个都没解出修复数时，写 0 就
       是在说「一个都没修好」，那是另一回事。
-      `unknown` 是这一组里**修复数取不到的行数**，它不是冗余：SQL 的 `sum()`
+      `unknown` 是这一组里**修复数取不到的行数**，它不是冗余：SQL 的 `sum`
       跳过 NULL，一组里混着「解得出」和「解不出」时会聚合出一个看着完全正
       常的数（1 次修好 2 个 + 2 次不知道 → `sum` 给 2），而单看这个数没有
       任何办法判断它是不是完整的。渲染侧据此标注。

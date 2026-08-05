@@ -77,7 +77,7 @@ def merge(sets: "Iterable[FailureSet]") -> FailureSet:
     那说明注册表配错了，而**静默合并**比静默丢弃好排查：报告里会同时出现两条
     长得一样的 id，一眼看得出不对。
 
-    合并之后 `verify.compare()` 一行都不用改 —— 它是纯集合运算，不认识适配器。
+    合并之后 `verify.compare` 一行都不用改 —— 它是纯集合运算，不认识适配器。
     这正是「三态判定不该知道语言」那条设计在多适配器上兑现的地方。
     """
     failures: dict[str, Failure] = {}
@@ -137,7 +137,7 @@ class ProjectAdapter(Protocol):
 
     # 这个路径是不是测试文件。**「不许改测试文件」那道守卫的唯一判据。**
     #
-    # 为什么不能继续用 `under_dirs(path, test_dirs())`：那等于断言「测试都住在
+    # 为什么不能继续用 `under_dirs(path, test_dirs)`：那等于断言「测试都住在
     # 某个目录下」，而这个前提对 vitest 不成立 —— JS 生态的主流约定是测试与源码
     # **同目录**（`src/components/ChatView.test.tsx`），靠后缀而不是目录区分。
     # 拿目录列表去表达它，两条路都是坏的：返回 `[]` 会让守卫**静默放行**，于是
@@ -145,7 +145,7 @@ class ProjectAdapter(Protocol):
     # 树判成测试，什么都改不了。
     #
     # 所以判据必须由适配器给，而且必须是**谓词**而不是目录列表。pytest 与 Maven
-    # 的实现就是 `under_dirs(path, self.test_dirs())`，行为与改造前逐字节相同。
+    # 的实现就是 `under_dirs(path, self.test_dirs)`，行为与改造前逐字节相同。
     #
     # 传的是**谓词这个值**，不是 adapter 对象 —— 与 `eval/mine.split_paths` 那段
     # 「两个判据都是传进来的值」是同一条理由：拿着 adapter 就得在测试里造一个假
@@ -166,29 +166,21 @@ class ProjectAdapter(Protocol):
     def source_suffixes(self) -> tuple[str, ...]: ...
 
     # 把「本次 commit 改动过的测试文件路径」翻译成 scoped_test_command 认得的
-    # 选择器。这不是恒等映射，只是在 pytest 上恰好长得像恒等映射：pytest 的
-    # 选择器就是路径，surefire 的 `-Dtest=` 只认全限定类名。
-    # `eval/mine.verify_commit` 曾经写死 `suffix == ".py"` 当作这一步：Maven
-    # 任务的 test_files 全是 `.java` → 空 scope → 在 materialize 之前就
-    # return []，on_progress 看到的是 n=0，与「这个 commit 没有可用用例」这个
-    # 正常结果无法区分。而只把后缀放宽同样不成立 —— 路径原样进 `-Dtest=`，
-    # surefire 不报错，安静地一个用例都不跑。
-    # 翻不出来的路径（夹具、测试资源、非标准布局）一律丢掉，不猜：猜错的
-    # 选择器在两种适配器上都是静默的。
+    # 选择器。**这不是恒等映射**，只是在 pytest 上恰好长得像：pytest 的选择器
+    # 就是路径，surefire 的 `-Dtest=` 只认全限定类名。按后缀写死会让 Maven 任务
+    # 得到空 scope，而那与「这个 commit 没有可用用例」区分不开；只放宽后缀同样
+    # 不成立 —— 路径原样进 `-Dtest=`，surefire 不报错，安静地一个用例都不跑。
+    # 翻不出来的路径（夹具、测试资源、非标准布局）一律丢掉，不猜。
     def test_selectors(self, test_files: list[str]) -> list[str]: ...
 
     def make_test_id(self, classname: str, name: str, file: str | None) -> str: ...
 
     # 这套体系的用例 id 长什么样 —— **给模型看的样例**，不是给程序解析的。
-    #
-    # reproducer 要产出一个 `target_test_id`，而提示词此前只说「格式与本项目
-    # 其余用例一致」。对一个没见过本项目 id 的模型，那句话等于没说：实测
-    # （2026-08-04，qwen-coder-plus 跑 ai-learning-helper#84）它写出了一条完全
-    # 正确的测试，却把 id 写成 unittest 方言 `TestC.test_x`，被「id 要能追溯到
-    # test_file」那道闸打回 —— 整轮作废，而模型其实已经做对了活。
-    #
-    # 各家语法差得很远（pytest 的 `文件::用例`、surefire 的 `类#方法`、
-    # vitest 的 `文件::描述 > 用例`），所以只能由适配器给。
+    # 只说「格式与本项目其余用例一致」对没见过本项目 id 的模型等于没说：它会
+    # 写出正确的测试却把 id 写成 unittest 方言，被「id 要能追溯到 test_file」
+    # 那道闸打回，整轮作废。
+    # 各家语法差得很远（`文件::用例` / `类#方法` / `文件::描述 > 用例`），
+    # 所以只能由适配器给。
     def example_test_id(self) -> str: ...
 
     # 这个 id 指的是一整个测试文件 / 测试类，而不是单个用例吗。

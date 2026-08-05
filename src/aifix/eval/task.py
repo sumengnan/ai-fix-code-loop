@@ -68,7 +68,7 @@ def write_jsonl(path: Path, items: Iterable[BaseModel]) -> None:
 def read_jsonl(path: Path, model: type[M]) -> list[M]:
     """读一份 jsonl。**读不动时给一句指得到方向的话，不是裸 traceback。**
 
-    2026-08-01 的功能巡检读数：`aifix eval /打错的/路径` 和
+    一次功能巡检读数：`aifix eval /打错的/路径` 和
     `aifix eval-report /打错的/路径` 吐的都是 `FileNotFoundError` 的调用栈，
     而同一次巡检里 `aifix stats` 给的是「还没有灌过库：…先跑 aifix ingest」。
     同一个仓库里两套标准，而这个项目自己的说法是「最贵的失败一向不是崩溃，

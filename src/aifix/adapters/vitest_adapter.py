@@ -4,7 +4,7 @@
 测试与源码同放（`src/components/ChatView.test.tsx`），所以「这是不是测试文件」
 只能按后缀判 —— `ProjectAdapter.is_test_path` 这个谓词就是为它加的。
 
-下面每一条判断都来自实跑（2026-08-03，vitest 2.1.9 / node 24），不是照文档推的。
+下面每一条判断都来自实跑，不是照文档推的。
 """
 from __future__ import annotations
 
@@ -15,17 +15,10 @@ from pathlib import Path, PurePosixPath
 from .base import Failure, SourceCandidate
 
 # vitest 的栈帧行：` ❯ inner src/lib.ts:2:20`，函数名可缺（` ❯ src/a.test.ts:4:19`）。
+# **由深到浅**（和 Java 一样、和 Python 相反），所以不像 PytestAdapter 那样 reverse。
 #
-# 实跑样本：
-#     ❯ inner src/probe/lib.ts:2:20          ← 最深，抛出点
-#     ❯ Module.outer src/probe/lib.ts:6:10
-#     ❯ src/probe/p.test.ts:5:12             ← 入口，无函数名
-#
-# **由深到浅**，和 Java 一样、和 Python 相反 —— 所以不像 PytestAdapter 那样 reverse。
-#
-# 行尾锚定到 `:行:列`：路径里可以有空格（`src/my dir/a.ts`），而函数名与路径之间
-# 也是空格，只按空格切会在两种情况下各切错一次。锚定行尾之后，路径就是「最后一个
-# `:数字:数字` 之前的全部内容」，两种情况都对。
+# 行尾锚定到 `:行:列`：路径里可以有空格，而函数名与路径之间也是空格，只按空格切
+# 会切错。锚定行尾之后路径就是「最后一个 `:数字:数字` 之前的全部内容」。
 _FRAME = re.compile(
     r"^\s*❯\s+(?:(?P<fn>\S+)\s+)?(?P<path>.+?):(?P<line>\d+):\d+\s*$",
     re.MULTILINE)
@@ -134,7 +127,7 @@ class VitestAdapter:
         前端在 `web/` 下，而 `adapter_for` 没有办法替它猜。
 
         `repo`：**源仓库**，不是 worktree。两处要用：探 `pkg_dir`，以及
-        `prepare()` 从这里把 `node_modules` 借给 worktree（worktree 里没有它，
+        `prepare` 从这里把 `node_modules` 借给 worktree（worktree 里没有它，
         它没被 git 跟踪）。收下不用的适配器同样要接这个参数 —— 与 `python` /
         `parallel` 同一条理由，见 `adapter_for`。
         """
@@ -199,7 +192,7 @@ class VitestAdapter:
         「测试进程没能正常跑完」，一句指向目标项目的话。
 
         **建真目录 + 逐个子项软链，不是软链整个 node_modules。** 这不是洁癖：
-        实测（2026-08-04）vitest 跑完会在 `node_modules/.vite` 下写依赖预构建
+        实测中 vitest 跑完会在 `node_modules/.vite` 下写依赖预构建
         缓存。整个目录软链过去的话，那些写**落在源仓库里** —— 而这个项目的地基
         是「agent 的一切改动都发生在 worktree，主工作区绝不被触碰」
         （见 delivery.py 开头那句）。逐个子项软链之后，读走源仓库、写落在

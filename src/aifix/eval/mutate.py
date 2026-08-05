@@ -122,7 +122,9 @@ def _split_lines(source: str) -> list[str]:
     r"""按 CPython 分词器认的行结束符切行，保留结束符。
 
     **不能用 str.splitlines**：它还在 `\x0c`（换页符，Emacs 分页符，CPython
-    标准库里就有）、`\x0b`、`\x1c`-`\x1e`、`\x85`、` `、` ` 上断行，
+    标准库里就有）、`\x0b`、`\x1c`-`\x1e`、`\x85`、`
+`、`
+` 上断行，
     而分词器只认 `\n` / `\r\n` / `\r`（后三个字符还能合法地出现在字符串字面量
     里）。行数组只要比 AST 的行计数多出一行，后面所有 `lines[lineno-1]` 全部
     错位：落点、行号、description 里的原值一起错，而改出来的源码照样能
@@ -355,7 +357,7 @@ def _mutation_diff(tree: Path, rel: str) -> str:
     `git clone --local` 不隔离 `~/.gitconfig`，克隆出来的工作树照样吃这些配置，
     所以必须在命令行上一条条压掉 —— 命令行选项优先于配置。
     `--binary` 只影响被 git 判成二进制的文件，让它们也产出可施加的补丁而不是
-    一句「Binary files differ」（那句非空，会骗过下面的 diff.strip() 检查）。
+    一句「Binary files differ」（那句非空，会骗过下面的 diff.strip 检查）。
     """
     return _git(tree, "-c", "diff.noprefix=false", "diff", "--no-color",
                 "--no-ext-diff", "--no-textconv", "--binary",
@@ -480,7 +482,7 @@ async def mutate_tasks(repo: str, adapter: PytestAdapter, max_tasks: int = 10,
         paths = [p for p in _git(tree, "ls-files", "--", "*.py").split("\n")
                  if p.strip()]
         # 这里的 `.py` 写死是**算子层自己的限制**，不是适配层的遗漏：变异靠
-        # Python 的 ast 定位（见模块 docstring），换成 adapter.source_suffixes()
+        # Python 的 ast 定位（见模块 docstring），换成 adapter.source_suffixes
         # 只会把 `.java` 喂进 ast.parse。变异任务今天只对 Python 工程成立。
         _tests, sources = split_paths(paths, adapter.is_test_path, (".py",))
         # seed 决定文件顺序与每个文件内候选的顺序：max_tasks 一截断，取到哪

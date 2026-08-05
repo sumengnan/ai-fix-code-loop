@@ -93,18 +93,14 @@ def build_prompt(issue_title: str, issue_body: str, test_dirs: list[str],
     那道守卫不认它，于是修复阶段的 agent 可以随手改掉自己的判卷标准。pytest 是
     tests/，Maven 是 src/test/java —— 适配器已经知道答案，没有理由让模型再猜。
 
-    **id 样例是实测逼出来的**（2026-08-04，qwen-coder-plus 跑
-    ai-learning-helper#84）：系统提示词里只写「格式与本项目其余用例一致」，而
-    模型没见过本项目的 id，于是给出 unittest 方言 `TestC.test_x`。测试本身写得
-    完全正确，却被「id 要能追溯到 test_file」那道闸打回，整轮作废 —— 一次做对了
-    活却因为没人告诉它格式而白跑的失败。
+    **id 样例不能省**：只写「格式与本项目其余用例一致」时，没见过本项目 id 的
+    模型会给出 unittest 方言 `TestC.test_x` —— 测试写得完全正确，却被「id 要能
+    追溯到 test_file」那道闸打回，整轮作废。
 
-    样例给空串时整段不出现，而不是印一个「（未知）」：一个占位符对模型没有帮助，
-    只会占掉上下文。
+    样例给空串时整段不出现，不印「（未知）」：占位符对模型没有帮助，只占上下文。
     """
     dirs = "、".join(test_dirs) if test_dirs else "（未知）"
-    # 把步数上限写进 prompt。不告诉它预算，它无从判断「该收手了」——
-    # 实测（2026-07-30，issue #1）就是这么翻满 25 步、一个字没作答的。
+    # 不告诉它预算，它无从判断「该收手了」，会翻满步数一个字不作答。
     budget = (f"你最多还能调用 {max_steps} 次工具，用完必须作答。\n\n"
               if max_steps else "")
     sample = (f"本项目的用例 id 长这样：{example_id}\n"
@@ -146,18 +142,15 @@ _MODULE_DUNDERS = frozenset({"__name__", "__file__", "__doc__", "__package__",
 def _missing_names(code: str) -> list[str]:
     """`code` 里引用了、却从未在 `code` 内绑定过的名字（保序去重）。
 
-    复现测试**总是写进一个新文件**：`write_reproduction` 撞名会改名（2026-08-01
-    的事故守卫，见那边的注释）。所以 `test_code` 必须自包含——它不能指望任何
-    既有测试文件里的 import 或 fixture。这个函数就是那条不变量的判据。
+    复现测试**总是写进一个新文件**（`write_reproduction` 撞名会改名），所以
+    `test_code` 不能指望任何既有测试文件里的 import 或 fixture。
 
     **刻意不做作用域分析**，只问「整份代码里有没有在任何地方绑定过这个名字」。
-    这在方向上是安全的：它只会把「内层函数里绑定的名字」误当成全局已绑定而**漏
-    报**，绝不会反过来误报。漏掉的还有红检那道闸兜着，而误报会把一条完全正确的
-    复现直接打回，且模型无从得知自己错在哪——两种错的代价差着数量级。
+    方向上是安全的：只会漏报（内层函数里绑定的名字被当成全局已绑定），绝不会
+    误报 —— 漏掉的还有红检兜着，而误报会把一条完全正确的复现直接打回。
 
-    同样的理由，三处一律放行：语法错（那是收集阶段那道闸的活，抢答会把人指向
-    「缺了个名字」而真相是这份代码根本解析不了）、`import *`（绑定了什么已不
-    可知）、以及内建与模块 dunder。
+    同理三处一律放行：语法错（收集阶段那道闸的活）、`import *`（绑定了什么已
+    不可知）、内建与模块 dunder。
     """
     try:
         tree = ast.parse(code)
@@ -201,14 +194,9 @@ def _missing_names(code: str) -> list[str]:
 def _incoherence(r: Reproduction, is_test: Callable[[str], bool]) -> str:
     """字段之间哪里不自洽 —— 自洽返回空串。
 
-    返回**理由**而不是布尔：不自洽与「JSON 坏了」此前共用一个 `None`，于是回帖
-    统一写「模型的输出不合约定的 JSON 格式」。实测（2026-08-04，qwen-coder-plus
-    跑 ai-learning-helper#84）那句话是假的 —— JSON 五个字段齐全、解析完好，真正
-    卡住的是 `target_test_id` 用了 unittest 方言。照着那句话去看「它吐了什么」，
-    看到的是一段格式完美的 JSON。
-
-    两者该给的下一步完全不同：JSON 坏了要换模型 / 看输出，字段不自洽要把格式
-    在提示词里说死。合成一句等于**指错方向的诊断** —— 这个项目把它看得比崩溃还重。
+    返回**理由**而不是布尔：与「JSON 坏了」共用一个 None 的话，回帖会统一写
+    「输出不合约定的 JSON 格式」，而字段不自洽时那是一句假话（JSON 完好）。
+    两者该给的下一步也不同：换模型 / 看输出 vs 把格式在提示词里说死。
     """
     if not r.can_reproduce:
         # 说不出缺什么的放弃，回帖会是一句没有信息的废话，而那段说明是
@@ -216,10 +204,8 @@ def _incoherence(r: Reproduction, is_test: Callable[[str], bool]) -> str:
         return "" if r.missing_info else "说了写不出，却没说缺什么"
 
     if not (r.test_file and r.test_code and r.target_test_id):
-        # 缺任何一项，下游都会以「跑了个空」收场：没有 target_test_id 就
-        # 没有用例可跑，没有 test_code 就写出一个空文件 —— pytest 收集不到
-        # 用例时以退出码 5 结束，而那个形态和「测试红了」区分不开。一次从未
-        # 被执行过的复现会被读成复现成功。
+        # 缺任何一项都会以「跑了个空」收场，而 pytest 收集不到用例时退 5，
+        # 那个形态和「测试红了」区分不开 —— 一次从未执行过的复现会被读成成功。
         missing = [n for n, v in (("test_file", r.test_file),
                                   ("test_code", r.test_code),
                                   ("target_test_id", r.target_test_id)) if not v]
@@ -229,25 +215,19 @@ def _incoherence(r: Reproduction, is_test: Callable[[str], bool]) -> str:
         return (f"test_file `{r.test_file}` 不是一个合法的测试文件路径"
                 "（要相对、不含 `..`、且被适配器认作测试文件）")
 
-    # test_code 必须自包含 —— 复现测试总是落进一个**新**文件。
+    # test_code 必须自包含 —— 复现测试总是落进一个**新**文件（撞名会改名）。
+    # 模型很自然会把 test_file 指向已有的测试文件、只写个函数体，靠那个文件现成
+    # 的 import 和辅助类吃饭，而改名之后那些名字全部失效。
     #
-    # 实测（2026-08-04，ai-learning-helper#89）：模型诊断准确、测试语义也准确，
-    # 但它把 test_file 指向了仓库里已有的 tests/app/test_url_blocklist.py，
-    # test_code 只写了个函数体，靠那个文件现成的 import 和 _CountingFetch 吃饭
-    # ——它甚至专门回头读了那个文件的前 10 行去核实这些名字在不在。撞名改名之后
-    # 那些名字全部失效，测试红在自己的 NameError 上，48k tokens 白烧。
+    # **要钉的是这一头，不是改名那一头**：挑中一个已有的测试文件是任何人都会做
+    # 的选择。只要 test_code 自包含，改名就无害。
     #
-    # **要钉的是这一头，不是改名那一头**：给 calc.py 的缺陷写测试、挑中
-    # tests/test_calc.py 是任何人都会做的选择，拒绝它等于把常态判成违约。只要
-    # test_code 自包含，改名就无害。
-    #
-    # 这道闸同时接住 2026-08-02 issue #9 那次（`pytest.raises` 没 import，红检
-    # 的第 4 道闸事后才发现，而 fixer 已经对着假靶子烧掉 $1.45 / 468k tokens）。
-    # 放在这里比放在红检更早：那边要真跑一遍测试才知道，这边是纯静态的。
+    # 同时接住「用了 pytest.raises 却没 import pytest」那一类，且比红检更早 ——
+    # 那边要真跑一遍测试才知道，这边是纯静态的。
     #
     # **按扩展名限定成 Python**：判据是 `ast`，而 aifix 同时吃 maven（Java）和
     # vitest（TypeScript）。指望 `ast.parse` 撞上 Java 就 SyntaxError 然后放行，
-    # 是「碰巧安全」——一段恰好也是合法 Python 的片段（`x;`、`foo()`）会被判成
+    # 是「碰巧安全」——一段恰好也是合法 Python 的片段（`x;`、`foo`）会被判成
     # 缺名字，而那是一句假话。同一个坑注释里已经记过一次（`::` 是 pytest 的语法，
     # M5 的裂缝 5 就是把它当通用格式写死栽的）。
     missing = (_missing_names(r.test_code)
@@ -298,10 +278,6 @@ def parse_reproduction_ex(
 
     - **JSON 本身不成立** —— 换模型、看它到底吐了什么
     - **字段之间不自洽** —— 把格式在提示词里说死（`example_test_id` 就是为此加的）
-
-    合成一句的代价是实测过的（2026-08-04）：qwen 给出的 JSON 五个字段齐全、解析
-    完好，只是 `target_test_id` 用了 unittest 方言，而回帖写的是「模型的输出不合
-    约定的 JSON 格式」—— 照着那句话去查，看到的是一段格式完美的 JSON。
     """
     for text in (raw, _last_object(raw)):
         if text is None:
@@ -323,9 +299,9 @@ def _last_object(raw: str) -> str | None:
     `outcome.text` 是每一步文本的拼接 —— 旁白、模型引用的代码片段、示例，
     最后才是答案。
 
-    实测（2026-07-30，issue #2）：模型给出了一份**完全正确**的 JSON，而正文共
-    9085 字符、12 对花括号，首尾配对横跨了整段旁白，解析必然失败 —— 一个成功的
-    答案被扔掉了，还报成「模型输出格式不对」。
+    实测里模型给出过一份**完全正确**的 JSON，而正文有近万字符、十几对花括号，
+    首尾配对横跨整段旁白，解析必然失败 —— 一个成功的答案被扔掉，还报成
+    「模型输出格式不对」。
 
     从后往前是刻意的：答案在最后，前面出现的对象都是素材。取到素材等于用旁白
     覆盖了结论 —— 而它可能恰好也是合法 JSON（模型举的例子）。

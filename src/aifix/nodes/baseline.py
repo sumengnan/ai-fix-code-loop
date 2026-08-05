@@ -17,28 +17,19 @@ from ..adapters.vitest_adapter import VitestAdapter
 from ..graph import COLLECTION_ABORT_KIND, AifixState, trace_of
 from ..runtime.testenv import sanitized_command
 
-# 全项目唯一的适配器注册表。preflight_node 按插入顺序逐个 detect()，
-# adapter_for 按名字取，两种用法共用这一份数据 —— 曾经
-# preflight 另存一份 `ADAPTERS = [PytestAdapter]`，而 adapter_name 由**它**
-# 决定：MavenAdapter 在这边登记好了，Maven 工程走到 preflight 照样 abort，
-# 加了等于没加，且两处都不会报错。
+# 全项目唯一的适配器注册表。preflight_node 按插入顺序逐个 detect，
+# adapter_for 按名字取，两种用法共用这一份数据 —— 各存一份的话新加的适配器会
+# 在其中一处登记好、另一处照样 abort，且两边都不报错。
 #
 # **dict 的插入顺序就是探测顺序，改动顺序等于改变探测语义。**
-# Maven 在前：MavenAdapter.detect 要求根目录有 pom.xml，是一个具体且几乎
-# 不会误判的信号；PytestAdapter.detect 极宽松 —— pyproject.toml 或 tests/
-# 存在就认领，而 Java 工程的工具链里带 Python 脚本（发版、代码生成、CI 胶水）
-# 是常事。反过来排的后果不是报错而是静默：Maven 工程被判成 pytest 工程，
-# baseline 跑 pytest 命令收不到任何用例，报告写「0 个失败」。
-# 通则：detect 越具体的排越前，兜底式的排最后。
+# 通则：detect 越具体的排越前，兜底式的排最后。Maven 要求根目录有 pom.xml、
+# vitest 要求 package.json 的依赖里直接列了 vitest，两者都具体；
+# PytestAdapter.detect 极宽松（pyproject.toml 或 tests/ 存在就认领），所以排最后。
+# 排错的后果不是报错而是静默：Maven / 前端工程被判成 pytest 工程，baseline 跑
+# pytest 收不到任何用例，报告写「0 个失败」。
 #
-# vitest 排在 pytest 之前、Maven 之后：它要求根目录 package.json 的依赖里**直接**
-# 列了 vitest，同样具体。而排在 pytest 之前是必须的 —— 前后端同仓的工程根目录
-# 往往两样都有（pyproject.toml + package.json），反过来排的话前端工程会被判成
-# pytest 工程，然后 baseline 收不到任何用例、报告写「0 个失败」。
-#
-# 注意这个注册表**一个 run 只选一个**：前后端同仓时今天仍然只会跑到其中一侧，
-# 另一侧的用例一条都不执行（不是「通过」，是不存在）。让两个适配器并存是下一步
-# 的事，那要动 `adapter_name: str` 这个字段本身。
+# 一个 run 可以同时认领多个（见 `AIFIX_ADAPTERS` 与 state 里的 adapter_names），
+# 默认只用探测到的第一个。
 ADAPTERS: dict[str, type[ProjectAdapter]] = {
     "maven": MavenAdapter, "vitest": VitestAdapter, "pytest": PytestAdapter}
 
@@ -50,7 +41,7 @@ def adapter_for(name: str, python: str | None = None,
                 repo: Path | None = None) -> ProjectAdapter:
     """按名字取适配器。python 是跑测试用的解释器，None 表示各实现自己的默认。
 
-    注入走构造参数而不是改协议：`full_test_command()` 不接参数是协议里写死
+    注入走构造参数而不是改协议：`full_test_command` 不接参数是协议里写死
     的（报告写到哪、用什么命令都是构建体系自己的事），而 MavenAdapter 根本
     不需要解释器。加一个方法参数要让两个实现和五个调用点一起跟上，加一个
     构造参数只要注册表这一行。
@@ -59,7 +50,7 @@ def adapter_for(name: str, python: str | None = None,
     （surefire 的并行是 pom 里配的，不是命令行参数）。
 
     repo 是**源仓库**（不是 worktree），同样只有一个实现真用：VitestAdapter
-    拿它探 `package.json` 在哪个子目录，以及 `prepare()` 时从哪里借
+    拿它探 `package.json` 在哪个子目录，以及 `prepare` 时从哪里借
     `node_modules`。给的是源仓库因为 worktree 里那两样都没有 —— 它只含被 git
     跟踪的文件。
     """
@@ -163,7 +154,7 @@ def detect_adapters(repo: Path,
 
     **全项目唯一的探测入口**，preflight_node 与 `aifix mine` 都走这里。
     分头写就是「第二份注册表」那处裂缝的形状：`_cmd_mine` 曾直接
-    `PytestAdapter()`，于是对着 Maven 仓库 source_suffixes() 只认 `.py` →
+    `PytestAdapter`，于是对着 Maven 仓库 source_suffixes 只认 `.py` →
     gold_files 恒空 → is_candidate 恒 False → 产出 0 个任务，不报一个错，
     与「这个仓库最近没有红转绿的提交」完全无法区分 —— 而适配层里为 Maven
     补的每一处缺口都在这一行之后，全都到不了。
@@ -206,22 +197,18 @@ def detect_adapter(repo: Path, python: str | None = None,
     return found[0]
 
 
-# 判据的两个阈值，**同时成立**才中止。分开两条是因为它们防的不是同一件事：
+# 两个阈值**同时成立**才中止，因为它们防的不是同一件事：
 #
-# 条数下限防的是「小样本上的比例没有意义」。单独一条文件级 error 极可能就是
-# 这个仓库自己的 bug（某个模块被改名、忘了提交一个文件），那正是 aifix 该修
-# 的活；而且代价有界 —— 队列里就它一条，最多烧掉一个 failure 的预算。用比例
-# 拦它的话（1/1 = 100%）aifix 会在一整类正常仓库上打不开。
+# 条数下限防「小样本上的比例没有意义」—— 单独一条文件级 error 极可能就是这个
+# 仓库自己的 bug（模块改名、漏提交），那正是 aifix 该修的活，代价也有界。用
+# 比例拦它（1/1 = 100%）会让 aifix 在一整类正常仓库上打不开。
 #
-# 比例下限防的是「个别文件导不进来」被误当成环境故障。严格过半而不是「一条
-# 都不许」：真实仓库里确实可能有个别测试文件本来就 import 失败。
+# 比例下限防「个别文件导不进来」被误当成环境故障。严格过半而不是一条都不许：
+# 真实仓库里确实可能有个别测试文件本来就 import 失败。
 #
-# 两条阈值在 pytest 与 Maven 上的做功并不一样，这一点必须写明白：**pytest
-# 只要有一条收集错误就会中断整轮收集**（实测 pytest 9.1.1，exit 2，报告里
-# 只剩那几条文件级 <error>，别的测试一个都没跑），所以 pytest 侧的占比在有
-# 收集错误时**恒为 1.0**，真正做功的只有条数那一条。比例那一条是给 Maven
-# 用的：surefire 不中断，一个测试类 @BeforeAll 炸了别的类照跑，报告里
-# 类级 error 与用例级失败是真会混在一起的。
+# 两条在两种适配器上做功不同：**pytest 有一条收集错误就中断整轮收集**，占比
+# 恒为 1.0，真正做功的只有条数那条；比例那条是给 Maven 用的 —— surefire 不
+# 中断，类级 error 与用例级失败会混在一起。
 COLLECTION_ABORT_MIN_COUNT = 2
 COLLECTION_ABORT_RATIO = 0.5
 
@@ -382,7 +369,7 @@ def _check_report(worktree: Path, paths: list[Path],
     """
     if required and not paths:
         # **超时要单独说**。`ExecResult.timed_out` 这个字段一直都在，只是没人读
-        # —— 实测（2026-07-30，轮 9）拿 aifix 自己当目标跑，套件在 worktree 里
+        # —— 实测拿 aifix 自己当目标跑，套件在 worktree 里
         # 跑满 900 秒被杀，而消息把「超时 / 崩溃 / 沙箱失败」三种揉成一句，
         # 不报数字、不指旋钮，唯一的成因却恰恰是那个写死的 900。
         #
@@ -396,7 +383,7 @@ def _check_report(worktree: Path, paths: list[Path],
                 f"  下一步：调大 `AIFIX_TEST_TIMEOUT_SECONDS`"
                 f"（局部重跑是 `AIFIX_SCOPED_TEST_TIMEOUT_SECONDS`），"
                 f"或者先弄清目标项目的套件为什么这么慢。")
-        # **把命令自己的输出带上**。实测（2026-07-31）：Maven 侧的验收在 baseline
+        # **把命令自己的输出带上**。实测：Maven 侧的验收在 baseline
         # 挂了，消息只说「崩溃 / 沙箱执行失败」，而 mvn 到底说了什么一个字都没有
         # —— 只能重跑一次加日志才查得下去。诊断信息在手里却不给，是这个项目一贯
         # 反对的那种「不报错，只是查不出来」。
@@ -423,7 +410,7 @@ async def _rm_reports(sb: LocalSandbox, adapter: ProjectAdapter,
     当前状态，留在原地的上一轮报告会被 parse_junit 一并解析（见
     maven_adapter.report_paths 的说明）。flaky 确认据此判定，不报错，只是判错。
 
-    此处原先写的是「Worktree.commit() 的 git add -A 会把它扫进交付分支」——
+    此处原先写的是「Worktree.commit 的 git add -A 会把它扫进交付分支」——
     那是假话：commit 只 `git add -- <ApplyPatchTool 记账过的路径>`，它的
     docstring 里专门写着绝不用 git add -A。tests/test_maven_e2e.py 里有一条
     真跑 mvn 的验收：交付分支的树上连整个 target/ 都没有。

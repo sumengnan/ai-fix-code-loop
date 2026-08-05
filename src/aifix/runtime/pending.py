@@ -73,7 +73,7 @@ def latest(repo: str | Path) -> dict[str, Any] | None:
 def clear(repo: str | Path, run_id: str) -> None:
     """答过就删掉。
 
-    留着的话 `latest()` 会一直翻出这个陈旧的问题，而它已经被回答过了 ——
+    留着的话 `latest` 会一直翻出这个陈旧的问题，而它已经被回答过了 ——
     人会看到自己刚答完的问题又被问一遍，还以为答案没送到。
     """
     Path(repo, ".aifix", "runs", run_id, PENDING_FILE).unlink(missing_ok=True)

@@ -40,10 +40,10 @@ def preflight_node(state: AifixState) -> dict[str, Any]:
 
     探测本身在 baseline.detect_adapter 里，只有那一份：此处曾另存一份只含
     PytestAdapter 的列表，于是 adapter_name 的真正来源和登记新适配器的地方
-    不是同一处；`aifix mine` 后来也各写了一份（写死 PytestAdapter()）。
+    不是同一处；`aifix mine` 后来也各写了一份（写死 PytestAdapter）。
 
     三条拒绝路径都要带上 `abort_kind`。只写 `abort` 的后果是**静默的**
-    （2026-08-01 的功能巡检撞出来）：`_cmd_run` 的退出码按 kind 判，不写就
+    ：`_cmd_run` 的退出码按 kind 判，不写就
     走不进那个集合 —— `aifix run /打错的/路径` 印一句「中止」然后**退 0**，
     流水线里 `aifix run || 报警` 一声不吭，CI 把这次读成成功，而它一个用例
     都没跑过。

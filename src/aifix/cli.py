@@ -33,14 +33,10 @@ from .observe.trace import RunTrace
 from .observe.trajectory import DB_RELPATH, ingest, query_stats
 
 
-# 「这次 run 没跑成」的四种中止 —— 退出码非 0。**每加一种都要列进来**：
-# 漏掉的后果不是报错，是那一类静默退 0，流水线把它读成成功。preflight 就这么
-# 漏了一整轮（2026-08-01 的功能巡检才撞出来，见 graph.PREFLIGHT_ABORT_KIND）。
-#
-# 预算耗尽（tokens / cny / wall）**不在此列**：那是正常收场 —— 活干到钱花完
-# 为止，结论仍然可信。
-#
-# 只留一份：`run` 与 `answer` 两条命令各写各的话，下次加中止种类必然只改一处。
+# 「这次 run 没跑成」的四种中止 —— 退出码非 0。**每加一种都要列进来**：漏掉
+# 的后果不是报错，是那一类静默退 0，流水线把它读成成功。
+# 预算耗尽（tokens / cny / wall）不在此列：那是正常收场，结论仍然可信。
+# 只留一份：`run` 与 `answer` 各写各的话，下次加种类必然只改一处。
 _FAILED_RUN_KINDS = ("crash", COLLECTION_ABORT_KIND, MODEL_ABORT_KIND,
                      PREFLIGHT_ABORT_KIND)
 
@@ -105,12 +101,12 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                    invariant: str | None = None) -> AifixState:
     """按状态图的语义顺序执行一次完整 run。
 
-    M1 直接手工驱动节点，节点顺序与路由和 build_graph() 的图一致——把
+    M1 直接手工驱动节点，节点顺序与路由和 build_graph 的图一致——把
     LangGraph 的 checkpointer 接进来是 M2 的事（需要先有 trace 落盘）。
 
     **但两条路径不再等价：预算只在这里**。RunBudget、`failure_token_budget`
     与 `failure_cny_budget` 的分配、以及「越线即中止」的检查全部写在这个
-    函数里；build_graph() 那条路径没有 RunBudget，`failure_cny_budget`
+    函数里；build_graph 那条路径没有 RunBudget，`failure_cny_budget`
     一直是 None，整条成本闸不存在。产品入口走的是 run_once，图那条路径
     目前只用于结构验证，别拿它去验证任何与花钱有关的保证。
 
@@ -133,14 +129,11 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
         state["report_md"] = render_report(state)
         return state
 
-    # 模型可达性挡在 baseline **之前**：全量测试要跑好几分钟，而端点不通
-    # 一秒就能查出来。dry_run 豁免 —— `--dry-run` 的承诺是「不花一分钱，不
-    # 调用任何模型」，探针也是模型调用，不豁免那句话就成了假话。
-    #
-    # 只在 run_once 自己要建真客户端时才探（fixer_client is None）：调用方注入
-    # 了 client，说明它已经决定了模型是什么 —— 评测的替身、测试的脚本 —— 探一
-    # 个替身证明不了端点可达，反而会白白吃掉它脚本里的第一轮，让后面每一步都
-    # 错位一格。
+    # 模型可达性挡在 baseline **之前**：全量要跑好几分钟，端点不通一秒就查得
+    # 出来。dry_run 豁免 —— 探针也是模型调用，不豁免「不调用任何模型」就成了
+    # 假话。
+    # 只在自己要建真客户端时才探：调用方注入了 client 说明模型已经定了，探一个
+    # 替身证明不了端点可达，还会吃掉它脚本里的第一轮让后面全部错位。
     if not dry_run and fixer_client is None:
         bad = await probe_model(config)
         if bad:
@@ -165,7 +158,7 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
             t0 = time.monotonic()
             state.update(await baseline_node(state))
             trace.fact("baseline_failures", len(state["baseline_ids"]))
-            # **id 也要记**，不只是数目。实测（2026-07-30，issue #2）baseline 里
+            # **id 也要记**，不只是数目。实测中 baseline 里
             # 有 35 个红是 aifix 自己造成的（环境泄漏 + Maven 判据查错对象），
             # 而 facts 里只有一个「35」——查清它们是谁，全靠 PR 正文里那段给人
             # 看的告警。诊断数据要能被**程序**查，否则 stats 永远看不出「哪些红
@@ -280,14 +273,11 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                     break
 
     except Exception as e:
-        # 报告是用户手里**唯一**的成果凭据：worktree 退出时就被删了，分支上
-        # 有没有东西、修好了几个、下一步该干什么，全写在报告里。异常裸穿出去
-        # 的后果不是「报错」而是失联 —— 这次 run 前面几个 failure 可能已经把
-        # 修复提交进交付分支了，而用户只看到一段调用栈。
-        #
-        # 所以这里不吞异常、只保证报告先落地：记成一次中止（abort_kind
-        # 另记，评测据此把它算作评测故障而不是模型没修好），渲染、落盘，
-        # 然后照常返回。退出码由 _cmd_run 负责，管道里区分得出来。
+        # 报告是用户手里**唯一**的成果凭据（worktree 退出即删）。异常裸穿出去
+        # 的后果不是「报错」而是失联 —— 前面几个 failure 可能已经把修复提交进
+        # 交付分支了，而用户只看到一段调用栈。
+        # 所以这里不吞异常、只保证报告先落地：记成一次中止（abort_kind 另记，
+        # 评测据此算作评测故障而非模型没修好），渲染、落盘，照常返回。
         prog.note(f"运行异常中断：{type(e).__name__}：{e}")
         state["abort"] = state.get("abort") or f"运行异常中断：{type(e).__name__}：{e}"
         state["abort_kind"] = state.get("abort_kind") or "crash"
@@ -657,7 +647,7 @@ def _cmd_answer(args) -> None:
         only_test=data.get("test_id") or None,
         answer=format_answer(data.get("question", ""), choice),
         progress=None if args.quiet else TerminalProgress()))
-    # 答过就清掉：留着的话 `latest()` 会一直翻出这个已经被回答过的问题，
+    # 答过就清掉：留着的话 `latest` 会一直翻出这个已经被回答过的问题，
     # 人会看到自己刚答完的问题又被问一遍，还以为答案没送到。
     pending_store.clear(repo, data.get("run_id", ""))
     print(state["report_md"])
@@ -669,7 +659,7 @@ def _cmd_reproduce(args, client: Any = None) -> None:
     """只到复现为止。零 fixer 调用。
 
     client 是测试注入口，与 run_once 的 detector_client / fixer_client 同款：
-    产品路径永远传 None，由 reproduce() 自己按配置建。
+    产品路径永远传 None，由 reproduce 自己按配置建。
     """
     from .adapters.pytest_adapter import resolve_test_python
     from .nodes.baseline import detect_adapter
@@ -742,7 +732,7 @@ def _print_cost(tokens: int, cny: float, config: AifixConfig) -> None:
 
 
 def _cmd_issue(args) -> None:
-    """`aifix issue handle` 的入口。退出码由 handle() 的通路决定。"""
+    """`aifix issue handle` 的入口。退出码由 handle 的通路决定。"""
     from .issue.event import load_payload
     from .issue.github import GitHubClient
     from .issue.handle import handle
@@ -782,8 +772,8 @@ def _cmd_mine(args) -> None:
     # 问题。不接这一行的话，`aifix run` 能跑起来的项目 `aifix mine` 照样跑不动，
     # 而失败形态是「0 个可用用例」—— 与「这个仓库最近没有红转绿的提交」一模一样。
     test_python = resolve_test_python(repo, AifixConfig().test_python)
-    # 适配器要探测，不能写死。这里曾是 `PytestAdapter()`：Maven 仓库拿到的
-    # source_suffixes() 只认 `.py`，gold_files 恒空，产出 0 个任务且不报错 ——
+    # 适配器要探测，不能写死。这里曾是 `PytestAdapter`：Maven 仓库拿到的
+    # source_suffixes 只认 `.py`，gold_files 恒空，产出 0 个任务且不报错 ——
     # 与「这个仓库最近没有红转绿的提交」无法区分。走 preflight 用的同一份
     # 探测，新增适配器时不会漏掉这一处。
     adapter = detect_adapter(repo, python=test_python,
@@ -838,14 +828,11 @@ def _cmd_mutate(args) -> None:
             "  或者换用 `aifix mine <repo>` —— 它从 git history 里挖真实的"
             "红转绿 commit，不要求当前 HEAD 全绿。")
     except DuplicateTaskIds as e:
-        # 撞车仍然是错误：撞车的任务集在评测里会静默退化成「评测故障」。
-        # 但验证一个候选要真跑一遍测试，一轮变异跑掉半小时是常事 —— 让异常
-        # 裸穿出去，下面的 write_jsonl 执行不到，半小时的成果一个不落盘，
-        # 屏幕上还只有一段调用栈。
-        #
+        # 撞车仍然是错误，但验证一个候选要真跑一遍测试，一轮变异跑掉半小时是
+        # 常事 —— 异常裸穿出去的话 write_jsonl 执行不到，半小时的成果一个不落盘。
         # 捞出来的那份**绝不能落在 args.out**：用户下一步就是
-        # `aifix eval --tasks <out>`，那正好是这道自检要挡的事。旁落
-        # `.partial` 并在报错里指路，是让人能接着救、又不会误用。
+        # `aifix eval --tasks <out>`，那正是这道自检要挡的事。旁落 `.partial`
+        # 并在报错里指路。
         partial = Path(str(args.out) + ".partial")
         write_jsonl(partial, e.tasks)
         raise SystemExit(
@@ -950,7 +937,7 @@ def _fmt_fixed(row: dict[str, Any]) -> str:
     三种形状，不能合并成一个数字：
     - 全都解得出 → 合计就是合计
     - 一个都解不出 → 破折号；写 0 等于替库里没有的数据下「一个都没修好」的结论
-    - 混着 → 最阴的一种。SQL 的 sum() 跳过 NULL，「1 次修好 2 个 + 2 次不知道」
+    - 混着 → 最阴的一种。SQL 的 sum 跳过 NULL，「1 次修好 2 个 + 2 次不知道」
       聚合出来是 2，与「3 次一共修好 2 个」逐字节相同。读的人拿到一个看着正常
       的假数字，而且没有任何线索能发现它是假的 —— 所以必须把「有几行取不到」
       一并印出来，而不是只给一个求和值。
@@ -1003,6 +990,6 @@ def _render_stats(stats: dict[str, Any], db: Path) -> str:
 # `python -m aifix.cli` 也要能跑。没有这一段时它**静默什么都不做、退 0** ——
 # 与这次巡检抓到的 preflight 那个 bug 是同一类失败：不报错、不崩溃，只是
 # 什么都没发生，而调用方读到的是「成功」。控制台脚本 `aifix` 走的是
-# pyproject 里的 entry point，两条入口都指向同一个 main()。
+# pyproject 里的 entry point，两条入口都指向同一个 main。
 if __name__ == "__main__":
     main()

@@ -59,16 +59,13 @@ class HandleResult:
 
 
 # 「这次没跑成」的四种中止。口径必须与 `aifix run` 的退出码一致（见
-# cli._FAILED_RUN_KINDS）：预算耗尽（cny / tokens / wall）相反 —— 那是**正常
-# 收场**，活干到钱花完为止，结论仍然可信，所以退 0。
+# cli._FAILED_RUN_KINDS）。预算耗尽（cny / tokens / wall）不在此列 —— 那是正常
+# 收场，结论仍然可信，退 0。漏掉 preflight 的后果是「仓库里没有适配器」的 run
+# 绿着结束，而它一个用例都没跑过。
 #
-# preflight 是 2026-08-01 的功能巡检补上的：漏掉它时，Actions 上一次「仓库
-# 里没有适配器」的 run 会**绿着结束**，而它一个用例都没跑过。
-#
-# 这里与 cli 各存一份而不是共用同一个常量，是有意的：两条入口的判据**可以**
-# 分叉（比如将来 issue 那边想把某一类算成正常收场），共用一个名字会让分叉
-# 变成一次无人察觉的连带修改。代价是要靠这两段注释互相指认 —— 而
-# tests/test_abort_kind_parity.py 把它们钉在一起。
+# 与 cli 各存一份而不共用常量是有意的：两条入口的判据**可以**分叉，共用一个
+# 名字会让分叉变成一次无人察觉的连带修改。两处由
+# tests/loop/test_abort_kind_parity.py 钉在一起。
 _ENV_ABORTS = frozenset({"crash", COLLECTION_ABORT_KIND, MODEL_ABORT_KIND,
                          PREFLIGHT_ABORT_KIND})
 
@@ -247,11 +244,9 @@ async def handle(
 
     # ------------------------------------------------------------ 分派
     #
-    # `/aifix` 后面那段文字（`ev.text`）**是回答还是补充说明，由状态决定**：
-    # issue 上挂着待答问题就是回答，否则就是对本次缺陷的补充。词法在 event.py
-    # 里做完了，语义在这里 —— 因为分类要读一次 GitHub，而那个函数是纯的。
-    #
-    # 状态评论只读一次：两种标记（待答问题、上一次的补充）都在同一条评论里。
+    # `/aifix` 后面那段文字是回答还是补充说明，**由状态决定**：挂着待答问题就
+    # 是回答，否则是对缺陷的补充。词法在 event.py，语义在这里 —— 分类要读一次
+    # GitHub，而那个函数是纯的。状态评论只读一次，两种标记在同一条评论里。
     status = gh.status_body(ev.number)
     asked = pending_store.decode_marker(status)
     remembered = pending_store.decode_last(status)
@@ -277,27 +272,20 @@ async def handle(
 
     # ------------------------------------------------------------ 答复
     #
-    # 走的是**重新跑一遍**，不是从断点恢复 —— Actions 的 job 一次性，上一次的
-    # 容器连同磁盘一起没了。所以复现测试也得跟着答复一起活下来：它被原样存在
-    # 状态评论的隐藏标记里（`pending.encode_marker`），这里取回来重新写下去。
-    #
-    # 不重跑 reproducer：那要再花一次模型调用，而且**它未必写出同一条测试** ——
-    # 人回答的是针对上一条测试的问题，换一条就答非所问了。
+    # 走的是**重新跑一遍**而非断点恢复（Actions 的 job 一次性）。所以复现测试
+    # 要跟着答复活下来：原样存在状态评论的隐藏标记里（`pending.encode_marker`），
+    # 这里取回来重新写下去。
+    # 不重跑 reproducer：既多花一次调用，又**未必写出同一条测试** —— 人回答的
+    # 是针对上一条测试的问题，换一条就答非所问了。
     answer_text: str | None = None
     answered: dict[str, Any] | None = None
     if asked and ev.text:
         choice_no = ev.choice
         if choice_no is None:
-            # **自由回答。** 原文直接拼进提示词，没有第二次模型调用、没有独立的
-            # 意图解析步骤 —— `format_answer` 对两种形态是同一个函数。
-            #
-            # 从前这条路是被禁的，理由写作「开放式回复要再过一次模型去解析
-            # 意图」。那描述的是一种本代码库里并不存在的实现；而整个系统的前提
-            # 本来就是「读一段自由文本的缺陷报告然后改代码」，issue 正文就是
-            # 自由文本。禁掉它说不通。
-            #
-            # 但 `ask_user` 那边「模型必须给 2-4 个选项」的硬判**保留** —— 那条
-            # 约束真正在防的是提问退化成「我卡住了，救命」，与人怎么回答无关。
+            # **自由回答。** 原文直接拼进提示词，没有第二次模型调用 ——
+            # `format_answer` 对选项与自由文本是同一个函数。
+            # `ask_user` 那边「模型必须给 2-4 个选项」的硬判**保留**：那条约束
+            # 防的是提问退化成「我卡住了，救命」，与人怎么回答无关。
             reply = ev.text
         else:
             try:
@@ -362,7 +350,7 @@ async def handle(
 
     # **复现这一步也要落 trace**，哪怕后面根本走不到 run_once。
     #
-    # 第一次真跑（2026-07-30，issue #1）时它整段没有 trace —— RunTrace 建在
+    # 第一次真跑时它整段没有 trace —— RunTrace 建在
     # run_once 里，而这条通路走不到那儿，artifact 是空的。于是「模型这 25 步
     # 在读什么」这个唯一有诊断价值的问题，一个字都答不出来。失败时恰恰最需要它。
     #
@@ -406,33 +394,24 @@ async def handle(
         f"test: 复现 #{ev.number} —— {ev.title}", "--", r.test_file)
 
     # ---------------------------------------------------------- 核心循环
-    # **复现那一步的花销要从后面的额度里扣掉。**
+    # **复现那一步的花销要从后面的额度里扣掉。** 它在 run_once 之外发起调用，
+    # 三层预算闸一分都管不到 —— 不扣的话设定的上限实际可能花掉两倍，而这个项目
+    # 对预算的措辞是「越线之后不再发起新的模型调用」，超支上界必须可推导。
     #
-    # 它在 run_once 之外发起调用，三层预算闸一分都管不到 —— 不扣的话，设
-    # AIFIX_BUDGET_CNY 设的上限实际可能花掉两倍，而这个项目对预算的措辞是「越线
-    # 之后不再发起新的模型调用」，超支上界必须是可推导的。一个精确措辞但从没
-    # 验证过的上界实际超支 4 倍，是这个仓库已经犯过一次的错。
-    #
-    # 夹到 0，不允许负数：负数会让「还剩多少」的比较全部反向，那时闸最该拦住
-    # 的一刻恰好完全不拦（与 fix_node 里 `0.0 or None` 那处同类）。
-    # 墙钟同理，而且**它是三层里最要紧的一层**：workflow 靠
-    # `AIFIX_BUDGET_WALL_SECONDS < timeout-minutes` 保证软闸先于硬杀响。不扣
-    # 的话两段各拿一份完整额度，加起来可能越过 Actions 的硬超时 —— 而硬超时是
-    # 直接杀进程，run_once 里那个「保证报告先落地」的 except 执行不到，跑了一
-    # 个半小时什么都留不下。红检那一步跑的是真测试，耗时不是可以忽略的量。
+    # 夹到 0 不允许负数：负数会让「还剩多少」的比较全部反向，闸最该拦的一刻
+    # 恰好完全不拦。
+    # 墙钟是三层里最要紧的一层：workflow 靠
+    # `AIFIX_BUDGET_WALL_SECONDS < timeout-minutes` 保证软闸先于硬杀响，而硬杀
+    # 是直接杀进程，「保证报告先落地」的 except 执行不到，什么都留不下。
     run_config = config.model_copy(update={
         "budget_cny": max(0.0, config.budget_cny - out.cost_cny),
         "budget_tokens": max(0, config.budget_tokens - out.tokens),
         "budget_wall_seconds": max(
             0.0, config.budget_wall_seconds - (time.monotonic() - t0))})
 
-    # **进度必须接上。** 不接的话 Actions 日志里是几十分钟的空屏 —— 实测
-    # （2026-08-03，issue #9）那一步只有两行：开头的 env 声明，和 28 分半之后
-    # 的一行结果。而命令行那条路一直有心跳，只有这条漏了：`run_once` 的
-    # progress 默认是 NullProgress，谁不传谁就静默。
-    #
-    # 卡住的时候，日志是唯一能实时看到的东西 —— artifact 要 job 结束才下载得
-    # 到，而那时已经不叫「卡住」了。
+    # **进度必须接上**：`run_once` 的 progress 默认是 NullProgress，不传就静默，
+    # Actions 日志里会是几十分钟的空屏。卡住时日志是唯一能实时看到的东西 ——
+    # artifact 要 job 结束才下载得到，而那时已经不叫「卡住」了。
     #
     # 非 TTY 下 TerminalProgress 自动退成逐行输出（见 progress._tty），
     # 不会往 Actions 日志里灌一堆 `\r` 残句。
@@ -478,12 +457,9 @@ async def handle(
 
     branch = state.get("branch") or ""
     if not branch:
-        # run_once 在建 worktree **之前**就中止了（解释器配错、模型端点不通）。
-        # 没有分支可推，也就没有 PR。
-        #
-        # 拿空分支名去 push 的后果不是「报错」而是失联：异常裸抛出去，没有 PR、
-        # 没有状态评论，issue 里最后一条还停在那个 👀，人只能去 Actions 页面读
-        # 一段调用栈 —— 而 run_once 已经把报告准备好了，那里面写着到底出了什么事。
+        # run_once 在建 worktree **之前**就中止了（解释器配错、端点不通），没有
+        # 分支可推。拿空分支名去 push 的后果不是「报错」而是失联：没有 PR、没有
+        # 评论，issue 里最后一条还停在那个 👀，而报告里明明写着出了什么事。
         gh.comment(ev.number,
                    f"**这次 run 没能开始。**\n\n{state.get('report_md') or ''}")
         return HandleResult(code, "aborted", run_id=run_id)
@@ -504,18 +480,14 @@ async def handle(
         return HandleResult(1, "push_failed", run_id=run_id)
 
     # ---------------------------------------------------- 没修好：回帖，不开 PR
-    # 分支已经推上去了 —— **那一步不能省**：复现测试是这次 run 真花了钱写出来
-    # 的产出，runner 结束就没了。「一条红着的复现测试本身就是产出」这句仍然
-    # 成立，改的只是它以什么形状交出去。
+    # 分支仍要推：复现测试是这次 run 真花钱写出来的产出，runner 结束就没了。
     #
-    # 为什么不开 PR：PR 的语义是「这些改动请你合」，而这条路上没有任何改动值
-    # 得合（补丁全被回滚了，分支与 HEAD 的差别只有那条复现测试）。一个永远合
-    # 不进去的 PR 会堆在列表里，而 PR 列表是团队里最不该被噪音填满的地方 ——
-    # 用一次就学会跳过它。没修好时该说的是「走到哪儿、卡在哪儿、东西在哪个
-    # 分支上」，那是一条评论的形状。
+    # 不开 PR 是因为 PR 的语义是「这些改动请你合」，而这条路上没有任何改动值得
+    # 合（补丁全被回滚，分支与 HEAD 只差那条复现测试）。永远合不进去的 PR 会把
+    # PR 列表填成噪音。没修好时该说的是「走到哪儿、卡在哪儿、东西在哪个分支」，
+    # 那是一条评论的形状。
     #
-    # 仍然退 0：没修好是**正常收场**，不是故障。这与 `_ENV_ABORTS` 那条判据
-    # 是同一套口径 —— 环境坏了才退 1。
+    # 仍然退 0：没修好是**正常收场**，不是故障（与 `_ENV_ABORTS` 同一套口径）。
     if not fixed and not crashed:
         _say("── 未修复，回帖（不开 PR）")
         archived = _archive(publish, repo, run_id)
@@ -533,7 +505,7 @@ async def handle(
     except Exception as e:                      # noqa: BLE001
         # 分支**已经推上去了**，成果还在 —— 裸抛的话人连它叫什么都不知道。
         #
-        # 实测（2026-07-30，issue #2）撞的是仓库设置默认关闭：
+        # 实测撞的是仓库设置默认关闭：
         # `permissions: pull-requests: write` 是必要但**不充分**的，还要
         # Settings → Actions → General → Workflow permissions 里那个复选框。
         # 消息必须指到那一格，不是一句「开 PR 失败了」。

@@ -7,7 +7,7 @@ from pathlib import Path
 
 # 交付提交的署名。**显式给，不用环境里那份。**
 #
-# 不给的话 git 不会报错，它会从主机名推断一个出来 —— 实测（2026-07-29，macOS）
+# 不给的话 git 不会报错，它会从主机名推断一个出来 —— 实测
 # 得到 `苏梦楠 <sumengnan@MacBook-Pro-5.local>`，GitHub 的 runner 上会是
 # `runner@fv-az….(none)` 这一类。两者都是查无此人的地址，而这条提交是要出现在
 # PR 上给人看的。

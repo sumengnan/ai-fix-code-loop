@@ -82,7 +82,7 @@ _REASON_LINES = 5
 def _width(text: str) -> int:
     """显示宽度，中日韩字符按两格算。
 
-    按 len() 截断的话，一行中文的实际宽度是算出来的两倍，照样折行。
+    按 len 截断的话，一行中文的实际宽度是算出来的两倍，照样折行。
     """
     total = 0
     for ch in text:

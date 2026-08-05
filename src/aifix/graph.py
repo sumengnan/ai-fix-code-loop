@@ -20,7 +20,7 @@ MODEL_ABORT_KIND = "model"
 # 第三个取值：preflight 就把这次 run 拦下来了 —— 路径不是 git 仓库、没有适配器
 # 认领、工作区不干净、配的测试解释器不可用。
 #
-# **加它是因为漏掉它的后果是静默的**（2026-08-01 的功能巡检撞出来）：
+# **加它是因为漏掉它的后果是静默的**：
 # `preflight_node` 原先只写 `abort` 不写 `abort_kind`，而 `_cmd_run` 的退出码
 # 按 kind 判 —— 于是 `aifix run /打错的/路径` 印一句「中止」然后**退 0**，
 # 流水线里 `aifix run || 报警` 一声不吭，CI 把它读成成功。
@@ -91,7 +91,7 @@ class AifixState(TypedDict, total=False):
     signals: list[dict[str, Any]]
     consecutive_failures: int
     failure_token_budget: int | None
-    # 本轮 failure 分到的人民币额度。**只有 cli.run_once 会填**：build_graph()
+    # 本轮 failure 分到的人民币额度。**只有 cli.run_once 会填**：build_graph
     # 那条路径没有 RunBudget，整条成本闸不存在，这个字段一直是 None。
     # None 与 0.0 语义不同——None 是「不设成本闸」，0.0 是「额度已扣光，
     # 一次调用都不许发起」，见 fix_node 里的 is None 判定。

@@ -146,18 +146,13 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
                        origin=task.origin)
 
     prepare_task_repo(task, dest)
-    # 解释器必须按**源仓库**（task.repo）解析，然后随配置带进 run_once。
-    # 核心循环是照着 `state["repo"]` 探的，而在评测里那是 dest —— 一份
-    # `git clone --local` 出来的克隆，里面没有 `.venv`（git 不跟踪它）。不接
-    # 这一行，探测在评测这条路上恒空、退回 aifix 自己的解释器，跑不动目标
-    # 项目的测试：整批 baseline 全是收集错误，每个任务都被那道闸记成「评测
-    # 故障」，一个模型调用都发不出去。
+    # 解释器必须按**源仓库**（task.repo）解析：核心循环照着 `state["repo"]` 探，
+    # 而在评测里那是 `git clone --local` 出来的克隆，里面没有 `.venv`。不接这
+    # 一行，探测恒空、退回 aifix 自己的解释器，整批 baseline 全是收集错误，每个
+    # 任务都被记成「评测故障」，一个模型调用都发不出去。
     #
-    # 无条件写回，但写回的是 resolve 的结果，而它本身就是「显式配置 > 探测」：
-    # 配了 AIFIX_TEST_PYTHON 时写回去的就是那个配置（只多一次 `~` 展开），两条
-    # 来源都空时写回 None，适配器照旧退回 sys.executable（目标项目没有 venv、
-    # 或依赖本来就装在当前解释器里时，那是对的）。不在这里另写一句「配置为空
-    # 才用探测值」：那等于把优先级抄成两份，两处迟早漂移。
+    # 无条件写回 resolve 的结果，而它本身就是「显式配置 > 探测」。不在这里另写
+    # 一句「配置为空才用探测值」：那等于把优先级抄成两份，两处迟早漂移。
     task_config = config.model_copy(update={
         "test_python": resolve_test_python(Path(task.repo),
                                            config.test_python),
@@ -165,28 +160,19 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
         # 它会把一整轮花在一个永远等不到回复的问题上，然后被判成没修好 ——
         # 而那个失分记的是模型的账，实际是评测环境的账。
         "ask_user": False,
-        # **评测里也没有人在读报告。** 必要性反查（necessity.py）的产出是一条
-        # 只给人看的信号，而它的成本是每个多余单位一次 scoped 重跑 —— 在这里
-        # 那是纯粹的墙钟开销，换不到任何进入成绩的东西（`unnecessary_hunk`
-        # 刻意不在 `_SIGNAL_KEYS` 里）。
-        #
-        # 而墙钟在这条路上不是中性的：`--parallel 8` 时几十个任务在同一台机器
-        # 上抢 CPU 跑 pytest，墙钟预算耗尽被归为**评测故障**（见本文件下方
-        # `abort_kind == "wall"` 那一段），整个任务从比率分母里被摘掉。于是多
-        # 出来的这点开销不只是慢，它会**把本来能出成绩的任务变成故障**，样本
-        # 白跑 —— 与 ask_user 那条同一个形状：评测环境的账，记到了模型头上。
+        # **评测里没有人在读报告**，而必要性反查的产出是一条只给人看的信号，
+        # 成本却是每个多余单位一次 scoped 重跑。
+        # 墙钟在这条路上不是中性的：并行时几十个任务抢 CPU，墙钟耗尽被归为
+        # **评测故障**、整个任务从分母里摘掉 —— 于是这点开销会把本来能出成绩的
+        # 任务变成故障，样本白跑。评测环境的账不该记到模型头上。
         "necessity_check": False,
-        # **裁判模型在评测里必须关掉，而且理由比上面那条更硬。**
+        # **裁判模型在评测里必须关掉**，理由比上面那条更硬：它花的 token 和钱
+        # 正是评测的两列指标，开着的话那两列量到的是「被测模型 + 裁判」的合计，
+        # 而裁判是同一个、被测模型不是 —— 这两列不再是被测模型的属性。裁判开销
+        # 还与补丁大小相关，改动大的模型被多扣一笔。
         #
-        # 它花的是 token 和钱，而这两样正是评测的两列指标（`avg_tokens` /
-        # `avg_cost_cny`）。开着的话，那两列量到的是「被测模型 + 裁判模型」的
-        # 合计开销 —— 而裁判是同一个，被测模型不是，于是这两列不再是被测模型
-        # 的属性。更糟的是裁判的开销与「补丁有多大」相关，改动大的模型被多扣
-        # 一笔，跨模型对比直接失真。
-        #
-        # 显式写在这里而不是靠默认值（`reviewer_check` 本来就是 False）：
-        # 环境里设一个 AIFIX_REVIEWER_CHECK=true 就能把整批评测数据悄悄污染，
-        # 而那种污染在表里看不出来 —— 只是每个模型都贵了一点。
+        # 显式写在这里而不是靠默认值：环境里设一个 AIFIX_REVIEWER_CHECK=true 就
+        # 能把整批数据悄悄污染，而那在表里看不出来 —— 只是每个模型都贵了一点。
         "reviewer_check": False})
     state = await run_once(dest, task_config, run_id=run_id,
                            only_test=task.target_test,
@@ -231,7 +217,7 @@ async def run_task(task: Task, config: AifixConfig, model: str, workdir: Path,
     result = TaskResult(
         task_id=task.task_id, model=model,
         # 规格 §9 的定义：对 ground truth 判，不是对 traceback 判。命中判定
-        # 见 locate_hit() 的 docstring —— 裸字符串相等会把「模块路径 vs 仓
+        # 见 locate_hit 的 docstring —— 裸字符串相等会把「模块路径 vs 仓
         # 库路径」这种书写风格差异算成没命中，跨模型对比里不能有这种偏差。
         locate_hit=locate_hit(suspect, task.gold_files),
         suspect_file=suspect,
@@ -300,7 +286,7 @@ async def run_suite(tasks: list[Task], config: AifixConfig, model: str,
     `1.0`、4 个任务：parallel=1 正确地只花 $1.0，parallel=4 却花掉
     $4.0，4 倍超支，且 parallel=4 正是 `aifix eval` 的默认并发度。预留
     之后，整批的超支只可能来自「每个在跑的任务超出它自己那份额度的
-    量」，而单任务的超出量由 `consume()` 的契约兜住（至多一次模型调
+    量」，而单任务的超出量由 `consume` 的契约兜住（至多一次模型调
     用）。因此整批超支上界 = 并发数 × 一次模型调用的成本。
 
     这个上界有一个前提：**任务要么正常跑完、要么在没花钱之前就炸**。

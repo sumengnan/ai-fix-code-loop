@@ -1,6 +1,6 @@
 """按**原文**改代码：给出旧的一段、新的一段，定位交给确定性代码。
 
-为什么在已经有 `apply_patch` 之后还要加这个（2026-07-31，qwen3-coder-flash
+为什么在已经有 `apply_patch` 之后还要加这个（qwen3-coder-flash
 的 39 任务评测）：
 
     apply_patch 调用 332 次，失败 309 次（93%）

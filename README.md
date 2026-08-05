@@ -424,25 +424,20 @@ src/aifix/
 ├── cli.py            命令行入口 + run_once（真正的主循环）
 ├── graph.py          状态定义、LangGraph 装配、熔断判据
 ├── config.py         全部配置项（pydantic-settings，读 AIFIX_ 环境变量）
-├── verify.py         三态判定 —— 二十行，系统里唯一有资格说「修好了」的地方
-├── budget.py         三层预算：全局 → 单 failure → 单次 AgentLoop
-├── delivery.py       worktree 隔离与交付提交
-├── signals.py        补丁合理性的静态信号（纯 AST，不改判定）
-├── nodes/            五个节点：preflight / baseline / detect / fix / verify / report
-├── agents/           三个 agent 的提示词与输出解析：detector / fixer / reproducer
+├── reproduce.py      缺陷报告 → 复现测试 → 红检
+├── nodes/            六个节点：preflight / baseline / detect / fix / verify / report
+├── agents/           四个 agent 的提示词与输出解析：detector / fixer / reproducer / reviewer
+├── checks/           判据：三态判定 / 静态信号 / 必要性反查 / 变形复跑 / 越界计数
+├── observe/          可观测：trace / 发布 / 跨 run 汇总 / 回放 / 进度
+├── runtime/          基础设施：worktree 交付 / 预算 / 折算 / 解释器 / 片段 / 待答问题
 ├── tools/            8 个工具 + 共用的写入守卫
 ├── adapters/         项目适配器：pytest / maven / vitest / JUnit XML 解析
 ├── eval/             评测：挖任务 / 变异 / 跑批 / 打分 / 区间估计
-├── issue/            issue 驱动：授权判定 / GitHub 客户端 / 流水线编排
-├── reproduce.py      缺陷报告 → 复现测试 → 红检
-├── trace.py          三层嵌套 trace，事实与事件分开落盘
-├── trajectory.py     跨 run 汇总：facts.jsonl → SQLite
-├── replay.py         把一次 run 渲染成可读的时间轴
-└── progress.py       跑到一半时终端上看得见什么
+└── issue/            issue 驱动：授权判定 / GitHub 客户端 / 流水线编排
 ```
 
-代码里的注释密度很高，而且大多写的是**为什么**，不是「这一行做了什么」——
-很多段落记的是一次真实事故和它的读数。读代码时那些注释比这份 README 更精确。
+代码里的注释密度较高，写的大多是**为什么**而不是「这一行做了什么」：某条守卫
+在防什么、换一种写法会以什么方式静默失效。读代码时它们比这份 README 更精确。
 
 ---
 

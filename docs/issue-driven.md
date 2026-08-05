@@ -259,12 +259,21 @@ GitHub 的评论正文用 **CRLF**。按 `\n` 切完第一行是 `"/aifix\r"`，
   "test_file": "tests/test_cart.py",
   "test_code": "...",
   "target_test_id": "tests/test_cart.py::test_empty_cart_total",
+  "invariant": "空购物车的总价必须是 0，与商品表里有什么无关",
   "missing_info": []
 }
 ```
 
 **没有写入工具，也没有 `run_tests`** —— 理由见
 [safety.md 的能力面一节](safety.md#reproducer-的能力面更窄只读四个工具)。
+
+`test_code` 必须是一份**自包含的模块**：它会被写进一个新文件（撞名自动改名），
+既有测试文件里的 import 和 fixture 一个都用不上。校验是纯静态的 AST 检查，
+不成立就当解析失败 —— 比让它红在自己的 NameError 上再被红检发现要早得多。
+
+`invariant` 是**一句话说清这条测试钉的是什么规则**。它进 fixer 的开场白和报告，
+**不参与判定** —— 那是模型写的一句话。它存在的理由是判据只有一个样本点：补丁
+扛过了那个样本不等于修好了，而最后那道闸是人，人得看见规则才判断得了。
 
 ### 落盘之前的自洽性校验
 

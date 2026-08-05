@@ -278,7 +278,7 @@ jobs:
           # 发行名是 aifix-code，装完命令叫 aifix。
           # **CI 上钉住版本**：不钉的话某天 aifix 发个新版，你的流水线行为
           # 会在你没改过任何东西的情况下变掉 —— 而它是会花钱、会开 PR 的。
-          /tmp/aifix-venv/bin/pip install --quiet "aifix-code==0.1.0"
+          /tmp/aifix-venv/bin/pip install --quiet "aifix-code==0.5.0"
           /tmp/aifix-venv/bin/aifix --help > /dev/null && echo "aifix 就绪"
 
       - name: aifix issue handle
@@ -418,7 +418,7 @@ jobs:
         run: |
           python3 -m venv /tmp/aifix-venv
           # 理由同 pytest 那份：CI 上钉住版本
-          /tmp/aifix-venv/bin/pip install --quiet "aifix-code==0.1.0"
+          /tmp/aifix-venv/bin/pip install --quiet "aifix-code==0.5.0"
 
       - name: aifix issue handle
         run: /tmp/aifix-venv/bin/aifix issue handle
@@ -677,7 +677,7 @@ gh variable set AIFIX_ALLOWED_USERS --body "alice,bob"
 ### 改了授权逻辑一定要跑这个
 
 ```bash
-uv run pytest -q tests/test_issue_event.py tests/test_workflow.py
+uv run pytest -q tests/issue/test_issue_event.py tests/issue/test_workflow.py
 ```
 
 前者把每一条授权判据都钉住了，后者钉住 workflow 那层过滤。它们红了说明你放开的东西比你

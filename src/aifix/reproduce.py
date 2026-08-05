@@ -6,7 +6,7 @@
 
 **这里没有 LangGraph 节点。** 它不在图里，也就不该放进 nodes/：图的入口是
 `run_once`，而复现必须发生在 `run_once` 之前（测试要先进 HEAD）。放在 nodes/
-会让人以为它是 build_graph() 装配的一环。
+会让人以为它是 build_graph 装配的一环。
 """
 from __future__ import annotations
 
@@ -35,37 +35,33 @@ from .tools.read_symbol import ReadSymbolTool
 from .tools.search import GrepTool
 
 
-# 这一步的四种收场。**分开是因为下一步动作完全不同**，归并成一句「没能写出
-# 复现测试」会把人指向错的方向：
+# 这一步的收场分得很细，**因为下一步动作完全不同**：归并成一句「没能写出复现
+# 测试」会把人指向错的方向（比如去改 issue，而问题在步数上限）。
 #
 #   ok             —— 有了一条可用的复现测试
-#   missing_info   —— issue 信息不足。下一步是**人**去补充 issue
-#   no_convergence —— 模型翻了一堆文件就是不作答。下一步是**运维**调
-#                     reproducer_max_steps 或换模型；让人去改 issue 改多少遍都没用
-#   unparseable    —— 输出不合约定格式。同样是运维侧的事（看 trace / 换模型）
-#   empty_answer   —— 正文一个字都没有。推理型模型会把输出预算全烧在
-#                     reasoning_content 里然后被截断，正文永远等不到
-#   truncated      —— 流在某一步中途断了，这次调用没跑完。**静默**：consume 的
-#                     async-for 正常退出、ok 为 True，看起来像模型答歪了
+#   missing_info   —— issue 信息不足，下一步是**人**去补充 issue
+#   no_convergence —— 翻了一堆文件就是不作答，下一步是调 reproducer_max_steps
+#                     或换模型；改 issue 改多少遍都没用
+#   unparseable    —— 输出不合约定格式，同样是运维侧的事
+#   empty_answer   —— 正文一个字都没有（推理型模型把输出预算全烧在
+#                     reasoning_content 里然后被截断）
+#   truncated      —— 流在中途断了，这次调用没跑完。**静默**：consume 正常退出、
+#                     ok 为 True，看起来像模型答歪了
 #   cost_capped    —— 撞上我们自己的成本闸。事件签名与 truncated 一模一样，
-#                     必须先判它，否则会报成「端点在掐流」——一句假话
-#
-# 这四类是实测逼出来的：2026-07-30 第一次真跑（issue #1）沿用 fixer 的 25 步，
-# 模型翻了 25 步没吐 JSON，而回帖说的是「没能写出复现测试」—— 一句会让人去
-# 改 issue 的话，而改 issue 根本不解决问题。
+#                     必须先判它，否则会报成「端点在掐流」这句假话
 KIND_OK = "ok"
 KIND_MISSING_INFO = "missing_info"
 KIND_NO_CONVERGENCE = "no_convergence"
 KIND_UNPARSEABLE = "unparseable"
 # 一个字都没吐。与 unparseable 分开，因为下一步完全不同：那一类要去看它吐了
-# 什么，这一类根本没有可看的东西。实测（2026-07-30，issue #2）见下方注释。
+# 什么，这一类根本没有可看的东西。实测见下方注释。
 KIND_EMPTY_ANSWER = "empty_answer"
 # 流在某一步中途断了。与 unparseable 分开：那一类是模型答歪了，这一类是这次
 # 调用**根本没跑完** —— 下一步是重试或查端点，不是改 prompt。
 KIND_TRUNCATED = "truncated"
 # 模型调用**本身**失败了（端点报错、网络断、凭据不对），而不是模型答不好。
 # 与 no_convergence 分开：那一档的下一步是「调大上限 / 换模型」，对一个服务端
-# 错误完全无效 —— 实测（2026-08-04）一次 AgentServiceGetResultError 就是被那样
+# 错误完全无效 —— 实测一次 AgentServiceGetResultError 就是被那样
 # 报的。判据是**有没有撞上我们自己的上限**（见 reproduce 里那段）。
 KIND_CALL_FAILED = "call_failed"
 # 撞上**我们自己**的成本闸。与 truncated 的事件签名一模一样（都没有
@@ -100,14 +96,14 @@ class ReproduceOutcome:
 def classify_incomplete(events: list[Any]) -> bool:
     """这次调用有没有正常收场 —— 判据是**有没有 `RunFinished`**。
 
-    实测（2026-07-30）正常收场的事件序列是
+    实测正常收场的事件序列是
     `RunStarted → StepStarted → TextDelta → ModelUsage → RunFinished`：
     **最后一步不发 `StepFinished`**，发的是 `RunFinished`。所以「StepStarted 比
     StepFinished 多」在**每一次**正常收场里都成立，拿它当判据会把所有成功都
     判成截断 —— 这条弯路走过一次，留在这里。
 
-    而 issue #2 那两轮失败的事件统计里**一条 `RunFinished` 都没有**：流在中途
-    断了，`consume()` 的 async-for 却正常退出、`outcome.ok` 为 True —— 从返回值
+    而 那两轮失败的事件统计里**一条 `RunFinished` 都没有**：流在中途
+    断了，`consume` 的 async-for 却正常退出、`outcome.ok` 为 True —— 从返回值
     上完全看不出来。这是一次**静默截断**：不报错、不崩溃，只有「模型输出格式
     不对」这个诊断是假的。
 
@@ -131,7 +127,7 @@ def hit_ceiling(used: int, tokens: int, config: AifixConfig) -> bool:
     分开这个判据，是为了把「翻满了没作答」与「调用本身失败」区分开 —— 两者共用
     `outcome.ok is False`，而下一步完全不同：前者调大上限或换模型，后者查端点。
 
-    实测（2026-08-04，百炼专属网关）一次服务端 `AgentServiceGetResultError` 被
+    实测一次服务端 `AgentServiceGetResultError` 被
     报成「模型没能在预算内收敛」，建议是「调大 MAX_STEPS」—— 对一个服务端错误，
     调多少步都没用。
 
@@ -186,18 +182,12 @@ def write_reproduction(worktree: Path, r: Reproduction) -> Path:
     未必存在。路径安全（相对、无 `..`、落在 test_dirs 之下）已在
     parse_reproduction 里校验过，这里不重复判——重复判两份会各自漂移。
 
-    **撞名改名，不是拒绝**（2026-08-01 的功能巡检逼出来的）：拿一个真实小
-    仓库跑 `aifix reproduce`，模型给出的路径是 `tests/test_calc.py` —— 仓库
-    里已经有的那个。这不是意外：给 `calc.py` 的缺陷写测试，任何人都会挑那个
-    文件。命令行那侧当时拒绝并退出，**而 issue 那条路直接写了下去**：
+    **撞名改名，不是拒绝**：给 `calc.py` 的缺陷写测试、挑中 `tests/test_calc.py`
+    是任何人都会做的选择，拒绝它等于把常态判成违约。而直接覆盖的后果是整个
+    文件被一条生成的测试替换 → commit 进交付分支 → baseline 少了一堆用例 →
+    「这个补丁没弄坏别的」在一个残缺的对照组上成立。
 
-        整个 test_calc.py 被一条生成的测试替换
-          → commit 进交付分支 → baseline 跑起来，原来那些用例已经不存在
-          → 「这个补丁没弄坏别的」在一个少了一堆用例的对照组上成立
-          → PR 里躺着一次删测试的改动，而报告说一切正常
-
-    守卫放在这里而不是两个调用方各一份 —— 各写各的正是它当初只存在于命令行
-    那一侧的原因。
+    守卫放在这里而不是两个调用方各一份：各写各的会漏。
 
     改名同时**改写 `target_test_id`**：不改的话写下去的是 A、跑起来的是 B，
     红检会报「这个用例没跑出结果」，而真相是它在另一个文件里。改的是 `r`
@@ -228,20 +218,13 @@ def write_reproduction(worktree: Path, r: Reproduction) -> Path:
     return p
 
 
-# 「这个名字/模块根本不存在」这一类异常。第 1 条闸已经挡掉了它在**收集阶段**
-# 的形态（模块级 import 失败 → 文件级 id），这里挡的是同一类错误发生在**运行
-# 时**：模块 import 得好好的，名字错在测试函数体里，于是前三道闸全部放行——
-# 文件收集正常、用例跑了、用例也确实红了。
+# 「这个名字/模块根本不存在」这一类异常。第 1 条闸挡的是它在**收集阶段**的
+# 形态，这里挡的是同一类错误发生在**运行时**：模块 import 得好好的，名字错在
+# 测试函数体里，于是前三道闸全部放行 —— 文件收集正常、用例跑了、也确实红了，
+# 而 fixer 会对着这个假靶子改代码。
 #
-# 真实代价（2026-08-02，issue #9 的真跑）：模型写的复现用了 `pytest.raises`
-# 却没有 `import pytest`，测试红在自己的 NameError 上。红检放行，fixer 对着
-# 这个假靶子改了两轮、$1.45 / 468k tokens，两轮都引入回归、都被三态判决回滚。
-# 最后给人的报告是「没修好」，而真正的原因是复现测试从一开始就是错的——
-# 报告里没有任何一句话指向这一点。
-#
-# 只收「名字/模块不存在」，**刻意不收 AttributeError**：`app.foo()` 没有这个
-# 属性既可能是模型猜错了 API，也可能正是 issue 要报的缺陷本身，分不开的信号
-# 不该拿来拦人。
+# 只收「名字/模块不存在」，**刻意不收 AttributeError**：没有这个属性既可能是
+# 模型猜错了 API，也可能正是 issue 要报的缺陷本身，分不开的信号不该拿来拦人。
 _MISSING_NAME = frozenset({"NameError", "ModuleNotFoundError", "ImportError"})
 
 
@@ -249,23 +232,21 @@ def _typo_reason(failure: Failure | None, worktree: Path,
                  adapter: ProjectAdapter) -> str:
     """这条测试是不是红在模型自己写的那一行上。是就给理由，不是就返回空串。
 
-    判据是**异常抛在哪，不是异常是什么类型**。产品代码里真的引用了未定义的
-    名字，那是货真价实的缺陷，NameError 正是它该有的样子——按类型一刀切会把
-    这种真缺陷一并打回。区别在栈帧：笔误的栈只到复现测试文件里（那段代码整个
-    是模型写的，产品代码没有办法让它抛 NameError），真缺陷的栈会**穿进产品
-    文件**。实测三种形态（2026-08-03）：
+    判据是**异常抛在哪，不是异常是什么类型**：产品代码里真引用了未定义的名字
+    是货真价实的缺陷，按类型一刀切会把它一并打回。区别在栈帧 —— 笔误的栈只到
+    测试文件（那段代码整个是模型写的），真缺陷的栈会穿进产品文件。
+
+    三种形态：
 
         笔误 `pytest.raises` 没 import  → [(测试文件, 6)]
         产品代码里的 NameError          → [(calc.py, 5), (测试文件, 12)]
         真断言失败                      → [(测试文件, 16)]
 
-    第三行是这道闸最要紧的边界：**真断言失败的栈同样只到测试文件**（被调函数
-    正常返回了，栈上没有它），而那是最常见的合法复现。所以类型判定不能省——
-    单看栈帧会把每一条正常的复现测试都打回去。
+    第三行是最要紧的边界：**真断言失败的栈同样只到测试文件**（被调函数正常
+    返回了），而那是最常见的合法复现 —— 所以类型判定不能省。
 
-    **拿不到栈帧时一律放行。** 解析不出帧的原因有好几种（报告形状变了、路径
-    不在 repo 内、适配器换了），把「没有证据」当成「有罪的证据」会让这道闸在
-    自己瞎掉的时候变得最严厉，而那正是最不该拦人的时候。
+    **拿不到栈帧时一律放行**：把「没有证据」当成「有罪的证据」会让这道闸在
+    自己瞎掉的时候变得最严厉。
     """
     if failure is None:
         return ""
@@ -297,15 +278,9 @@ _QUOTED_NAME = re.compile(r"['\"]([^'\"]+)['\"]")
 def _typo_cause(message: str) -> str:
     """按**实际缺的那个名字**给成因，不发套话。
 
-    这里原来无条件写「最常见的成因：用了 `pytest.raises` 却没有 `import
-    pytest`」。那句话来自 2026-08-02 issue #9 的真跑，本身没错，错在无条件。
-
-    实测（2026-08-04，ai-learning-helper#89）缺的是 `UrlBlockStore`：模型把
-    test_file 指向仓库里已有的测试文件、只写了个函数体，靠那个文件现成的
-    import 吃饭，而 write_reproduction 撞名改名后名字全失效。回帖照样是那句
-    pytest —— 照着它去查，会去骂模型没写 `import pytest`。
-
-    这个项目把「指错方向的诊断」看得比崩溃还重，那就不能在这里发套话。
+    一句无条件的「最常见的成因是没 import pytest」在缺的是别的名字时就是一句
+    指错方向的诊断 —— 照着它去查会去骂模型没写 import pytest，而真正的原因是
+    test_code 不自包含。
     """
     m = _QUOTED_NAME.search(message or "")
     name = m.group(1) if m else ""
@@ -379,7 +354,7 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
     接近 fixer 而不是 detector（后者是单步、无工具、强制 JSON 的诊断）。
     什么时候该拆出第三条路由——等实测发现便宜模型也够用的时候。
 
-    不套 `json_output()`：那会强制整轮输出 JSON，而这一轮里模型要先调工具。
+    不套 `json_output`：那会强制整轮输出 JSON，而这一轮里模型要先调工具。
     容错交给 parse_reproduction 的围栏剥离（与 parse_diagnosis 同款）。
     """
     sandbox = LocalSandbox(workspace=str(worktree))
@@ -422,7 +397,7 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
         # 崩了），它压根没产出最终文本 —— 所以这一支**不可能**是解析问题。
         #
         # 这里曾经拿 `"max_steps" in err` 去挑，挑不中的落进 UNPARSEABLE：于是
-        # 第三次真跑（2026-07-30）token 超限被报成「模型的输出解析不出复现测试」
+        # 第三次真跑token 超限被报成「模型的输出解析不出复现测试」
         # ——一句指向模型输出格式的话，而真相是额度不够。与上一版把「没收敛」
         # 报成「issue 信息不足」是同一个错，只是换了一条兄弟分支。
         #
@@ -430,7 +405,7 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
         # 「循环有没有跑完」是我们自己的判据。
         err = outcome.error or ""
         # **「翻满了没作答」与「调用本身失败」不是一回事**，而它们共用
-        # `outcome.ok is False`。实测（2026-08-04，百炼专属网关）一次
+        # `outcome.ok is False`。实测一次
         # `AgentServiceGetResultError` 被报成「模型没能在预算内收敛」，给出的
         # 下一步是「调大 MAX_STEPS / MAX_TOKENS」—— 对一个服务端错误，调多少
         # 步都没用。指错方向的诊断，这个项目最忌讳的那种。
@@ -465,9 +440,8 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
 
     if outcome.cost_capped:
         # **必须排在截断判定之前**：成本闸触发时 consume 主动关掉生成器，事件流
-        # 里同样没有 RunFinished —— 两者的签名一模一样，而原因相反。实测
-        # （2026-07-30，issue #2）两轮的累计成本是 $0.2179 / $0.2070，闸是
-        # $0.50 × 0.4 = $0.20，被上一版报成了「查端点是不是在掐流」。
+        # 里同样没有 RunFinished —— 两者的签名一模一样，而原因相反。判反了会把
+        # 「撞上我们自己的成本闸」报成「端点在掐流」，一句会让人去查网络的假话。
         cap = config.budget_cny * config.reproducer_budget_share
         return ReproduceOutcome(
             None,
@@ -492,9 +466,8 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
 
     if not (outcome.text or "").strip():
         # 一个字都没吐。推理型模型（deepseek 的 reasoning_content、o 系列的
-        # reasoning tokens）会把输出预算整个烧在推理里然后被截断 —— 实测
-        # （2026-07-30，issue #2）事件流里 ReasoningDelta 1001 条、TextDelta 0
-        # 条，第 9 步连 StepFinished 都没有，最后一条 ModelUsage 的 token 数是
+        # reasoning tokens）会把输出预算整个烧在推理里然后被截断 —— 事件流里
+        # 只有 ReasoningDelta、一条 TextDelta 都没有，而 ModelUsage 的 token 数是
         # None。
         #
         # 归进 unparseable 是错的：那句话让人去看它吐了什么，而它什么都没吐。

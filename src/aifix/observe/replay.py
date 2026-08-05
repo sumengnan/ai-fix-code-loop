@@ -282,7 +282,7 @@ def _block(label: str, text: str, full: bool, max_chars: int) -> str:
 
 def _fmt_value(value: Any) -> str:
     # 字符串裸着显示（读起来干净），其余照 JSON 原样 —— true / ["calc.py"]
-    # 这些形状要保持可辨认，别被 str() 变成 True / ['calc.py']。
+    # 这些形状要保持可辨认，别被 str 变成 True / ['calc.py']。
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
 

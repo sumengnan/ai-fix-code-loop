@@ -1,6 +1,6 @@
 """按名字读一个函数/类的**完整**定义 —— 边界由代码结构算出来，不靠猜。
 
-为什么在 `read_file` 已经有 offset 之后还要加这个（2026-07-31 那次评测）：
+为什么在 `read_file` 已经有 offset 之后还要加这个：
 
     read_file 431 次 / apply_patch 332 次（失败 309）
 
@@ -37,7 +37,7 @@ _PY = {".py", ".pyi"}
 # 语言整个挡在外面，而这个工具的价值恰恰在于「不知道在哪也能找」。
 #
 # 实测（写完当天的冒烟）：查 `EditFileTool.run`，第一个命中的是
-# `docs/superpowers/plans/2026-07-27-m1-minimal-loop.md` —— 计划文档里的代码块。
+# `docs/superpowers/plans/-m1-minimal-loop.md` —— 计划文档里的代码块。
 # 那份 markdown 里有 `def run(` 而缩进兜底认它，于是真正的实现被挤出了名额。
 _SKIP_SUFFIX = {".md", ".rst", ".txt", ".json", ".yaml", ".yml", ".toml",
                 ".lock", ".csv", ".jsonl", ".log", ".xml", ".html", ".cfg",

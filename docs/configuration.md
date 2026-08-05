@@ -167,7 +167,7 @@ export AIFIX_PRICE_MAP='{"deepseek-v4-pro": [0.002, 0.008]}'   # 元/千token
 ### 折算只发生在一处
 
 `agents/runner.consume` 把框架事件里的成本累加进 `AgentOutcome` 的那一行，全项目仅此
-一处（见 `src/aifix/money.py`）。往下游任何一层再折一次，得到的都是一个看起来完全
+一处（见 `src/aifix/runtime/money.py`）。往下游任何一层再折一次，得到的都是一个看起来完全
 正常的 7 倍。
 
 ---
@@ -532,6 +532,9 @@ ask_user                       True
 max_diff_lines                 300
 necessity_check                True             # 交付前的补丁必要性反查
 necessity_max_units            10               # 超过就整体跳过反查
+test_fitting_retry             True             # 补丁用了目标测试的字面量 → 退回重写
+metamorphic_check              False            # 变形复跑（贵：每个扰动最多两次重跑）
+metamorphic_max_mutations      3                # 一次最多做几个扰动
 fixer_thinking                 False            # 第 1 轮关推理
 fixer_thinking_after_attempt   2                # 第 2 轮起升级成开
 reviewer_check                 False            # 交付前让裁判模型复审（要花钱）

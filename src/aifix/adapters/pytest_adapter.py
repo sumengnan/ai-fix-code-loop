@@ -490,26 +490,17 @@ class PytestAdapter:
             return True
         return (repo / "tests").is_dir()
 
-    # -B 不写 __pycache__，-p no:cacheprovider 不写 .pytest_cache：两者都是
-    # 为了跑完测试之后，worktree 里除了被跟踪文件的改动之外什么都不多出来。
+    # -B 不写 __pycache__，-p no:cacheprovider 不写 .pytest_cache：跑完测试之后
+    # worktree 里除了被跟踪文件的改动什么都不该多出来。
     #
-    # 理由**不是**「会被扫进交付分支」——Worktree.commit 只
-    # `git add -- <ApplyPatchTool 记账过的路径>`，这个仓库里没有 git add -A
-    # 这条交付路径（delivery.Worktree.commit 的 docstring 写着绝不用；
-    # tests/test_maven_e2e.py 有一条真跑 mvn 的验收：整个 target/ 都没进树）。
-    # 真实理由是未跟踪产物**跨状态存活**：同一个 worktree 会被
-    # `git checkout --force` 在 C^ 和 C 之间来回切（eval/mine.verify_commit），
-    # 而 checkout 不碰未跟踪文件，上一跑留下的东西原样活到下一跑。陈旧报告被
-    # 下一跑当成自己的结果就是这个机制（见 nodes/baseline._rm_reports 与
-    # MavenAdapter 命令里的 clean）；压根不写出来的产物，不需要任何人记得去
-    # 清，也就不存在清漏。顺带，`git status` 不被这些目录淹掉，交付前想看一眼
-    # 工作区到底动了什么才看得清。
+    # 理由**不是**「会被扫进交付分支」（commit 只 add 记账过的路径），而是未跟踪
+    # 产物**跨状态存活**：同一个 worktree 会被 `git checkout --force` 在两个提交
+    # 之间来回切，而 checkout 不碰未跟踪文件 —— 上一跑留下的东西原样活到下一跑，
+    # 陈旧报告被当成自己的结果就是这个机制。压根不写出来的产物不存在清漏。
     #
     # -o junit_family=xunit1：xunit2（pytest 的默认）**不写** <testcase file=...>，
     # 而 file 是把 junit 报告里的用例还原成可重跑 node id 的唯一可靠依据。
-    # 已实测（pytest 9.1.1）：xunit1 多出 file/line 两个属性，其余结构
-    # （skipped / failure / error / message）与 xunit2 完全一致，且无
-    # deprecation 警告。`-o` 覆盖目标项目 ini 里的设置。
+    # `-o` 覆盖目标项目 ini 里的设置。
     _BASE = ["-B", "-m", "pytest", "-q", "-p", "no:cacheprovider",
              "-o", "junit_family=xunit1"]
 
@@ -522,7 +513,7 @@ class PytestAdapter:
         """全量。配了 `parallel` 就交给 pytest-xdist 并行跑。
 
         **一次 run 要跑好几遍全量**（1 次 baseline + 每轮 verify 各 1 次），
-        所以这一条是整个系统里最值钱的一处提速。实测（2026-08-03，issue #9 的
+        所以这一条是整个系统里最值钱的一处提速。一次真跑里
         真跑）：串行跑本仓库的 944 个用例，一次 run 花了 28 分半，而其中绝大
         部分是那三遍全量。
 

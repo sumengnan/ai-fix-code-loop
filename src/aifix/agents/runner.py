@@ -59,30 +59,22 @@ async def consume(
     与 `AgentOutcome.cost_cny` 同币种 —— 一边人民币一边价表货币的话，
     美元价表下这道闸会在 7 倍于设定值的地方才拦，而它看起来一直在工作。
 
-    money：价表货币 → 人民币的折算规则，默认按 `Money()`（美元价表 + 默认
+    money：价表货币 → 人民币的折算规则，默认按 `Money`（美元价表 + 默认
     汇率）。产品路径一律传 `config.money`；留默认值是给直接构造事件流的单测
     用的。
 
     on_tool / on_tool_done：工具调用的开始与结束各回调一次，给进度显示用。
-    两个都要，因为它们答的是两个问题：
-
-    - `on_tool` 听 `ToolStarted`，答「它现在在干什么」。fix 是一次 run 里最长
-      的一段（默认最多 25 步），只在结束时出声的话，最需要心跳的那几分钟仍然
-      是空屏 —— 而 run_tests 一跑就是几十秒。
-    - `on_tool_done` 听 `ToolFinished`，答「成了还是砸了、为什么砸」。这个只有
-      结果事件知道。实跑过的一次 run：23 次调用里 5 次是错的（诊断指了个不存在
-      的文件、补丁 check 不过、跑了失败列表外的用例），不听结束事件的话，屏幕
-      上它们和成功的长得一模一样。
+    两个都要，它们答的是两个问题 —— 开始答「现在在干什么」（fix 是一次 run 里
+    最长的一段，只在结束时出声的话最需要心跳的那几分钟是空屏），结束答「成了
+    还是砸了、为什么砸」（只有结果事件知道，不听的话失败的调用和成功的在屏幕上
+    长得一模一样）。
 
     结束回调**带上发起时的那次调用**：参数只在 `ToolStarted` 上，`ToolFinished`
-    只有一个 tool_call_id，光凭它渲染出来的行只剩一个工具名。没见过开始的
-    结束事件直接跳过（不该发生，但宁可少报一条也不凭空造一条）。
+    只有一个 tool_call_id，光凭它渲染出来的行只剩一个工具名。没见过开始的结束
+    事件直接跳过。
 
-    听的是 `ToolStarted`，**不是 `ToolCall`** —— 后者是消息里的数据结构，
-    从不作为事件出现在流上。这一条踩过：单元测试自己构造 ToolCall 喂进来，
-    测试全绿而真跑一步都不报。实测一次真 run 的 events.jsonl：
-    ToolStarted 33 条、ToolFinished 33 条、ToolCallRequested 30 条，
-    ToolCall **0 条**。
+    听的是 `ToolStarted`，**不是 `ToolCall`** —— 后者是消息里的数据结构，从不
+    作为事件出现在流上。拿它当事件听的话单测能全绿而真跑一步都不报。
 
     契约是「越线之后不再发起新的模型调用」，不是「绝不超过一分钱」——
     成本只有在调用返回后才知道（ModelUsage 到达的那一刻），所以越线时
@@ -123,18 +115,18 @@ async def consume(
     if out.cost_capped:
         # 关掉传进来的生成器。**这只关掉了一层壳，不要把它当成清理完成。**
         #
-        # 框架的 AgentLoop.run() 本身只是个壳：
+        # 框架的 AgentLoop.run 本身只是个壳：
         #     async for ev in self._run_from(state, resuming=False):
         #         yield ev
         # 真正的 ExitStack（负责还原「打转纠偏」时调高的采样温度）和
         # run / step / model_call 三个 OpenTelemetry span 全都在 _run_from
-        # 里。aclose() 把 GeneratorExit 抛进壳的 yield 处，而 `async for`
+        # 里。aclose 把 GeneratorExit 抛进壳的 yield 处，而 `async for`
         # 不会顺手关闭它遍历的那个内层异步生成器 —— _run_from 就那样挂在
         # 原地，要等事件循环做异步生成器收尾（后续某次 await 时的 GC 回收，
-        # 最迟到 asyncio.run() 的 shutdown_asyncgens()）才被终结。
+        # 最迟到 asyncio.run 的 shutdown_asyncgens）才被终结。
         #
         # 也就是说：**升温泄漏给下一次调用的隐患仍然完整存在**，还原时机
-        # 依旧不确定，aclose() 只是让它看起来被处理过了。跑成本闸的测试时
+        # 依旧不确定，aclose 只是让它看起来被处理过了。跑成本闸的测试时
         # 打出来的那两段 `Failed to detach context` 堆栈就是这件事的收据 ——
         # 它们是 span 在与创建时不同的上下文里 detach 才报的，栈底正指着
         # _run_from 里 `yield ModelUsage(...)` 那一行的 GeneratorExit。
@@ -142,7 +134,7 @@ async def consume(
         # 无效（报错不在那个窗口内发生），而装长期 filter 等于撕掉收据、
         # 隐患照旧。
         #
-        # 真修需要给框架的 run() / resume() 各包一层 contextlib.aclosing，
+        # 真修需要给框架的 run / resume 各包一层 contextlib.aclosing，
         # 那要发版并回归另一个项目，超出本里程碑范围。
         #
         # getattr 是为了兼容不提供 aclose 的迭代器。

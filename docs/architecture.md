@@ -195,7 +195,7 @@ pytest 压根没跑到后面的测试，我们不知道仓库其余部分是红�
 
 输出：一个 JSON 对象 —— 嫌疑文件、嫌疑行号、根本原因、修复思路、置信度。
 
-**为什么给它真实源码**：在 `snippet.py` 出现之前，诊断模型判断「根本原因是什么」
+**为什么给它真实源码**：在 `runtime/snippet.py` 出现之前，诊断模型判断「根本原因是什么」
 时看到的只有路径、行号和 traceback 的措辞 —— 那段代码它从未见过，`suspect_lines`
 更是纯粹编的。而编出来的行号会原样进入修复模型的开场白（「嫌疑行号：120-135」），
 把它的第一步引向一个具体而错误的位置。
@@ -264,7 +264,7 @@ pytest 压根没跑到后面的测试，我们不知道仓库其余部分是红�
 
 ### verify —— 系统里唯一有资格说「修好了」的地方
 
-`src/aifix/nodes/verify.py` + `src/aifix/verify.py`
+`src/aifix/nodes/verify.py` + `src/aifix/checks/verify.py`
 
 **零 LLM。** 判定逻辑是这样：
 
@@ -296,6 +296,11 @@ def compare(baseline, current, target):
 - **判定要用 commit 的返回值**：「分支上到底有没有多一个提交」只有 git 有资格回答。
   提前用 `git diff` 猜会漏掉新增文件（diff 看不见未跟踪文件），而新建一个源文件是
   完全合法的修复。
+
+**判 BETTER 之后、commit 之前还有一道退回闸**（见 [safety.md 第 11 节](safety.md)）：
+补丁里出现了目标测试的字面量、或变形复跑发现它只对那一个样本成立时，回滚重来并把
+理由喂回 fixer。判据都是确定性的，所以它们有资格参与判定 —— 而必要性反查与裁判模型
+只标注、不改判定。额度用尽仍然交付并照旧标注。
 
 ### report —— 报告是用户手里唯一的成果凭据
 
@@ -422,7 +427,7 @@ reproducer 拿到的是一段人话，要把整套测试脚手架逆推出来。
 
 CLI 与 issue 两条入口各存一份这个集合（`cli._FAILED_RUN_KINDS` 与
 `issue.handle._ENV_ABORTS`），是有意的：两条入口的判据**可以**分叉。代价是要靠
-`tests/test_abort_kind_parity.py` 把它们钉在一起。
+`tests/loop/test_abort_kind_parity.py` 把它们钉在一起。
 
 ---
 
@@ -452,10 +457,12 @@ src/aifix/
 │  ├─ graph.py          AifixState、abort_kind 常量、熔断判据、LangGraph 装配
 │  └─ nodes/            preflight · baseline · detect · fix · verify · report
 │
-├─ 判定与交付
+├─ 判据（checks/）
 │  ├─ verify.py         三态判定 —— 二十行，零 LLM
-│  ├─ delivery.py       worktree 隔离、精确提交、显式署名
-│  └─ signals.py        补丁合理性的静态信号（纯 AST，不改判定）
+│  ├─ signals.py        补丁合理性的静态信号（纯 AST）
+│  ├─ necessity.py      逐个 hunk 反向，撤掉之后目标还绿吗
+│  ├─ metamorphic.py    机械扰动复现测试再跑一遍，带对照组
+│  └─ violations.py     从事件流里数「越界尝试」
 │
 ├─ 模型侧
 │  ├─ agents/detector.py    提示词 + Diagnosis 模型 + 容错解析
@@ -480,13 +487,20 @@ src/aifix/
 │  ├─ adapters/maven_adapter.py
 │  └─ adapters/vitest_adapter.py
 │
-├─ 可观测
+├─ 可观测（observe/）
 │  ├─ trace.py         三层嵌套 span，事实与事件分开落盘
 │  ├─ traces.py        把结论推到孤儿分支，让它活过 CI runner
 │  ├─ trajectory.py    facts.jsonl → SQLite，跨 run 查询
 │  ├─ replay.py        渲染成可读的时间轴
-│  ├─ progress.py      跑到一半时终端上看得见什么
-│  └─ violations.py    从事件流里数「越界尝试」
+│  └─ progress.py      跑到一半时终端上看得见什么
+│
+├─ 基础设施（runtime/）
+│  ├─ delivery.py      worktree 隔离、精确提交、显式署名
+│  ├─ budget.py        整批预算的分配与结算
+│  ├─ money.py         价表货币 → 人民币，全项目唯一一处折算
+│  ├─ testenv.py       跑目标项目测试用的解释器
+│  ├─ snippet.py       给诊断模型的真实源码片段
+│  └─ pending.py       待答问题的两种持久化（文件 / 评论标记）
 │
 ├─ 评测
 │  ├─ eval/task.py       Task / TaskResult 数据模型 + jsonl 读写
@@ -501,8 +515,7 @@ src/aifix/
    ├─ issue/event.py    授权判定（零 LLM）
    ├─ issue/github.py   gh CLI 薄壳
    ├─ issue/handle.py   流水线编排
-   ├─ reproduce.py      缺陷报告 → 复现测试 → 红检
-   └─ pending.py        待答问题的两种持久化（文件 / 评论标记）
+   └─ reproduce.py      缺陷报告 → 复现测试 → 红检（不在图里，见模块 docstring）
 ```
 
 ### 几处「只能有一份」的实现

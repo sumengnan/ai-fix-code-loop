@@ -229,7 +229,7 @@ CREATE TABLE facts (run_id TEXT, failure TEXT, attempt INTEGER, key TEXT, value 
 1. **目录名是权威**。一个 run 目录 = 一个 run_id；facts 行里的 `run_id` 字段只是副本 ——
    目录里混进别的 run_id 时，按副本删会漏删，重灌就翻倍。
 2. **`facts.value` 一律是 JSON 文本**。真实产物里 value 有字符串、数字、布尔，也有列表
-   （三类信号的 value 就是列表）。一列里混着裸值和 JSON 之后没人能安全地解它。
+   （几类信号的 value 就是列表）。一列里混着裸值和 JSON 之后没人能安全地解它。
    代价是查询时必须按 JSON 解 —— `WHERE value='better'` 永远匹配不到，库里是 `"better"`
    （带引号）。
 3. **取不到的字段一律存 NULL，不填 0、不填空串。** 花了 token 却记 ¥0.00 这种假数字，比缺

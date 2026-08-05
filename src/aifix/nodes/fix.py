@@ -216,7 +216,7 @@ async def fix_node(state: AifixState, client: Any = None) -> dict[str, Any]:
             model_name=cfg.fixer.model,
             price_map=cfg.price_map,
         )
-        # 诊断指错文件时补上真路径。放在 sandbox.start() 之后：它要问 git
+        # 诊断指错文件时补上真路径。放在 sandbox.start 之后：它要问 git
         # 仓库里到底有哪些文件，而这是唯一有资格回答的人。
         messages = build_initial_messages(
             failure, diagnosis,

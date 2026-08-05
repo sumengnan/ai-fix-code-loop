@@ -21,7 +21,7 @@ from pathlib import PurePosixPath
 _PY = ".py"
 
 # 「构造一个空的可变容器」的三个内置名。右值是它们的调用时，与写字面量
-# 等价 —— 只认字面量会漏掉 `CACHE = dict()` 这种同义写法。
+# 等价 —— 只认字面量会漏掉 `CACHE = dict` 这种同义写法。
 _MUTABLE_BUILTINS = frozenset({"list", "dict", "set"})
 
 
@@ -75,7 +75,7 @@ def under_dirs(path: str, dirs: list[str]) -> bool:
     为什么必须按分段比、不能用裸 `startswith`：`"testdata/x.py".startswith(
     "test")` 是 True，但 `testdata` 不是 `test` 目录。
 
-    空字符串一律跳过：它的分段序列是 ()，是任何路径的前缀，会让守卫拦下
+    空字符串一律跳过：它的分段序列是 ，是任何路径的前缀，会让守卫拦下
     一切改动 —— 配置里多一个空项就把整个系统变成只读的。
 
     **大小写不敏感**，这是个取舍。macOS 与 Windows 的文件系统默认不区分大小
@@ -166,7 +166,7 @@ def _is_mutable_value(value: ast.expr | None) -> bool:
 
 def module_state(source: str) -> set[str]:
     """模块级的可变赋值名：右值是 list/dict/set 字面量或推导式，
-    或对 list()/dict()/set() 的调用。
+    或对 list/dict/set 的调用。
 
     模块级可变状态是「把纯函数改成有状态函数」最直接的指纹。
     """
@@ -184,13 +184,10 @@ def module_state(source: str) -> set[str]:
 
 
 # 「到处都是」的字面量阈值：绝对值不超过它的整数/浮点数不算特征。
-#
-# 0 / 1 / 2 / -1 在实现和测试里都密集出现，把它们算进来这一列会恒亮 ——
-# 一条恒亮的信号和没有这条信号是一个结果（同 files_outside_suspect 的教训）。
-#
-# **代价必须写明**：把实现改成 `if n == 0: return 1` 这种小数硬编码抓不到。
-# 这是精确率换召回率的取舍，方向是刻意的 —— 这一列的读者是人，误报一次的成本
-# （下次直接无视这一节）远高于漏报一次。
+# 0 / 1 / 2 / -1 在实现和测试里都密集出现，算进来这一列会恒亮，而恒亮的信号
+# 和没有这条信号是一个结果。
+# **代价**：`if n == 0: return 1` 这种小数硬编码抓不到。精确率换召回率是刻意
+# 的取舍 —— 读者是人，误报一次（下次直接无视这一节）比漏报一次贵。
 _TRIVIAL_MAGNITUDE = 2
 
 # 判断源码截断长度。整条判断原样放进报告会把那一节撑爆（模型写的复合条件能
@@ -329,21 +326,16 @@ def analyze(files: dict[str, tuple[str | None, str | None]],
         new_state |= (module_state(new) if new is not None else set()) - (
             module_state(old) if old is not None else set())
 
-    # suspect 为 None 时没有「之外」可言 —— 没有诊断就没有参照系，把整个
-    # 改动都标出来等于这一列恒亮，人会立刻学会无视它。
+    # suspect 为 None 时没有「之外」可言：没有参照系就不比，否则这一列恒亮。
     #
-    # suspect_anchored 为 False 是同一件事的另一种形状：Detector 有诊断，但
-    # 它是在**没有任何源码栈帧**的情况下按包名猜出来的路径。纯断言失败的
-    # traceback 里只有测试文件那一帧（被调函数正常返回了，栈上没有它），这是
-    # 最常见的一类失败。实测：模型猜 `src/cart.py`，真文件是
-    # `src/shopcart/cart.py`，两个补丁都修对了，两条都被标成「落在嫌疑文件
-    # 之外」。一条在正常修复上必然亮起的信号，和恒亮是一个结果。
+    # suspect_anchored 为 False 是同一件事的另一种形状 —— Detector 有诊断，但
+    # 那是在没有任何源码栈帧的情况下按包名猜的路径（纯断言失败的 traceback 里
+    # 只有测试文件那一帧，这是最常见的一类失败）。猜 `src/cart.py` 而真文件是
+    # `src/shopcart/cart.py` 时，一个修对了的补丁照样被标红。
     #
-    # `old != new` 不能省：files 的键来自 ApplyPatchTool 累加的 touched，它
-    # 只在 huge_diff 时整体清空。模型对 utils.py 打了补丁又打了反向补丁
-    # （git diff 归零，撞上 empty_diff 守卫），重试里改对了 calc.py —— 此时
-    # utils.py 与 HEAD 逐字相同却仍在 touched 里。只看键会把它报成「改动落
-    # 在嫌疑文件之外」，人按图索骥去看一个空 diff，这一列就废了。
+    # `old != new` 不能省：touched 只在 huge_diff 时整体清空，所以「打了补丁又
+    # 打了反向补丁」的文件会与 HEAD 逐字相同却仍留在里面 —— 只看键会让人按图
+    # 索骥去看一个空 diff。
     outside = ([p for p, (old, new) in files.items()
                 if old != new and not same_file(p, suspect)]
                if suspect and suspect_anchored else [])

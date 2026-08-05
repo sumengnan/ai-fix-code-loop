@@ -19,9 +19,9 @@ MakeTestId = Callable[[str, str, str | None], str]
 #
 # 不去掉的后果是**静默的定位失效**：`_PYTEST_FRAME` 会把
 # `#x1B[1m#x1B[31mcalc.py#x1B[0m:5: NameError` 的路径截成
-# `#x1B[1m#x1B[31mcalc.py#x1B[0m`，`_resolve` 拿它做 is_file() 落空，于是整条
+# `#x1B[1m#x1B[31mcalc.py#x1B[0m`，`_resolve` 拿它做 is_file 落空，于是整条
 # traceback **一帧都定位不到**，Detector 收到「未能从栈帧定位到 repo 内的源码」
-# 然后盲猜路径。实测（2026-08-03）同一份失败的两份报告：有色 locate_source 返回
+# 然后盲猜路径。实测同一份失败的两份报告：有色 locate_source 返回
 # `[]`，无色返回 `[('calc.py', 5, 'traceback'), ...]`。
 #
 # 什么时候会有色：pytest 认 `FORCE_COLOR`，与是不是 tty 无关。GitHub Actions
