@@ -97,13 +97,19 @@ jobs:
           # 端点与 key 也各自可配，不设就沿用同一套——两条路由**本来就可以是
           # 两个供应商**（诊断挑便宜的、修复挑强的，未必出自同一家）。不设时
           # 行为与之前完全一致，加这两条不引入任何默认变化。
-          #   gh secret set AIFIX_DETECTOR_BASE_URL   # 只在换供应商时才需要
-          #   gh secret set AIFIX_DETECTOR_API_KEY
+          #   gh variable set AIFIX_DETECTOR_BASE_URL  # 只在换供应商时才需要
+          #   gh secret   set AIFIX_DETECTOR_API_KEY
+          #
+          # **端点优先取 variable**：它不是机密，而 secret 会被日志遮成 ***，
+          # 配错了端点你从日志里根本看不出来（与模型名、价格表同一条理由）。
+          # secret 那两层为兼容既有配置保留，不动它也照常工作。
+          # aifix-connectivity.yml 的回退链与这里**逐字一致** —— 不一致的话，
+          # 那个检查探的就不是这里实际走的路，会说「通」而真正干活的那条是断的。
           AIFIX_FIXER__MODEL: ${{ vars.AIFIX_FIXER__MODEL || 'deepseek-v4-flash' }}
-          AIFIX_FIXER__BASE_URL: ${{ secrets.AIFIX_FIXER_BASE_URL || secrets.AIFIX_BASE_URL }}
+          AIFIX_FIXER__BASE_URL: ${{ vars.AIFIX_FIXER_BASE_URL || secrets.AIFIX_FIXER_BASE_URL || vars.AIFIX_BASE_URL || secrets.AIFIX_BASE_URL }}
           AIFIX_FIXER__API_KEY: ${{ secrets.AIFIX_FIXER_API_KEY || secrets.AIFIX_API_KEY }}
           AIFIX_DETECTOR__MODEL: ${{ vars.AIFIX_DETECTOR__MODEL || 'deepseek-v4-flash' }}
-          AIFIX_DETECTOR__BASE_URL: ${{ secrets.AIFIX_DETECTOR_BASE_URL || secrets.AIFIX_BASE_URL }}
+          AIFIX_DETECTOR__BASE_URL: ${{ vars.AIFIX_DETECTOR_BASE_URL || secrets.AIFIX_DETECTOR_BASE_URL || vars.AIFIX_BASE_URL || secrets.AIFIX_BASE_URL }}
           AIFIX_DETECTOR__API_KEY: ${{ secrets.AIFIX_DETECTOR_API_KEY || secrets.AIFIX_API_KEY }}
 
           # 价格表用 variable 不用 secret：它不是机密，而放进 secret 会被日志

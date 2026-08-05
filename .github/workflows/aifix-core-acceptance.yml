@@ -65,11 +65,11 @@ jobs:
       - name: aifix run
         env:
           AIFIX_FIXER__MODEL: ${{ inputs.model }}
-          AIFIX_FIXER__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
-          AIFIX_FIXER__API_KEY: ${{ secrets.AIFIX_API_KEY }}
+          AIFIX_FIXER__BASE_URL: ${{ vars.AIFIX_FIXER_BASE_URL || secrets.AIFIX_FIXER_BASE_URL || vars.AIFIX_BASE_URL || secrets.AIFIX_BASE_URL }}
+          AIFIX_FIXER__API_KEY: ${{ secrets.AIFIX_FIXER_API_KEY || secrets.AIFIX_API_KEY }}
           AIFIX_DETECTOR__MODEL: ${{ inputs.model }}
-          AIFIX_DETECTOR__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
-          AIFIX_DETECTOR__API_KEY: ${{ secrets.AIFIX_API_KEY }}
+          AIFIX_DETECTOR__BASE_URL: ${{ vars.AIFIX_DETECTOR_BASE_URL || secrets.AIFIX_DETECTOR_BASE_URL || vars.AIFIX_BASE_URL || secrets.AIFIX_BASE_URL }}
+          AIFIX_DETECTOR__API_KEY: ${{ secrets.AIFIX_DETECTOR_API_KEY || secrets.AIFIX_API_KEY }}
           AIFIX_PRICE_MAP: ${{ vars.AIFIX_PRICE_MAP }}
           # 目标仓库没有自己的 venv，用 aifix 的 —— 它的测试只 import 标准库
           AIFIX_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
@@ -146,11 +146,11 @@ jobs:
       - name: mine → eval → eval-report
         env:
           AIFIX_FIXER__MODEL: ${{ inputs.model }}
-          AIFIX_FIXER__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
-          AIFIX_FIXER__API_KEY: ${{ secrets.AIFIX_API_KEY }}
+          AIFIX_FIXER__BASE_URL: ${{ vars.AIFIX_FIXER_BASE_URL || secrets.AIFIX_FIXER_BASE_URL || vars.AIFIX_BASE_URL || secrets.AIFIX_BASE_URL }}
+          AIFIX_FIXER__API_KEY: ${{ secrets.AIFIX_FIXER_API_KEY || secrets.AIFIX_API_KEY }}
           AIFIX_DETECTOR__MODEL: ${{ inputs.model }}
-          AIFIX_DETECTOR__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
-          AIFIX_DETECTOR__API_KEY: ${{ secrets.AIFIX_API_KEY }}
+          AIFIX_DETECTOR__BASE_URL: ${{ vars.AIFIX_DETECTOR_BASE_URL || secrets.AIFIX_DETECTOR_BASE_URL || vars.AIFIX_BASE_URL || secrets.AIFIX_BASE_URL }}
+          AIFIX_DETECTOR__API_KEY: ${{ secrets.AIFIX_DETECTOR_API_KEY || secrets.AIFIX_API_KEY }}
           AIFIX_PRICE_MAP: ${{ vars.AIFIX_PRICE_MAP }}
           AIFIX_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: |
@@ -215,11 +215,11 @@ jobs:
         continue-on-error: true      # 修不好是**预期**结果，不是这个 job 的失败
         env:
           AIFIX_FIXER__MODEL: ${{ inputs.model }}
-          AIFIX_FIXER__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
-          AIFIX_FIXER__API_KEY: ${{ secrets.AIFIX_API_KEY }}
+          AIFIX_FIXER__BASE_URL: ${{ vars.AIFIX_FIXER_BASE_URL || secrets.AIFIX_FIXER_BASE_URL || vars.AIFIX_BASE_URL || secrets.AIFIX_BASE_URL }}
+          AIFIX_FIXER__API_KEY: ${{ secrets.AIFIX_FIXER_API_KEY || secrets.AIFIX_API_KEY }}
           AIFIX_DETECTOR__MODEL: ${{ inputs.model }}
-          AIFIX_DETECTOR__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
-          AIFIX_DETECTOR__API_KEY: ${{ secrets.AIFIX_API_KEY }}
+          AIFIX_DETECTOR__BASE_URL: ${{ vars.AIFIX_DETECTOR_BASE_URL || secrets.AIFIX_DETECTOR_BASE_URL || vars.AIFIX_BASE_URL || secrets.AIFIX_BASE_URL }}
+          AIFIX_DETECTOR__API_KEY: ${{ secrets.AIFIX_DETECTOR_API_KEY || secrets.AIFIX_API_KEY }}
           AIFIX_PRICE_MAP: ${{ vars.AIFIX_PRICE_MAP }}
           AIFIX_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
           AIFIX_BUDGET_CNY: "7.2"
@@ -325,11 +325,11 @@ jobs:
       - name: aifix run
         env:
           AIFIX_FIXER__MODEL: ${{ inputs.model }}
-          AIFIX_FIXER__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
-          AIFIX_FIXER__API_KEY: ${{ secrets.AIFIX_API_KEY }}
+          AIFIX_FIXER__BASE_URL: ${{ vars.AIFIX_FIXER_BASE_URL || secrets.AIFIX_FIXER_BASE_URL || vars.AIFIX_BASE_URL || secrets.AIFIX_BASE_URL }}
+          AIFIX_FIXER__API_KEY: ${{ secrets.AIFIX_FIXER_API_KEY || secrets.AIFIX_API_KEY }}
           AIFIX_DETECTOR__MODEL: ${{ inputs.model }}
-          AIFIX_DETECTOR__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
-          AIFIX_DETECTOR__API_KEY: ${{ secrets.AIFIX_API_KEY }}
+          AIFIX_DETECTOR__BASE_URL: ${{ vars.AIFIX_DETECTOR_BASE_URL || secrets.AIFIX_DETECTOR_BASE_URL || vars.AIFIX_BASE_URL || secrets.AIFIX_BASE_URL }}
+          AIFIX_DETECTOR__API_KEY: ${{ secrets.AIFIX_DETECTOR_API_KEY || secrets.AIFIX_API_KEY }}
           AIFIX_PRICE_MAP: ${{ vars.AIFIX_PRICE_MAP }}
           AIFIX_BUDGET_CNY: "7.2"
         run: uv run aifix run /tmp/mvn --budget 7.2

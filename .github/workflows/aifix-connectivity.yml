@@ -4,6 +4,10 @@
 # runner 的出口 IP 是 Azure 的动态大段，端点若有 IP 白名单，整条 Actions 路线
 # 不成立，而这个事实在写完全部胶水之后才发现的代价是几天。
 #
+# **两条路由各探一次**：fixer 与 detector 本来就可以是两个供应商（诊断挑便宜的、
+# 修复挑强的）。只探共用那份的话，路由一旦被单独覆盖，这个检查会说「通」而真正
+# 干活的那条可能是断的 —— 一个会撒谎的诊断比没有诊断更糟。
+#
 # 手动触发：gh workflow run aifix-connectivity.yml
 name: aifix-connectivity
 
@@ -24,43 +28,75 @@ jobs:
 
       - name: 端点可达性 + 凭据
         env:
-          BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
-          KEY: ${{ secrets.AIFIX_API_KEY }}
-          # 与主 workflow 同一个旋钮，探的是真正干活的那条路由
-          MODEL: ${{ vars.AIFIX_FIXER__MODEL || 'deepseek-v4-flash' }}
+          # 回退链与主 workflow **逐字一致**，否则探的就不是它实际走的那条路。
+          # 端点优先取 variable：它不是机密，而 secret 在日志里会被遮成 ***，
+          # 配错了端点你从日志里根本看不出来。secret 那两层为兼容既有配置保留。
+          FIXER_URL: ${{ vars.AIFIX_FIXER_BASE_URL || secrets.AIFIX_FIXER_BASE_URL || vars.AIFIX_BASE_URL || secrets.AIFIX_BASE_URL }}
+          FIXER_KEY: ${{ secrets.AIFIX_FIXER_API_KEY || secrets.AIFIX_API_KEY }}
+          FIXER_MODEL: ${{ vars.AIFIX_FIXER__MODEL || 'deepseek-v4-flash' }}
+          DETECTOR_URL: ${{ vars.AIFIX_DETECTOR_BASE_URL || secrets.AIFIX_DETECTOR_BASE_URL || vars.AIFIX_BASE_URL || secrets.AIFIX_BASE_URL }}
+          DETECTOR_KEY: ${{ secrets.AIFIX_DETECTOR_API_KEY || secrets.AIFIX_API_KEY }}
+          DETECTOR_MODEL: ${{ vars.AIFIX_DETECTOR__MODEL || 'deepseek-v4-flash' }}
         run: |
           set -u
-          if [ -z "${BASE_URL:-}" ] || [ -z "${KEY:-}" ]; then
-            echo "::error::secrets.AIFIX_BASE_URL 或 secrets.AIFIX_API_KEY 没配"
+          failed=0
+
+          probe() {
+            role="$1"; url="$2"; key="$3"; model="$4"
+            echo "── $role：$model @ ${url:-（未配置）}"
+            if [ -z "${url:-}" ] || [ -z "${key:-}" ]; then
+              echo "::error::$role 的端点或 key 没配"
+              failed=1; return
+            fi
+
+            # 一、GET /models —— 最便宜的一次握手。部分端点不实现它，所以
+            #     404 / 405 不当失败，留给下面那次真调用定论。
+            code=$(curl -sS --max-time 30 -o /tmp/models.json -w '%{http_code}' \
+                   "$url/models" -H "Authorization: Bearer $key" || echo 000)
+            echo "  GET /models → HTTP $code"
+            head -c 400 /tmp/models.json 2>/dev/null || true; echo
+
+            # 二、真发一次最小的 chat completion。这才是 aifix 实际走的那条路：
+            #     /models 通不代表 chat 通（鉴权范围、模型名、配额都可能只在这里炸）。
+            code=$(curl -sS --max-time 60 -o /tmp/chat.json -w '%{http_code}' \
+                   "$url/chat/completions" \
+                   -H "Authorization: Bearer $key" \
+                   -H "Content-Type: application/json" \
+                   -d "{\"model\":\"$model\",
+                        \"max_tokens\":1,
+                        \"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
+                   || echo 000)
+            echo "  POST /chat/completions → HTTP $code"
+            head -c 600 /tmp/chat.json 2>/dev/null || true; echo
+
+            case "$code" in
+              2*) echo "  ✅ 可达、凭据有效、模型名正确" ;;
+              000) echo "::error::$role 连不上（超时或 DNS）。最可能是端点有 IP 白名单，"\
+                        "而 runner 的出口 IP 是动态的 —— 见上面那行出口 IP"; failed=1 ;;
+              401|403) echo "::error::$role 凭据被拒（HTTP $code）。key 错了，或这个 key 没有该模型的权限"; failed=1 ;;
+              404) echo "::error::$role 路径或模型名不对（HTTP $code）。端点要以 /v1 结尾，"\
+                        "模型名要是这个端点认得的"; failed=1 ;;
+              *) echo "::error::$role HTTP $code，看上面的响应体"; failed=1 ;;
+            esac
+
+            # 思考模式是不是默认开着 —— 只提示，不当失败。开着的端点会把输出预算
+            # 整个烧在 reasoning_content 里、正文一个字不吐，而那是**静默**的：
+            # 调用成功、有 usage、只是拿不到答案。aifix 默认关掉它（见 config.py
+            # 的 reproducer_thinking / fixer_thinking），这里出声是为了让人知道
+            # 那两个默认值在这个端点上是承重的。
+            if grep -q 'reasoning_tokens' /tmp/chat.json 2>/dev/null; then
+              echo "  ⚠️  这个端点默认开着思考模式（响应里有 reasoning_tokens）——"
+              echo "      aifix 默认关掉它，别去打开 AIFIX_FIXER_THINKING"
+            fi
+          }
+
+          probe "fixer" "$FIXER_URL" "$FIXER_KEY" "$FIXER_MODEL"
+          echo
+          probe "detector" "$DETECTOR_URL" "$DETECTOR_KEY" "$DETECTOR_MODEL"
+
+          echo
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::至少一条路由不通，见上面"
             exit 1
           fi
-
-          # 一、GET /models —— 最便宜的一次握手。部分端点不实现它，所以
-          #     404 / 405 不当失败，留给下面那次真调用定论。
-          code=$(curl -sS --max-time 30 -o /tmp/models.json -w '%{http_code}' \
-                 "$BASE_URL/models" -H "Authorization: Bearer $KEY" || echo 000)
-          echo "GET /models → HTTP $code"
-          head -c 400 /tmp/models.json 2>/dev/null || true; echo
-
-          # 二、真发一次最小的 chat completion。这才是 aifix 实际走的那条路：
-          #     /models 通不代表 chat 通（鉴权范围、模型名、配额都可能只在这里炸）。
-          code=$(curl -sS --max-time 60 -o /tmp/chat.json -w '%{http_code}' \
-                 "$BASE_URL/chat/completions" \
-                 -H "Authorization: Bearer $KEY" \
-                 -H "Content-Type: application/json" \
-                 -d "{\"model\":\"${MODEL:-deepseek-v4-flash}\",
-                      \"max_tokens\":1,
-                      \"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
-                 || echo 000)
-          echo "POST /chat/completions → HTTP $code"
-          head -c 600 /tmp/chat.json 2>/dev/null || true; echo
-
-          case "$code" in
-            2*) echo "✅ 端点可达、凭据有效、模型名正确 —— Actions 这条路走得通" ;;
-            000) echo "::error::连不上（超时或 DNS）。最可能是端点有 IP 白名单，"\
-                      "而 runner 的出口 IP 是动态的 —— 见上面那行出口 IP"; exit 1 ;;
-            401|403) echo "::error::凭据被拒（HTTP $code）。key 错了，或这个 key 没有该模型的权限"; exit 1 ;;
-            404) echo "::error::路径或模型名不对（HTTP $code）。BASE_URL 要以 /v1 结尾，"\
-                      "vars.AIFIX_FIXER__MODEL 要是端点认得的名字"; exit 1 ;;
-            *) echo "::error::HTTP $code，看上面的响应体"; exit 1 ;;
-          esac
+          echo "✅ 两条路由都走得通 —— Actions 这条路成立"

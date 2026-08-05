@@ -43,8 +43,8 @@ jobs:
       - name: 逐个任务跑 aifix reproduce
         env:
           AIFIX_FIXER__MODEL: ${{ inputs.model }}
-          AIFIX_FIXER__BASE_URL: ${{ secrets.AIFIX_BASE_URL }}
-          AIFIX_FIXER__API_KEY: ${{ secrets.AIFIX_API_KEY }}
+          AIFIX_FIXER__BASE_URL: ${{ vars.AIFIX_FIXER_BASE_URL || secrets.AIFIX_FIXER_BASE_URL || vars.AIFIX_BASE_URL || secrets.AIFIX_BASE_URL }}
+          AIFIX_FIXER__API_KEY: ${{ secrets.AIFIX_FIXER_API_KEY || secrets.AIFIX_API_KEY }}
           AIFIX_PRICE_MAP: ${{ vars.AIFIX_PRICE_MAP }}
           AIFIX_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
           COMMITS: ${{ inputs.commits }}
