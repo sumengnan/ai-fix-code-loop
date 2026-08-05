@@ -19,6 +19,7 @@ from typing import Any
 
 from ..adapters.base import ProjectAdapter
 from ..agents.reproducer import Reproduction
+from ..agents.reproducer import Harness
 from ..agents.twin_prober import SYSTEM_PROMPT, build_prompt, parse_probe
 from ..config import AifixConfig
 from ..nodes.baseline import run_scoped
@@ -84,9 +85,13 @@ async def probe_twin(worktree: Path, adapter: ProjectAdapter, twin: Twin,
         # 吐成厂商私有的文本格式而不是 tool_calls 字段，整轮以「找不到 JSON」
         # 收场，而模型的分析其实完全正确。
         # 与 `reproduce.reproduce` 同一条理由，容错交给围栏剥离。
+        # 带上 id 样例（与 reproduce 那一步同一个 Harness）：只说「格式与本项目
+        # 其余用例一致」时，模型写出的 target_test_id 与落盘的用例对不上，
+        # 红检报「没有跑出任何结果」—— 整轮作废，而它其实已经把测试写对了。
+        harnesses = [Harness(name=adapter.name, test_dirs=adapter.test_dirs(),
+                             example_id=adapter.example_test_id())]
         outcome = await consume(
-            loop.run(build_prompt(twin, list(adapter.test_dirs()))),
-            money=cfg.money)
+            loop.run(build_prompt(twin, harnesses)), money=cfg.money)
     finally:
         await sandbox.close()
 

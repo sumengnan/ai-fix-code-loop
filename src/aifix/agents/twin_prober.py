@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from typing import Callable
 
 from pydantic import BaseModel, ValidationError
 
-from .reproducer import Reproduction, _incoherence, _last_object
+from .reproducer import (Harness, Reproduction, _harness_section, _incoherence,
+                         _last_object)
 
 SYSTEM_PROMPT = """你是一个把「两处代码可能不一致」变成一条可执行测试的工程师。
 
@@ -65,13 +67,17 @@ class TwinProbe(BaseModel):
     not_comparable_why: str = ""
 
 
-def build_prompt(twin, test_dirs: list[str]) -> str:
-    """把候选与**配对依据**一起给出去。
+def build_prompt(twin, harnesses: Sequence[Harness]) -> str:
+    """把候选、**配对依据**、以及测试体系的写法一起给出去。
 
     依据不能省：模型在这一层唯一能做的判断就是「这两个是不是真的一回事」，
     而不告诉它为什么被配到一起，它只能凭函数名猜。
+
+    id 样例同样不能省（复用 reproducer 的 `_harness_section`）。实测只说
+    「格式与本项目其余用例一致」时，模型写出的 target_test_id 与落盘的用例
+    对不上，红检报「没有跑出任何结果」—— 77k tokens 白烧，而它其实已经把
+    测试写对了。
     """
-    dirs = "、".join(test_dirs) if test_dirs else "（未知）"
     return (
         f"这两个函数可能在做同一件事：\n\n"
         f"  A  {twin.a.path}:{twin.a.lineno}  {twin.a.name}\n"
@@ -79,8 +85,7 @@ def build_prompt(twin, test_dirs: list[str]) -> str:
         f"配对依据：\n"
         f"  共同词根：{'、'.join(sorted(twin.shared_roots))}\n"
         f"  都在这些字面量上分支：{'、'.join(sorted(twin.shared_literals))}\n\n"
-        f"本项目的测试目录：{dirs}\n"
-        f"新测试文件必须写在其中之一的下面。\n")
+        + _harness_section(harnesses))
 
 
 def parse_probe(raw: str,

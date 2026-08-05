@@ -32,13 +32,41 @@ _TWIN = Twin(
 
 # ---------------------------------------------------------------- 提示词
 
+from aifix.agents.reproducer import Harness
+
+_H = [Harness(name="pytest", test_dirs=["tests"],
+              example_id="tests/test_calc.py::test_add")]
+
+
 def test_the_prompt_carries_both_sites():
     """模型要能直接跳过去读那两段代码。"""
     from aifix.agents.twin_prober import build_prompt
 
-    p = build_prompt(_TWIN, ["tests"])
+    p = build_prompt(_TWIN, _H)
     for s in (_TWIN.a, _TWIN.b):
         assert s.path in p and s.name in p
+
+
+def test_the_prompt_gives_a_concrete_id_example():
+    """**实测逼出来的**：只说「格式与本项目其余用例一致」，模型写出的
+    target_test_id 与落盘的用例对不上，红检报「没有跑出任何结果」——
+    77k tokens 白烧，而它其实已经把测试写对了。
+
+    reproducer 那边早就靠 `example_id` 解决了同一个问题，这里漏了。
+    """
+    from aifix.agents.twin_prober import build_prompt
+
+    p = build_prompt(_TWIN, _H)
+    assert "tests/test_calc.py::test_add" in p
+
+
+def test_no_example_means_no_placeholder():
+    """样例给空串时整段不出现，不印一个「（未知）」占位符 —— 那对模型
+    没有帮助，只占上下文。"""
+    from aifix.agents.twin_prober import build_prompt
+
+    p = build_prompt(_TWIN, [Harness(name="pytest", test_dirs=["tests"])])
+    assert "未知" not in p or "id 长这样" not in p
 
 
 def test_the_prompt_says_why_these_two_were_paired():
@@ -46,7 +74,7 @@ def test_the_prompt_says_why_these_two_were_paired():
     它在这一层唯一能做的判断（第一层是启发式的，会配错）。"""
     from aifix.agents.twin_prober import build_prompt
 
-    p = build_prompt(_TWIN, ["tests"])
+    p = build_prompt(_TWIN, _H)
     assert "grade" in p and "multiple" in p
 
 
