@@ -98,7 +98,8 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
                    dry_run: bool = False,
                    progress: Any = None,
                    answer: str | None = None,
-                   invariant: str | None = None) -> AifixState:
+                   invariant: str | None = None,
+                   repro_untouching: bool = False) -> AifixState:
     """按状态图的语义顺序执行一次完整 run。
 
     M1 直接手工驱动节点，节点顺序与路由和 build_graph 的图一致——把
@@ -121,6 +122,9 @@ async def run_once(repo: Path, config: AifixConfig, run_id: str,
     # 复现那一步对「这条测试钉的是什么规则」的说法。只进 fixer 的开场白与
     # 报告，**不进判定** —— 它是模型写的一句话。
     state["invariant"] = invariant
+    # 复现阶段那道闸退回重写之后**仍然**没过（只退一次，见
+    # issue/handle.py）。带进来只为在报告里出声 —— 判定不看它。
+    state["repro_untouching"] = repro_untouching
     # 侧信道，与 _trace 同一套约定：fix_node 要在**循环内部**逐步出声，
     # 从这里一路传参数下去等于每加一处出声点就改一遍调用链
     state["_progress"] = prog
@@ -662,7 +666,7 @@ def _cmd_reproduce(args, client: Any = None) -> None:
     产品路径永远传 None，由 reproduce 自己按配置建。
     """
     from .adapters.pytest_adapter import resolve_test_python
-    from .nodes.baseline import detect_adapter
+    from .nodes.baseline import detect_adapter, detect_adapters
     from .reproduce import red_check, reproduce, write_reproduction
 
     repo = Path(args.repo).resolve()
@@ -681,7 +685,11 @@ def _cmd_reproduce(args, client: Any = None) -> None:
         raise SystemExit(1)
 
     print(f"# aifix reproduce\n\n- 适配器：{adapter.name}\n- 标题：{title.strip()}\n")
-    out = asyncio.run(reproduce(repo, adapter, config, title.strip(),
+    # 复现这一步拿**全部**适配器：前后端同仓时由模型自己选该写哪一套。
+    # 单适配器仓库的提示词与行为不变（见 _harness_section）。
+    adapters = detect_adapters(repo, python=resolve_test_python(
+        repo, config.test_python)) or [adapter]
+    out = asyncio.run(reproduce(repo, adapters, config, title.strip(),
                                 body.strip(), client=client))
     _print_cost(out.tokens, out.cost_cny, config)
 
@@ -703,7 +711,9 @@ def _cmd_reproduce(args, client: Any = None) -> None:
 
         print(f"\n## 复现测试 · `{r.test_file}`\n\n"
               f"```\n{r.test_code}```\n\n目标用例：`{r.target_test_id}`\n")
-        ok, reason = asyncio.run(red_check(repo, adapter, r.target_test_id))
+        # 红检必须用**选中的**那一个，不是 detect 出来的第一个。
+        ok, reason = asyncio.run(
+            red_check(repo, out.adapter or adapter, r.target_test_id))
         if ok:
             print("**红检通过** —— 这条测试在当前代码上失败，且失败在用例级。")
         else:

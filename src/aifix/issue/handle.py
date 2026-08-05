@@ -99,6 +99,32 @@ def _repro_failure_comment(out: Any) -> str:
     return f"{head}\n\n{out.reason}"
 
 
+# 重写那一轮喂回去的理由。**不带理由的重跑没有意义** —— 模型看到的输入与
+# 上一轮逐字相同，只会原样再写一遍，白花一轮的钱。
+_UNTOUCHING_HINT = (
+    "上一轮写出的复现测试**没有 import 本项目的任何模块**，被退回了。\n"
+    "一条不执行被测代码的测试（比如把源文件当文本读一遍再 grep 一个字符串）"
+    "在修复前后都只反映文件内容，测不到任何行为 —— 它红了又绿了，"
+    "却区分不出「实现了」和「明确没实现」。\n"
+    "请把被测的东西 import 进来，对它的**行为**下断言。\n"
+    "如果这个缺陷落在你能写的这套测试体系覆盖不到的地方（比如缺陷在前端而"
+    "你只能写后端测试），如实填 `can_reproduce: false` 并说明，不要硬凑。")
+
+
+def _looks_untouching(repo: Path, adapters: Any, r: Any) -> bool:
+    """这条复现测试是不是根本没碰本项目的代码。
+
+    判据与它的失效方向见 `agents.reproducer.touches_project`：三态，`None`
+    是「没查」（非 Python），**必须**与 `False` 分开 —— 拿「没查」去退回一条
+    可能完全正确的测试，是这道闸最不能有的失效方式。
+    """
+    from ..agents.reproducer import project_module_roots, touches_project
+
+    test_dirs = [d for a in adapters for d in a.test_dirs()]
+    roots = project_module_roots(repo, test_dirs)
+    return touches_project(r.test_file or "", r.test_code or "", roots) is False
+
+
 def _with_supplement(body: str, supplement: str) -> str:
     """把评论里的补充说明接在 issue 正文后面，一起交给复现器。
 
@@ -205,7 +231,7 @@ async def handle(
     不到它们 —— 一条闲聊不该付整条依赖树的导入代价。
     """
     from ..cli import run_once
-    from ..nodes.baseline import detect_adapter
+    from ..nodes.baseline import detect_adapter, detect_adapters
     from ..reproduce import red_check, reproduce, write_reproduction
     from ..observe.traces import publish_traces
     from ..adapters.pytest_adapter import resolve_test_python
@@ -232,12 +258,26 @@ async def handle(
     if ev.comment_id:
         gh.react(ev.comment_id)
 
-    adapter = detect_adapter(
-        repo, python=resolve_test_python(repo, config.test_python),
-        configured=config.adapters)
+    test_python = resolve_test_python(repo, config.test_python)
+    adapter = detect_adapter(repo, python=test_python,
+                             configured=config.adapters)
     if adapter is None:
         gh.comment(ev.number, "没有适配器认领这个项目（支持 pytest 与 Maven）。")
         return HandleResult(0, "no_repro")
+
+    # 复现这一步拿**全部**适配器，让模型自己选该写哪一套体系的测试。
+    #
+    # 改造前这里只给一个（`AIFIX_ADAPTERS` 里的第一个），于是前后端同仓的工程
+    # 里，报另一侧缺陷的 issue 拿到的是错的那一套 —— 而用 pytest 写一条关于
+    # `.tsx` 的测试，唯一的写法就是把它当文本读。ai-learning-helper#95 产出的
+    # 那条 grep 式假测试就是这么来的：不是模型偷懒，是这个约束下的唯一解。
+    #
+    # 顺序仍按 `AIFIX_ADAPTERS`（`detect_adapter` 的排序理由不变），它现在决定
+    # 的是**平局时**听谁的，而不再是唯一的裁决者。
+    # `adapter` 排在最前、其余按探测顺序跟上，按名字去重 —— 它是
+    # `AIFIX_ADAPTERS` 选出来的那一个，平局时该听它的。
+    adapters = [adapter] + [a for a in detect_adapters(repo, python=test_python)
+                            if a.name != adapter.name]
 
     t0 = time.monotonic()
     run_id = uuid.uuid4().hex[:8]
@@ -345,7 +385,7 @@ async def handle(
         # 从这里开始计时，一直算到 run_once 之前 —— 红检跑的是真测试，耗时
         # 不是可以忽略的量，只掐模型调用那一段等于漏掉一大半。
         _say(f"── 读 issue #{ev.number}，让模型写一条复现测试……")
-        out = await reproduce_fn(repo, adapter, config, ev.title,
+        out = await reproduce_fn(repo, adapters, config, ev.title,
                                  _with_supplement(ev.body, supplement))
 
     # **复现这一步也要落 trace**，哪怕后面根本走不到 run_once。
@@ -363,9 +403,46 @@ async def handle(
         gh.comment(ev.number, _repro_failure_comment(out))
         return HandleResult(0, "no_repro")
 
+    # ------------------------------------------- 这条复现测试碰过本项目吗
+    #
+    # ai-learning-helper#95：一条对 `EmptyHint.tsx` 做字符串 grep 的 pytest
+    # 测试，红检时真的红、打上补丁真的绿 —— 与一条正经测试在红绿信号上完全
+    # 不可区分，而把补丁整个撤销、只留一句「还没加」的注释，它照样绿。
+    #
+    # **只退一次。** 第二次仍不过就放行：一条只用 subprocess 跑 CLI 的合法测试
+    # 重写多少次都过不了这道闸，无限退回会把一次本来能成的 run 拖死在一个启发式
+    # 判据上。同一个形状见 report.py 的 `metamorphic_diverged`（退回重写，退不动
+    # 就交付并在报告里出声）。
+    untouching = _looks_untouching(repo, adapters, r)
+    # `answered is None` = 这条复现测试是**这一轮刚写出来的**。
+    #
+    # 答复那一路的复现测试取自上一轮的隐藏标记，那一步零模型调用（见上面
+    # `out = ReproduceOutcome(r)` 那行）。在这里退回重写会凭空多花一次调用，
+    # 而且未必写出同一条测试 —— 人回答的是针对**上一条**测试的问题，换一条就
+    # 答非所问。那条路开头的注释记的正是这件事。
+    #
+    # 判据照算不误：报告那一节仍要出声，只是不重跑。
+    if untouching and answered is None:
+        _say("── 这条复现测试没有 import 本项目任何模块，让它重写一遍")
+        out = await reproduce_fn(
+            repo, adapters, config, ev.title,
+            _with_supplement(ev.body, _UNTOUCHING_HINT))
+        _trace_reproduce(repo, run_id, out, answered)
+        r2 = out.reproduction
+        if r2 is None or not r2.can_reproduce:
+            gh.comment(ev.number, _repro_failure_comment(out))
+            return HandleResult(0, "no_repro")
+        # 第二条无论过不过闸都用它：这是那个「只退一次」的额度。
+        r = r2
+        # 重写之后**仍然**不过时，交付照走，但报告里必须出声 —— 放行而不说，
+        # 与「这条复现很干净」在读者眼里一模一样。
+        untouching = _looks_untouching(repo, adapters, r)
+
     written = write_reproduction(repo, r)
     _say(f"── 复现测试已写下：{r.test_file} —— 跑一遍确认它真的红了")
-    ok, why = await red_check_fn(repo, adapter, r.target_test_id,
+    # 红检用**模型选中的**那一个，不是探测顺序里的第一个。两处用不同的适配器
+    # 就是一条缝：校验按 A 放行了路径，红检却拿 B 去跑，跑个空还报成「没红」。
+    ok, why = await red_check_fn(repo, out.adapter or adapter, r.target_test_id,
                                  timeout=config.scoped_test_timeout_seconds)
     if not ok:
         # 收走它。留着的后果不是「多个文件」：这是一条**红着的**测试，下一次
@@ -419,6 +496,7 @@ async def handle(
     state = await run_fn(repo, run_config, run_id=run_id,
                          only_test=r.target_test_id, answer=answer_text,
                          invariant=getattr(r, "invariant", "") or None,
+                         repro_untouching=untouching,
                          progress=TerminalProgress())
 
     # ------------------------------------------------- 停在「等人回答」上

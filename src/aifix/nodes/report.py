@@ -192,6 +192,30 @@ def _invariant_section(invariant: str | None) -> list[str]:
             "补丁是按这条规则改的，还是只让那一条用例通过。"]
 
 
+def _untouching_section(untouching: bool) -> list[str]:
+    """复现测试没 import 本项目任何模块，而且退回重写一次之后仍然如此。
+
+    这一节比其余信号都硬：它说的不是「补丁可能有问题」，而是**判定所依据的
+    那条测试本身可能测不到行为**。一条把源文件当文本读一遍再 grep 的测试，
+    在修复前后都只反映文件内容 —— 它红了又绿了，却区分不出「实现了」和
+    「明确没实现」（ai-learning-helper#95 的形状）。
+
+    仍然交付而不是判失败，是因为判据是启发式的：只用 subprocess 跑 CLI 的
+    合法测试同样不 import 本项目。误报的成本由「只退一次」封顶，代价就是这
+    一节必须**足够刺眼**，否则放行等于静默。
+    """
+    if not untouching:
+        return []
+    return ["", "## ⚠ 这条复现测试可能没有真的执行被测代码", "",
+            "它没有 import 本项目的任何模块，退回重写一次之后仍然如此。",
+            "",
+            "判定只看测试结果，而这条测试可能只反映文件内容、测不到行为 —— "
+            "**合并之前请亲自确认它真的钉住了那个缺陷**：把补丁撤掉，"
+            "它应该变红。",
+            "",
+            "（判据是启发式的：只用 subprocess 跑 CLI 的合法测试也会命中这一条。）"]
+
+
 def count_fixed(results: list[dict[str, Any]]) -> int:
     """判定为「已修复」的用例数。
 
@@ -292,6 +316,7 @@ def render_report(state: dict[str, Any]) -> str:
         lines.append(
             f"| `{r['test_id']}` | {_VERDICT_CN.get(r['verdict'], r['verdict'])} "
             f"| {r['attempts']} | {r['abort_reason'] or '—'} |")
+    lines += _untouching_section(bool(state.get("repro_untouching")))
     lines += _invariant_section(state.get("invariant"))
     lines += _signal_section(state.get("signals") or [])
 

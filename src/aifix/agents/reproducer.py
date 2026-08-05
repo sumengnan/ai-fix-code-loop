@@ -4,8 +4,10 @@ import ast
 import builtins
 import json
 import re
-from pathlib import PurePosixPath
-from typing import Callable
+from collections.abc import Sequence
+from pathlib import Path, PurePosixPath
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from pydantic import BaseModel, ValidationError
 
@@ -84,9 +86,42 @@ class Reproduction(BaseModel):
     invariant: str = ""
 
 
-def build_prompt(issue_title: str, issue_body: str, test_dirs: list[str],
-                 max_steps: int | None = None,
-                 example_id: str = "") -> str:
+@dataclass(frozen=True)
+class Harness:
+    """一套测试体系在提示词里的样子：叫什么、测试放哪、用例 id 长什么样。
+
+    刻意不是 `ProjectAdapter` 本身：这一层只需要三个字符串，而 `agents/` 依赖
+    `adapters/` 会把一个纯提示词模块拴到整条适配层上。转换在 `reproduce.py` 做。
+    """
+    name: str
+    test_dirs: list[str]
+    example_id: str = ""
+
+
+def owning_harness(test_file: str, adapters: Sequence[Any]) -> Any | None:
+    """哪一套体系认领这条测试路径。没人认领返回 None。
+
+    **反推而不是让模型自报。** 让模型多填一个 `harness` 字段就有了第二个真相源
+    —— 它可以和 `test_file` 打架（自报 vitest，路径却写在 `tests/` 下），而那条
+    缝里落下的东西，校验和守卫会各说各话。`is_test_path` 本来就是适配器回答
+    「这是不是我的测试文件」的谓词，用它反推，两者不可能不一致。
+
+    平局按**给定顺序**取第一个：`tests/a.test.ts` 两套都认领。顺序来自
+    `AIFIX_ADAPTERS`，那是人对这个仓库的判断 —— 平局时听人的，而不是听一个
+    「哪个更具体」的启发式（`detect_adapter` 里同一条理由）。
+
+    没人认领是**有意义的结论**，不是错误：那说明模型写下的路径不是任何一套体系
+    的测试文件，调用方据此走 `_path_is_safe` 那条打回通路。
+    """
+    for a in adapters:
+        if a.is_test_path(test_file):
+            return a
+    return None
+
+
+def build_prompt(issue_title: str, issue_body: str,
+                 harnesses: Sequence[Harness],
+                 max_steps: int | None = None) -> str:
     """测试目录与 id 样例都由**适配器**给，不让模型猜。
 
     目录猜错的后果不是「路径不好看」：落在产品目录下的文件，「不许改测试文件」
@@ -98,21 +133,53 @@ def build_prompt(issue_title: str, issue_body: str, test_dirs: list[str],
     追溯到 test_file」那道闸打回，整轮作废。
 
     样例给空串时整段不出现，不印「（未知）」：占位符对模型没有帮助，只占上下文。
+
+    ## 多套体系时把选择权交给模型
+
+    前后端同仓的工程有两套测试。改造前这里只拿得到**一套**（`detect_adapter`
+    取 `AIFIX_ADAPTERS` 的第一个），于是报 `.tsx` 缺陷的 issue 也被要求写 pytest
+    —— 而用 pytest 写一条关于 `.tsx` 的测试，唯一的写法就是把它当文本读。
+    ai-learning-helper#95 产出的那条 grep 式假测试不是模型偷懒，是这个约束下的
+    唯一解。
+
+    **判据必须写出来**（「按缺陷落在哪一侧的代码」）。不写的话模型会照着第一个
+    或者目录最多的那个选，那就是改造前的行为，这一层等于白做。
     """
-    dirs = "、".join(test_dirs) if test_dirs else "（未知）"
     # 不告诉它预算，它无从判断「该收手了」，会翻满步数一个字不作答。
     budget = (f"你最多还能调用 {max_steps} 次工具，用完必须作答。\n\n"
               if max_steps else "")
-    sample = (f"本项目的用例 id 长这样：{example_id}\n"
-              f"target_test_id **必须**用这个格式，而且要能对上你写下的那个文件。\n\n"
-              if example_id else "")
+    return (f"{_harness_section(harnesses)}"
+            f"{budget}"
+            f"缺陷报告标题：{issue_title}\n\n"
+            f"<issue>\n{issue_body}\n</issue>\n")
+
+
+def _harness_section(harnesses: Sequence[Harness]) -> str:
+    """一套与多套分开渲染 —— 只有一套时提一句「选」都是多余的噪声。"""
+    if len(harnesses) == 1:
+        h = harnesses[0]
+        dirs = "、".join(h.test_dirs) if h.test_dirs else "（未知）"
+        sample = (f"本项目的用例 id 长这样：{h.example_id}\n"
+                  f"target_test_id **必须**用这个格式，"
+                  f"而且要能对上你写下的那个文件。\n\n"
+                  if h.example_id else "")
+        return (f"本项目的测试目录：{dirs}\n"
+                f"新测试文件必须写在其中之一的下面。\n\n{sample}")
+
+    lines = []
+    for h in harnesses:
+        dirs = "、".join(h.test_dirs) if h.test_dirs else "（未知）"
+        sample = f"，用例 id 形如 {h.example_id}" if h.example_id else ""
+        lines.append(f"- **{h.name}**：测试写在 {dirs} 下{sample}")
     return (
-        f"本项目的测试目录：{dirs}\n"
-        f"新测试文件必须写在其中之一的下面。\n\n"
-        f"{sample}"
-        f"{budget}"
-        f"缺陷报告标题：{issue_title}\n\n"
-        f"<issue>\n{issue_body}\n</issue>\n")
+        f"本项目有 {len(harnesses)} 套测试体系，**你要选其中一套**：\n\n"
+        + "\n".join(lines) + "\n\n"
+        "选哪一套，由**缺陷落在哪一侧的代码**决定 —— 不是由哪一套测试更多、"
+        "目录更显眼决定。改 `.tsx` 的缺陷就写前端那一套的测试。\n\n"
+        "target_test_id 要用你选中那一套的格式，并能对上你写下的那个文件。\n\n"
+        "**哪一套都写不出时，如实填 `can_reproduce: false` 并说明原因。** "
+        "硬用一套写不了的体系去凑，只能写出「把源文件当文本读一遍」这类"
+        "测不到行为的假测试 —— 那比说「不知道」糟得多。\n\n")
 
 
 def _path_is_safe(p: str, is_test: Callable[[str], bool]) -> bool:
@@ -189,6 +256,108 @@ def _missing_names(code: str) -> list[str]:
                 and n.id not in bound and n.id not in out):
             out.append(n.id)
     return out
+
+
+# 顶层目录里那些**不可能**是 import 目标的名字。
+#
+# 多收一个无害、少收一个有害：这份集合只用来做「这个 import 根名是不是本项目
+# 的」，多收的名字最多制造一次漏报（见 `touches_project` 的失效方向），而漏掉
+# 一个真的顶层包会让判据对着一条合法测试误报 —— 那一侧贵得多。
+_NON_MODULE_DIRS = frozenset({
+    "node_modules", "__pycache__", "dist", "build", "docs",
+    # 测试目录不算本项目模块：一条只 import 别的测试文件的复现测试，没有接触
+    # 任何产品代码。调用方给了 test_dirs 就以它为准，这两个是兜底默认。
+    "tests", "test",
+})
+
+
+def project_module_roots(repo: Path,
+                         test_dirs: Sequence[str] = ()) -> set[str]:
+    """这个仓库里可以被 import 的**顶层名**。
+
+    判据是「仓库根下有没有同名的目录或 `.py` 文件」，`src/` 布局再看一层。
+
+    **不要求 `__init__.py`。** PEP 420 命名空间包是真实存在的形态 ——
+    ai-learning-helper 的 `agents/`、`mcp/`、`src/` 一个都没有 `__init__.py`，
+    要求它会让这套判据在那个仓库上恒不响，而那正是它要防的仓库。
+
+    宁可多收也不少收，理由见 `_NON_MODULE_DIRS` 上面那段。
+    """
+    excluded = set(_NON_MODULE_DIRS)
+    # test_dirs 形如 ["tests"]、["src/test/java"] —— 取首段，那才是顶层名。
+    excluded.update(PurePosixPath(d).parts[0] for d in test_dirs
+                    if PurePosixPath(d).parts)
+
+    def _scan(base: Path) -> set[str]:
+        if not base.is_dir():
+            return set()
+        out: set[str] = set()
+        for entry in base.iterdir():
+            name = entry.name
+            # `.venv` / `.git` 不是合法的 import 名，混进来只会制造漏报。
+            if name.startswith(".") or name in excluded:
+                continue
+            if entry.is_dir():
+                out.add(name)
+            elif entry.suffix == ".py":
+                out.add(entry.stem)
+        return out
+
+    return _scan(repo) | _scan(repo / "src")
+
+
+def touches_project(test_file: str, test_code: str,
+                    roots: set[str]) -> bool | None:
+    """这条复现测试有没有接触本项目的代码。`None` = 没查。
+
+    起因是 ai-learning-helper#95：模型写出一条对 `EmptyHint.tsx` 做字符串 grep
+    的 pytest 测试。它红检时真的红、打上补丁真的绿，与一条正经测试在红绿信号上
+    **完全不可区分** —— 而把补丁整个撤销、只留一句「还没加」的注释，它照样绿。
+
+    判据是 import：一条真的在测试行为的用例，总得先把被测的东西拿进来。#95 那条
+    的 import 只有 `pathlib` 和 `pytest`。
+
+    **三态而不是布尔。** `None`（非 Python、语法错）必须与 `False` 分得开：
+    前者是「这一类没话说」，后者是「查了，它确实没碰本项目」。合成一个布尔之后
+    两者在调用方眼里一模一样，而 `False` 会触发退回重写 —— 拿「没查」去退回一条
+    可能完全正确的测试，是这道闸最不能有的失效方式。
+
+    ## 失效方向：只漏报，不误报
+
+    与 `_missing_names` 同一条取舍。仓库里恰好有个顶层目录叫 `json` 时，
+    `import json` 会被算成本项目模块，一条坏测试就此逃过 —— 那与今天的行为一样，
+    没有变糟。反过来误伤一条合法测试（比如只用 `subprocess` 跑 CLI 的那种）要
+    贵得多，代价由调用侧「只退回一次」封顶。
+    """
+    # 判据是 `ast`，所以只对 Python 成立 —— 与 `signals.py` 的
+    # `distinctive_literals` 同一条既有约定。选了 vitest / maven 之后这道闸不响，
+    # 那是**没查**，不是「查过没问题」。
+    if not test_file.endswith(".py"):
+        return None
+    # 一个顶层模块都认不出来（最小仓库、只有测试目录的夹具）时**不表态**。
+    # 这时 roots 是空集，任何 import 都匹配不上，于是每一条测试都会被判成
+    # 「没接触本项目」—— 那不是查出了问题，是判据没有参照系。返回 False 会让
+    # 这道闸在这类仓库上恒亮，而恒亮的闸等于没有闸，还白花一轮重写的钱。
+    if not roots:
+        return None
+    try:
+        tree = ast.parse(test_code)
+    except SyntaxError:
+        # 语法错是收集阶段那道闸的活。在这里报「没接触本项目」是句假话，
+        # 而且会把人指向完全错误的方向。
+        return None
+
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom):
+            # `from . import x` 没有根名可比，但它按定义就是在引用本包内的东西。
+            if n.level:
+                return True
+            if n.module and n.module.split(".")[0] in roots:
+                return True
+        elif isinstance(n, ast.Import):
+            if any(a.name.split(".")[0] in roots for a in n.names):
+                return True
+    return False
 
 
 def _incoherence(r: Reproduction, is_test: Callable[[str], bool]) -> str:

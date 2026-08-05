@@ -251,7 +251,7 @@ def test_write_reproduction_creates_missing_parent_dirs(tmp_path, ):
 
 async def test_reproduce_returns_the_parsed_reproduction(buggy_repo):
     cfg = AifixConfig()
-    out = await reproduce(buggy_repo, PytestAdapter(), cfg,
+    out = await reproduce(buggy_repo, [PytestAdapter()], cfg,
                           "add 算错了", "add(2,3) 返回 -1，期望 5",
                           client=_Scripted([_text(_OK_JSON)]))
     assert out.reproduction is not None
@@ -263,7 +263,7 @@ async def test_reproduce_reports_missing_info_as_the_reason(buggy_repo):
     """信息不足是一条**结论**，不是错误 —— 它要原样回帖给人看。"""
     raw = json.dumps({"can_reproduce": False,
                       "missing_info": ["没说触发的输入", "没说期望输出"]})
-    out = await reproduce(buggy_repo, PytestAdapter(), AifixConfig(),
+    out = await reproduce(buggy_repo, [PytestAdapter()], AifixConfig(),
                           "有 bug", "反正就是不对",
                           client=_Scripted([_text(raw)]))
     assert out.reproduction is not None
@@ -273,7 +273,7 @@ async def test_reproduce_reports_missing_info_as_the_reason(buggy_repo):
 
 async def test_reproduce_degrades_to_none_on_unparseable_output(buggy_repo):
     """解析不了不抛异常：上层据此走「写不出复现」通路，回帖说明。"""
-    out = await reproduce(buggy_repo, PytestAdapter(), AifixConfig(),
+    out = await reproduce(buggy_repo, [PytestAdapter()], AifixConfig(),
                           "t", "b", client=_Scripted([_text("我觉得吧……")]))
     assert out.reproduction is None
     assert out.reason
@@ -284,14 +284,14 @@ async def test_reproduce_degrades_to_none_on_unparseable_output(buggy_repo):
 async def test_giving_up_is_labelled_as_missing_info(buggy_repo):
     """信息不足 —— 下一步是**人**去补充 issue。"""
     raw = json.dumps({"can_reproduce": False, "missing_info": ["没说触发的输入"]})
-    out = await reproduce(buggy_repo, PytestAdapter(), AifixConfig(),
+    out = await reproduce(buggy_repo, [PytestAdapter()], AifixConfig(),
                           "t", "b", client=_Scripted([_text(raw)]))
     assert out.kind == "missing_info"
 
 
 async def test_unparseable_output_is_labelled_as_such(buggy_repo):
     """输出不合格式 —— 下一步是**运维**去看 trace / 换模型，不是补 issue。"""
-    out = await reproduce(buggy_repo, PytestAdapter(), AifixConfig(),
+    out = await reproduce(buggy_repo, [PytestAdapter()], AifixConfig(),
                           "t", "b", client=_Scripted([_text("我觉得吧……")]))
     assert out.kind == "unparseable"
 
@@ -308,7 +308,7 @@ async def test_running_out_of_steps_is_not_confused_with_missing_info(buggy_repo
     cfg = AifixConfig(reproducer_max_steps=1)
     # 永远只调工具、从不作答的模型
     looping = _Scripted([_tool_call("read_file", '{"path": "calc.py"}')])
-    out = await reproduce(buggy_repo, PytestAdapter(), cfg,
+    out = await reproduce(buggy_repo, [PytestAdapter()], cfg,
                           "t", "b", client=looping)
     assert out.kind == "no_convergence", out.reason
     assert out.reproduction is None
@@ -324,7 +324,7 @@ async def test_the_events_are_carried_out_for_tracing(buggy_repo):
     走不到那儿）—— 于是「模型这 25 步在读什么」这个唯一有诊断价值的问题，
     artifact 里一个字都没有。失败时恰恰最需要它。
     """
-    out = await reproduce(buggy_repo, PytestAdapter(), AifixConfig(),
+    out = await reproduce(buggy_repo, [PytestAdapter()], AifixConfig(),
                           "t", "b", client=_Scripted([_text("随便")]))
     assert out.events, "事件流是空的，出问题时无从复盘"
 
@@ -341,7 +341,7 @@ async def test_a_token_overrun_is_also_no_convergence(buggy_repo):
     # 触发不到（这一点是写这条测试时才发现的）。
     cfg = AifixConfig(reproducer_max_tokens=1)
     out = await reproduce(
-        buggy_repo, PytestAdapter(), cfg, "t", "b",
+        buggy_repo, [PytestAdapter()], cfg, "t", "b",
         client=_Scripted([_tool_call("read_file", '{"path": "calc.py"}')]))
     assert out.kind == "no_convergence", out.reason
     assert "解析" not in out.reason
@@ -363,7 +363,7 @@ async def test_reproduce_cannot_eat_the_whole_budget(buggy_repo, monkeypatch):
 
     monkeypatch.setattr("aifix.reproduce.consume", _spy)
     cfg = AifixConfig(budget_cny=0.50, reproducer_budget_share=0.4)
-    await reproduce(buggy_repo, PytestAdapter(), cfg, "t", "b",
+    await reproduce(buggy_repo, [PytestAdapter()], cfg, "t", "b",
                     client=_Scripted([_text("x")]))
     assert seen["cap"] == pytest.approx(0.20)
 
@@ -382,7 +382,7 @@ async def test_no_cost_gate_when_no_budget_is_set(buggy_repo, monkeypatch):
         return await real(stream, cost_cap=cost_cap, **k)
 
     monkeypatch.setattr("aifix.reproduce.consume", _spy)
-    await reproduce(buggy_repo, PytestAdapter(), AifixConfig(budget_cny=0.0),
+    await reproduce(buggy_repo, [PytestAdapter()], AifixConfig(budget_cny=0.0),
                     "t", "b", client=_Scripted([_text("x")]))
     assert seen["cap"] is None
 
@@ -397,7 +397,7 @@ async def test_an_empty_answer_is_told_apart_from_a_malformed_one(buggy_repo):
     归成「输出不合约定的 JSON 格式」是错的：那句话让人去看它吐了什么，
     而它什么都没吐。下一步该是压推理长度或换模型。
     """
-    out = await reproduce(buggy_repo, PytestAdapter(), AifixConfig(),
+    out = await reproduce(buggy_repo, [PytestAdapter()], AifixConfig(),
                           "t", "b", client=_Scripted([_text("")]))
     assert out.kind == "empty_answer", out.reason
     assert "推理" in out.reason
@@ -405,7 +405,7 @@ async def test_an_empty_answer_is_told_apart_from_a_malformed_one(buggy_repo):
 
 async def test_a_malformed_answer_is_still_called_that(buggy_repo):
     """反向对照：真吐了东西但解析不出时，措辞不能被上一条吃掉。"""
-    out = await reproduce(buggy_repo, PytestAdapter(), AifixConfig(),
+    out = await reproduce(buggy_repo, [PytestAdapter()], AifixConfig(),
                           "t", "b", client=_Scripted([_text("我觉得吧……")]))
     assert out.kind == "unparseable"
     assert "推理" not in out.reason
@@ -502,7 +502,7 @@ async def test_hitting_our_own_cost_gate_says_so(buggy_repo):
     # 反复强调的那件事，写测试时先自己踩了一遍。
     cfg = AifixConfig(fixer={"model": "m"}, price_map={"m": [1.0, 1.0]},
                       budget_cny=0.001, reproducer_budget_share=0.4)
-    out = await reproduce(buggy_repo, PytestAdapter(), cfg, "t", "b",
+    out = await reproduce(buggy_repo, [PytestAdapter()], cfg, "t", "b",
                           client=_Scripted([_text("x"), _text("y")]))
     assert out.kind == "cost_capped", out.reason
     # 消息里要给出**可操作**的旋钮。
@@ -524,7 +524,7 @@ async def test_the_reproduce_step_carries_its_event_timestamps(buggy_repo):
 
     防御性的 getattr 正好掩盖了这个缺口，所以那一处也一并改成了直接访问。
     """
-    out = await reproduce(buggy_repo, PytestAdapter(), AifixConfig(),
+    out = await reproduce(buggy_repo, [PytestAdapter()], AifixConfig(),
                           "add 算错了", "add(2,3) 返回 -1",
                           client=_Scripted([_text(_OK_JSON)]))
     assert out.event_times, "复现这一步一个时间戳都没有"

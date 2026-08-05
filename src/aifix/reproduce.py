@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,8 @@ from harness.tools.base import ToolRegistry
 from harness.tools.builtins.fs_tools import ListFilesTool
 
 from .adapters.base import Failure, ProjectAdapter
-from .agents.reproducer import (SYSTEM_PROMPT, Reproduction, build_prompt,
+from .agents.reproducer import (SYSTEM_PROMPT, Harness, Reproduction,
+                                build_prompt, owning_harness,
                                 parse_reproduction_ex)
 from .agents.runner import consume
 from .config import AifixConfig
@@ -83,6 +85,14 @@ class ReproduceOutcome:
     reproduction: Reproduction | None
     reason: str = ""
     kind: str = KIND_OK
+    # 模型选中的那一套测试体系（由 test_file 反推，见 owning_harness）。
+    #
+    # **下游必须用它**，不能各自再 detect 一次：红检、写盘、判定要和校验放行
+    # 时用的是同一个适配器实例，否则就有一条缝 —— 校验说这是测试、守卫说不是，
+    # fixer 于是能改掉自己的判卷标准（`_path_is_safe` 里同一条不变式）。
+    #
+    # 只在成功产出复现时有值；失败的每一条通路都是 None。
+    adapter: "ProjectAdapter | None" = None
     tokens: int = 0
     # 人民币（折算发生在 agents.runner.consume，见 money.py）
     cost_cny: float = 0.0
@@ -340,7 +350,7 @@ async def red_check(worktree: Path, adapter: ProjectAdapter,
     return True, ""
 
 
-async def reproduce(worktree: Path, adapter: ProjectAdapter,
+async def reproduce(worktree: Path, adapters: Sequence[ProjectAdapter],
                     config: AifixConfig, issue_title: str, issue_body: str,
                     client: Any = None) -> ReproduceOutcome:
     """带只读工具的一次 AgentLoop，产出一条复现测试的源码。
@@ -362,7 +372,7 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
     try:
         loop = AgentLoop(
             client=client or OpenAICompatibleClient(_route(config)),
-            registry=build_reproduce_registry(sandbox, adapter),
+            registry=build_reproduce_registry(sandbox, adapters[0]),
             context=ContextManager(SYSTEM_PROMPT),
             # 刻意小于 fixer_max_steps：reproducer 只有读工具，读够了就该
             # 作答，多给的步数不会变成更好的测试，只会变成更长的翻阅。
@@ -376,9 +386,11 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
             model_name=config.fixer.model,
             price_map=config.price_map,
         )
-        prompt = build_prompt(issue_title, issue_body, adapter.test_dirs(),
-                              max_steps=config.reproducer_max_steps,
-                              example_id=adapter.example_test_id())
+        harnesses = [Harness(name=a.name, test_dirs=a.test_dirs(),
+                             example_id=a.example_test_id())
+                     for a in adapters]
+        prompt = build_prompt(issue_title, issue_body, harnesses,
+                              max_steps=config.reproducer_max_steps)
         # 成本闸：复现最多用掉整份预算的 reproducer_budget_share。
         # 不设的话它能把修复那一步饿死（见 config 里那段实测）。
         # budget_cny 为 0 时传 None —— 那是「不设闸」，与「额度已扣光」不同，
@@ -482,7 +494,11 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
             None, f"模型没有吐出任何正文。\n  {hint}",
             kind=KIND_EMPTY_ANSWER, **common)
 
-    r, why = parse_reproduction_ex(outcome.text, adapter.is_test_path)
+    # 谓词是「**有没有**哪一套体系认领这条路径」。用单个适配器的 is_test_path
+    # 会让另一侧的合法测试路径被判成「不是测试文件」——那正是改造前把前端缺陷
+    # 逼成 grep 式假测试的那条约束。
+    r, why = parse_reproduction_ex(
+        outcome.text, lambda p: owning_harness(p, adapters) is not None)
     if r is None:
         return ReproduceOutcome(
             None,
@@ -494,4 +510,7 @@ async def reproduce(worktree: Path, adapter: ProjectAdapter,
             r, "issue 里的信息不足以写出复现测试，还缺：\n"
             + "\n".join(f"  - {m}" for m in r.missing_info),
             kind=KIND_MISSING_INFO, **common)
-    return ReproduceOutcome(r, **common)
+    # 选中的适配器由 test_file 反推 —— 校验刚放行它，所以这里必然有主。
+    # 下游（红检、写盘、判定）全都要用这一个，而不是 adapters[0]。
+    return ReproduceOutcome(r, adapter=owning_harness(r.test_file, adapters),
+                            **common)

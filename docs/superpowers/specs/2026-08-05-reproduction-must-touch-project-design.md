@@ -134,12 +134,22 @@ reproducer 收到的 prompt 是「本项目的测试目录：tests/，新测试�
 ### 5.1 改动
 
 - `detect_adapters()` 的**全部**结果进 prompt，每个给 `name` / `test_dirs()` /
-  `example_test_id()`
-- `Reproduction` 加字段 `harness: str`（适配器名）
-- `_incoherence` 改用**选中适配器**的 `is_test_path` 校验 `test_file`，并校验
-  `harness` 落在候选集内
-- `issue/handle.py:235` 的 `detect_adapter()` 单数调用改为传全部；reproduce 把选中的
-  适配器返回给下游 `red_check` / `write_reproduction`
+  `example_test_id()`。`build_prompt` 收 `Sequence[Harness]` 而不是裸目录列表
+- 选中的那一套由 `test_file` **反推**（`owning_harness`），平局按给定顺序取第一个
+- `parse_reproduction` 的 `is_test` 谓词放宽成「**有没有**哪一套认领这条路径」
+- `ReproduceOutcome` 加字段 `adapter`，把选中的那一个交给下游 `red_check` /
+  `write_reproduction`
+- `issue/handle.py` 与 `cli.py` 的 `detect_adapter()` 单数调用改为传全部
+
+### 5.1a 与初稿的偏离：不加 `harness` 字段
+
+初稿要让模型自报一个 `harness: str`。实现时改成从 `test_file` 反推，理由是
+**自报会造出第二个真相源**：模型可以自报 vitest、却把路径写在 `tests/` 下，
+而那条缝里落下的东西，校验和守卫会各说各话 —— 正是 `_path_is_safe` 那段注释
+反复警告的形状。
+
+`is_test_path` 本来就是适配器回答「这是不是我的测试文件」的谓词。用它反推，
+两者不可能不一致，`Reproduction` 的 schema 也不用动。
 
 ### 5.2 向后兼容
 
@@ -150,10 +160,10 @@ prompt 和行为不应有任何变化。
 
 | 情况 | 处置 |
 |---|---|
-| `harness` 缺失 + 单适配器 | 用那一个 |
-| `harness` 缺失 + 多适配器 | 走现有「缺字段」通路（`_incoherence`） |
-| `harness` 不在候选集 | `_incoherence` 打回，理由指名候选集 |
-| 重写后 import 检查仍不过 | 放行 + 报告出声（§4） |
+| 单适配器 | 提示词与行为与改造前逐字相同 |
+| `test_file` 没有任何一套认领 | `_path_is_safe` 打回（既有通路，不新增） |
+| `test_file` 两套都认领 | 按给定顺序取第一个（`AIFIX_ADAPTERS` 的顺序） |
+| 重写后 import 检查仍不过 | 放行（§4） |
 
 `_path_is_safe` 必须继续与写入守卫共用同一个谓词。选中适配器之后这个不变式要重新
 成立一次：校验用的 `is_test_path` 和随后守卫用的，必须来自**同一个**适配器实例，
