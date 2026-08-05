@@ -162,8 +162,18 @@ def detect_adapters(repo: Path,
     改成「全都要」而不是「第一个」，是为了前后端同仓的工程：只取第一个的话，
     另一套测试的用例在 baseline 里**根本不存在**，于是 verify 的三态比较永远
     不会因为它们变红而判 WORSE。那不是「通过」，是没测 —— 而报告里看不出差别。
+
+    **`repo` 必须传给构造器。** VitestAdapter 拿它探 `package.json` 在哪个
+    子目录；不给的话 `pkg_dir` 是空串，于是前后端同仓的工程里 `test_dirs()`
+    报的是 `src` 而不是 `web/src`，`_bin()` 也指向根目录那个不存在的
+    `node_modules`。
+
+    这个缺陷此前是**休眠**的：这里的产物只用来回答「有没有适配器认领」，真正
+    跑测试的实例走 `adapters_from_state` → `adapter_for(repo=...)`，那条路一直
+    是对的。reproducer 开始自己选测试体系之后它被激活 —— 选中的那个实例会一路
+    用到提示词和红检，而错的目录会让模型把前端测试写进后端的 `src/`。
     """
-    return [cls(python=python) for cls in ADAPTERS.values()
+    return [cls(python=python, repo=Path(repo)) for cls in ADAPTERS.values()
             if cls.detect(Path(repo))]
 
 
